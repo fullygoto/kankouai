@@ -7,11 +7,9 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 from dotenv import load_dotenv
 load_dotenv()
 
-# LINE Bot v3 SDKインポート（ここを修正！）
-from linebot.v3.messaging import MessagingApi, Configuration, ApiClient
-from linebot.v3.webhook import WebhookHandler
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from linebot.v3.messaging.models import TextMessage
+# LINE Bot関連
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 import openai
 import zipfile
@@ -21,10 +19,10 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 ENTRIES_FILE = "entries.json"
@@ -308,19 +306,8 @@ def admin_add_entry():
 def admin_backup():
     mem_zip = io.BytesIO()
     with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # メインDB
         if os.path.exists(ENTRIES_FILE):
             zf.write(ENTRIES_FILE)
-        # 類義語辞書
-        if os.path.exists(SYNONYM_FILE):
-            zf.write(SYNONYM_FILE)
-        # logs/配下も全て追加
-        for root, dirs, files in os.walk("logs"):
-            for fname in files:
-                fpath = os.path.join(root, fname)
-                arcname = os.path.relpath(fpath, ".")
-                zf.write(fpath, arcname)
-        # data/配下も全て追加
         for root, dirs, files in os.walk(DATA_DIR):
             for fname in files:
                 fpath = os.path.join(root, fname)
@@ -579,23 +566,15 @@ def callback():
         return "NG"
     return "OK"
 
-# --- ここから v3用: LINE応答処理 ---
-def reply_to_line_event(reply_token, answer):
-    with ApiClient(configuration) as api_client:
-        messaging_api = MessagingApi(api_client)
-        messaging_api.reply_message(
-            reply_token,
-            [
-                TextMessage(text=answer)
-            ]
-        )
-
-@handler.add(MessageEvent, message=TextMessageContent)
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
     answer, hit_db = smart_search_answer_with_hitflag(user_message)
     save_qa_log(user_message, answer, source="line", hit_db=hit_db)
-    reply_to_line_event(event.reply_token, answer)
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=answer)
+    )
 
 # === トップ ===
 @app.route("/")
@@ -603,5 +582,4 @@ def home():
     return "<a href='/admin/entry'>[観光データ管理]</a>"
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(port=10000, debug=True)
