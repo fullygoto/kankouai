@@ -21,9 +21,9 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
@@ -579,15 +579,23 @@ def callback():
         return "NG"
     return "OK"
 
-@handler.add(MessageEvent, message=TextMessage)
+# --- ここから v3用: LINE応答処理 ---
+def reply_to_line_event(reply_token, answer):
+    with ApiClient(configuration) as api_client:
+        messaging_api = MessagingApi(api_client)
+        messaging_api.reply_message(
+            reply_token,
+            [
+                TextMessage(text=answer)
+            ]
+        )
+
+@handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_message = event.message.text
     answer, hit_db = smart_search_answer_with_hitflag(user_message)
     save_qa_log(user_message, answer, source="line", hit_db=hit_db)
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=answer)
-    )
+    reply_to_line_event(event.reply_token, answer)
 
 # === トップ ===
 @app.route("/")
