@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>観光データ管理</title>
+    <style>
+        body {font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #f6faf9;}
+        .container {background:#fff; padding:30px 32px; margin:40px auto; max-width:820px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d;}
+        label {display:inline-block; min-width:70px; font-weight: 500;}
+        input[type=text], textarea {margin-bottom:12px; width:98%; padding: 6px 10px; font-size:1em; border-radius:7px; border: 1px solid #b0c4d7;}
+        textarea {resize:vertical;}
+        .entry-card {background:#f7faf7; margin:12px 0; border-radius:11px; padding:16px 16px 11px 16px; box-shadow: 0 2px 6px #e0e6ed30;}
+        .entry-actions {margin-top:10px;}
+        .card-label {color:#2a8ed8; font-size:0.98em;}
+        .nav {margin-bottom:20px;}
+        .nav a {margin-right:16px; font-size:1em; color:#2a8ed8; text-decoration:none; font-weight:500;}
+        .nav a:hover {text-decoration: underline;}
+        .add-btn {padding: 7px 24px; font-size:1em; border-radius:7px; background: #2a8ed8; color:#fff; border:none; margin-top: 8px;}
+        .del-btn {background: #fff; color: #d76; border: 1px solid #eaa; border-radius: 7px; padding:7px 18px;}
+        .del-btn:hover {background:#fee;}
+        .info {font-size:0.97em; color:#196; margin-top:12px;}
+        hr {border: 1px solid #e7eef5;}
+        @media (max-width: 700px) {
+            .container {padding:10px;}
+            input[type=text], textarea {width:96%;}
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="nav" style="float:right;">
+        <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
+        <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+        <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+        <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
+        <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
+        <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+        <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
+            <input type="file" name="backup_zip" accept=".zip" style="display:inline;">
+            <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
+        </form>
+    </div>
+    <h1 style="margin-bottom:20px;">観光データ {{ '編集' if edit_id else '登録' }}</h1>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul>
+        {% for message in messages %}
+          <li style="color:green; font-weight:500;">{{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    <form method="post" id="entry_form" style="margin-bottom:28px;">
+        {% if edit_id %}
+        <input type="hidden" name="edit_id" value="{{ edit_id }}">
+        {% endif %}
+        <label>タイトル</label><br>
+        <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+        <label>説明</label><br>
+        <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+        <label>住所</label><br>
+        <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+        <label>地図URL</label><br>
+        <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+        <label>タグ <span style="font-size:0.92em; color:#888;">（カンマ区切りで複数OK）</span></label><br>
+        <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}" required><br>
+        <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
+        {% set area_opts = ["五島市", "新上五島町", "宇久町", "小値賀町"] %}
+        <div style="margin-bottom:10px;">
+        {% for area in area_opts %}
+          <label style="min-width:unset;">
+          <input type="checkbox" name="areas" value="{{ area }}"
+          {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
+          {{ area }}
+          </label>
+        {% endfor %}
+        </div>
+        <button class="add-btn" type="submit">{{ '編集' if edit_id else '登録' }}</button>
+    </form>
+    <hr>
+    <h2 style="margin-bottom:12px;">登録済みデータ</h2>
+    {% for e in entries %}
+        <div class="entry-card">
+            <span class="card-label">タイトル：</span>{{ e.title }}<br>
+            <span class="card-label">説明：</span>{{ e.desc }}<br>
+            <span class="card-label">住所：</span>{{ e.address }}<br>
+            <span class="card-label">地図：</span>
+            {% if e.map %}<a href="{{ e.map }}" target="_blank">MAP</a>{% endif %}<br>
+            <span class="card-label">タグ：</span>{% if e.tags %}{{ ', '.join(e.tags) }}{% endif %}<br>
+            <span class="card-label">エリア：</span>{% if e.areas %}{{ ', '.join(e.areas) }}{% endif %}<br>
+            <div class="entry-actions">
+                <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
+                    <input type="hidden" name="edit" value="{{ loop.index0 }}">
+                    <button type="submit" class="add-btn" style="background:#6abf4b;">編集</button>
+                </form>
+                <form method="post" action="{{ url_for('delete_entry', idx=loop.index0) }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
+                    <button type="submit" class="del-btn">削除</button>
+                </form>
+            </div>
+        </div>
+    {% endfor %}
+</div>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>観光AI 運用マニュアル</title>
+    <style>
+        body { font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #f6faf9; }
+        .container { background:#fff; padding:34px; margin:40px auto; max-width:900px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d; }
+        h1 { margin-bottom: 16px;}
+        h2 { color:#2a8ed8; margin-top:30px; }
+        ul, ol { margin-bottom:20px; }
+        .nav { float:right; margin-bottom:10px;}
+        .nav a { color:#2a8ed8; text-decoration:none; font-weight:500; margin-left:12px;}
+        .nav a:hover {text-decoration:underline;}
+        .howto { background: #eef6fd; border-left: 4px solid #5ca4df; padding:13px 18px; margin-bottom:16px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="nav">
+        <a href="{{ url_for('admin_entry') }}">[データ管理に戻る]</a>
+    </div>
+    <h1>観光AI 運用マニュアル</h1>
+
+    <div class="howto">
+        このページは <b>fullyGOTO観光AI</b> の運用マニュアルです。<br>
+        初めての方や手順を確認したい時、困ったときもこの画面を参照してください。
+    </div>
+
+    <h2>1. データ登録・編集</h2>
+    <ol>
+        <li><b>観光データ管理</b>画面から「新規登録」または「編集」ボタンでデータ入力・修正ができます。</li>
+        <li>タグ（キーワード）はカンマ区切りで複数OK。エリアは該当市町を必ず1つ以上選択してください。</li>
+        <li>登録内容は即座にLINE応答やAI検索に反映されます。</li>
+    </ol>
+
+    <h2>2. 未ヒット質問のカバー</h2>
+    <ol>
+        <li>「未ヒット質問一覧」や「未ヒット頻出レポート」で、AIがカバーできていない質問を確認。</li>
+        <li>質問をクリックするとAIのタグ・タイトル案付きで新規データ登録画面に遷移できます。</li>
+        <li>そのまま登録すれば、次回から同様の質問にも即時対応可能です。</li>
+    </ol>
+
+    <h2>3. 類義語辞書（シノニム）運用</h2>
+    <ol>
+        <li>「類義語辞書管理」で、<b>言い換え・似た言葉</b>をタグごとに自由に追加・編集できます。</li>
+        <li>スタッフは気付いた時に新しい言い回しや流行語もどんどん追加しましょう。</li>
+        <li>AIが自動で類義語からもヒットするため、住民・観光客の多様な質問にも高精度で応答できます。</li>
+    </ol>
+
+    <h2>4. バックアップ・復元</h2>
+    <ol>
+        <li>「全体バックアップ」ボタンでデータをローカルに保存できます。</li>
+        <li>「全体復元」で以前のバックアップZIPをアップロードすればデータ復元も簡単です。</li>
+    </ol>
+
+    <h2>5. よくあるトラブルQ&amp;A</h2>
+    <ul>
+        <li><b>Q. データが即時反映されない/ヒットしない</b><br>→ 一度ページリロード／再ログインし、タグやエリア設定ミスが無いかご確認ください。</li>
+        <li><b>Q. 管理画面がエラーになった</b><br>→ ブラウザを再読み込み、エラーメッセージを控えて管理者にご連絡ください。</li>
+    </ul>
+
+    <h2>6. サポート・連絡先</h2>
+    <p>トラブルや使い方のご質問は、<b>管理担当</b>または <b>Mitake合同会社サポート</b>までご連絡ください。</p>
+</div>
+</body>
+</html>

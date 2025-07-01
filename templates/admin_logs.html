@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>質問・回答ログ一覧</title>
+    <style>
+        body { font-family: sans-serif; background: #f6faf9; }
+        .container { background: #fff; padding: 24px; margin: 30px auto; max-width: 900px; border-radius: 13px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ddd; padding: 8px; font-size: 0.96em; }
+        th { background: #eef3f9; }
+        tr:nth-child(even){background-color: #f9f9fb;}
+        .ans { white-space: pre-wrap; }
+        .hit-yes { color: #197d19; font-weight: bold; }
+        .hit-no  { color: #b33; font-weight: bold; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <a href="{{ url_for('admin_entry') }}" style="float:right;">[データ管理に戻る]</a>
+    <h1>質問・回答ログ（直近最大300件）</h1>
+    <table>
+        <tr>
+            <th>日時</th>
+            <th>経路</th>
+            <th>質問</th>
+            <th>回答</th>
+            <th>DB/パンフHit</th>
+        </tr>
+        {% for log in logs %}
+        <tr>
+            <td>{{ log.timestamp[:19].replace('T',' ') }}</td>
+            <td>{{ log.source }}</td>
+            <td>{{ log.question }}</td>
+            <td class="ans">{{ log.answer|e }}</td>
+            <td>
+                {% if log.hit_db %}
+                  <span class="hit-yes">●</span>
+                {% else %}
+                  <span class="hit-no">―</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+</body>
+</html>

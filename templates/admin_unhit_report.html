@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>未ヒット頻出レポート</title>
+  <style>
+    body { font-family: sans-serif; background: #f6faf9; }
+    .container { background: #fff; padding: 24px; margin: 30px auto; max-width: 700px; border-radius: 13px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; font-size: 0.96em; }
+    th { background: #eef3f9; }
+    tr:nth-child(even){background-color: #f9f9fb;}
+    .count { font-weight: bold; color: #2a8ed8; }
+    .nav { float: right; margin-bottom: 10px;}
+    .nav a { color:#2a8ed8; text-decoration:none; font-weight:500; margin-left:12px;}
+    .nav a:hover {text-decoration:underline;}
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="nav">
+    <a href="{{ url_for('admin_entry') }}">[データ管理に戻る]</a>
+  </div>
+  <h1>未ヒット頻出質問レポート（直近7日）</h1>
+  <table>
+    <tr><th>質問内容</th><th>件数</th></tr>
+    {% for q, cnt in unhit_report %}
+      <tr>
+        <td>{{ q }}</td>
+        <td class="count">{{ cnt }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+</body>
+</html>

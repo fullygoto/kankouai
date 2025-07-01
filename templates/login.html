@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>管理画面ログイン</title>
+</head>
+<body>
+    <h1>管理画面ログイン</h1>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul>
+        {% for message in messages %}
+          <li style="color: red;">{{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    <form method="post">
+        ユーザー名: <input name="username"><br>
+        パスワード: <input name="password" type="password"><br>
+        <button type="submit">ログイン</button>
+    </form>
+</body>
+</html>
