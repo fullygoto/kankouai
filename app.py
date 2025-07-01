@@ -502,6 +502,13 @@ def smart_search_answer_with_hitflag(question):
     weather_reply, weather_hit = get_weather_reply(question)
     if weather_hit:
         return weather_reply, True
+        # ▼▼▼ 飛行機・空港・航空便の質問は必ず公式サイトを案内
+    if any(word in question for word in ["飛行機", "空港", "航空便", "便", "欠航", "到着", "出発"]):
+        return (
+            "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
+            "▶ https://www.fukuekuko.jp/",
+            True
+        )
     if any(word in question for word in ["フェリー", "船", "運航", "ジェットフォイル", "太古"]):
         return FERRY_INFO, True
     entry = find_entry_info(question)
