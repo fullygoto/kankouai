@@ -7,9 +7,11 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 from dotenv import load_dotenv
 load_dotenv()
 
-# LINE Bot関連
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+# LINE Bot v3 SDKインポート（ここを修正！）
+from linebot.v3.messaging import MessagingApi, Configuration, ApiClient
+from linebot.v3.webhook import WebhookHandler
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
+from linebot.v3.messaging.models import TextMessage
 
 import openai
 import zipfile
@@ -22,7 +24,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 ENTRIES_FILE = "entries.json"
