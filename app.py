@@ -397,28 +397,44 @@ def get_weather_reply(question):
         return reply, True
     return None, False
 
-# === 観光データ横断検索（タグ・エリア優先） ===
+# === 観光データ横断検索 ===
 def find_entry_info(question):
     entries = load_entries()
-    synonyms = load_synonyms()   # ←追加
+    synonyms = load_synonyms()
     areas_master = ["五島市", "新上五島町", "宇久町", "小値賀町"]
     target_areas = [area for area in areas_master if area in question]
-
-    # ▼ ここでタグ候補を類義語からも抽出！
     tags_from_syn = find_tags_by_synonym(question, synonyms)
     words = set(re.split(r'\s+|　|,|、|。', question))
-    for entry in entries:
-        area_hit = (not target_areas or any(area in entry.get("areas", []) for area in target_areas))
+
+    # 優先1: タイトル完全一致
+    hits = [e for e in entries if e["title"] == question and (not target_areas or any(area in e.get("areas", []) for area in target_areas))]
+    if hits:
+        return hits
+
+    # 優先2: タイトル部分一致
+    hits = [e for e in entries if question in e["title"] and (not target_areas or any(area in e.get("areas", []) for area in target_areas))]
+    if hits:
+        return hits
+
+    # 優先3: 説明部分一致
+    hits = [e for e in entries if question in e.get("desc", "") and (not target_areas or any(area in e.get("areas", []) for area in target_areas))]
+    if hits:
+        return hits
+
+    # 優先4: タグ一致・類義語一致
+    hits = []
+    for e in entries:
         tag_hit = (
-            any(tag in question for tag in entry.get("tags", [])) or
-            any(tag in tags_from_syn for tag in entry.get("tags", []))
+            any(tag in question for tag in e.get("tags", [])) or
+            any(tag in tags_from_syn for tag in e.get("tags", []))
         )
-        if area_hit and tag_hit:
-            return entry
-    for entry in entries:
-        if any(word in entry.get("title","") or word in entry.get("desc","") for word in words):
-            return entry
-    return None
+        if tag_hit and (not target_areas or any(area in e.get("areas", []) for area in target_areas)):
+            hits.append(e)
+    if hits:
+        return hits
+
+    # なければNone
+    return []
 
 @app.route("/admin/manual")
 def admin_manual():
@@ -511,14 +527,25 @@ def smart_search_answer_with_hitflag(question):
         )
     if any(word in question for word in ["フェリー", "船", "運航", "ジェットフォイル", "太古"]):
         return FERRY_INFO, True
-    entry = find_entry_info(question)
-    if entry:
-        msg = f"【{', '.join(entry.get('areas', []))}: {entry.get('title','')}】\n"
-        msg += f"説明: {entry.get('desc','')}\n"
-        msg += f"住所: {entry.get('address','')}\n"
-        if entry.get("map"): msg += f"地図: {entry.get('map')}\n"
-        msg += f"タグ: {', '.join(entry.get('tags',[]))}\n"
-        return msg, True
+    entries = find_entry_info(question)
+    if entries:
+        # 1件だけならそのまま
+        if len(entries) == 1:
+            entry = entries[0]
+            msg = f"【{', '.join(entry.get('areas', []))}: {entry.get('title','')}】\n"
+            msg += f"説明: {entry.get('desc','')}\n"
+            msg += f"住所: {entry.get('address','')}\n"
+            if entry.get("map"): msg += f"地図: {entry.get('map')}\n"
+            msg += f"タグ: {', '.join(entry.get('tags',[]))}\n"
+            return msg, True
+        else:
+            # 複数ヒット時はAIで要約
+            try:
+                snippets = [f"タイトル: {e['title']}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n" for e in entries]
+                ai_ans = ai_summarize(snippets, question)
+                return ai_ans, True
+            except Exception as e:
+                return "複数スポットが見つかりましたが要約に失敗しました。", False
     snippets = search_text_files(question, data_dir=DATA_DIR)
     if snippets:
         try:
