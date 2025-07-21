@@ -1,0 +1,11 @@
+{
+  "shop001": {
+    "shop_name": "ゲストハウス五島時光",
+    "shop_desc": "テスト",
+    "shop_address": "長崎県五島市江川町10-6",
+    "shop_tel": "0959-88-9238",
+    "shop_open": "チェックイン15時～19時　チェックアウト10時",
+    "shop_close": "なし",
+    "shop_url": "https://goto-times.com/"
+  }
+}

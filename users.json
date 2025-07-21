@@ -1,0 +1,14 @@
+[
+  {
+    "user_id": "fully",
+    "name": "管理者",
+    "password_hash": "scrypt:32768:8:1$LYyAPqFNgCm5uwso$be31c733c61072cca9ed6e6c7efe8e3d40ef108ace7eda39af6056657b1c2e6e20be06eec8b94dc428cefc63714c27935a14506e2a2f37bf370f4ef504e6df74",
+    "role": "admin"
+  },
+  {
+    "user_id": "shop001",
+    "name": "五島カフェ",
+    "password_hash": "scrypt:32768:8:1$2WnzLOcIletVL9sC$44531ac4b768c8aaaf1377f2cee4bb328920fcf96f9d49e7a52e72ee0b8d46a907621544ec0e316e360f647f39b73c07bcd00645a35d4e481fc05a3fae7ccc49",
+    "role": "shop"
+  }
+]
