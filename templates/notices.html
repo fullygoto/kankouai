@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>お知らせ・イベント・特売一覧</title>
+    <style>
+        body {font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #f6faf9;}
+        .container {background:#fff; padding:28px 32px; margin:40px auto; max-width:700px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d;}
+        .notice-card {background:#f7faf7; margin:14px 0; border-radius:11px; padding:14px 16px; box-shadow: 0 2px 6px #e0e6ed30;}
+        .card-label {color:#2a8ed8; font-size:0.98em;}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>お知らせ・イベント・特売一覧</h1>
+    {% for n in notices %}
+      <div class="notice-card">
+        <span class="card-label">タイトル：</span>{{ n.title }}<br>
+        <span class="card-label">カテゴリ：</span>{{ n.category }}<br>
+        <span class="card-label">日付：</span>{{ n.date }}<br>
+        <span class="card-label">内容：</span>{{ n.content }}<br>
+        {% if n.image_url %}
+        <span class="card-label">画像：</span><a href="{{ n.image_url }}" target="_blank">画像を見る</a><br>
+        {% endif %}
+        {% if n.expire_date %}
+        <span class="card-label">有効期限：</span>{{ n.expire_date }}<br>
+        {% endif %}
+      </div>
+    {% endfor %}
+</div>
+</body>
+</html>

@@ -25,22 +25,38 @@
             input[type=text], textarea {width:96%;}
         }
     </style>
+    <script>
+    function onCategoryChange() {
+        var cat = document.getElementById('category_select').value;
+        document.getElementById('form_tourism').style.display = (cat === '観光') ? 'block' : 'none';
+        document.getElementById('form_shop').style.display = (cat !== '観光') ? 'block' : 'none';
+    }
+    window.onload = function() { onCategoryChange(); }
+    </script>
 </head>
 <body>
 <div class="container">
+    {% if role == "admin" %}
     <div class="nav" style="float:right;">
         <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
         <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
         <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
         <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
         <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
+        <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
+        <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
+        <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
         <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
         <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
             <input type="file" name="backup_zip" accept=".zip" style="display:inline;">
             <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
         </form>
     </div>
-    <h1 style="margin-bottom:20px;">観光データ {{ '編集' if edit_id else '登録' }}</h1>
+    <h1 style="margin-bottom:20px;">観光データ（管理者モード） {{ '編集' if edit_id else '登録' }}</h1>
+    {% else %}
+    <h1 style="margin-bottom:20px;">観光データ（店舗ユーザーモード） {{ '編集' if edit_id else '登録' }}</h1>
+    {% endif %}
+
     {% with messages = get_flashed_messages() %}
       {% if messages %}
         <ul>
@@ -50,30 +66,86 @@
         </ul>
       {% endif %}
     {% endwith %}
+
     <form method="post" id="entry_form" style="margin-bottom:28px;">
         {% if edit_id %}
         <input type="hidden" name="edit_id" value="{{ edit_id }}">
         {% endif %}
-        <label>タイトル</label><br>
-        <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
-        <label>説明</label><br>
-        <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
-        <label>住所</label><br>
-        <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
-        <label>地図URL</label><br>
-        <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
-        <label>タグ <span style="font-size:0.92em; color:#888;">（カンマ区切りで複数OK）</span></label><br>
-        <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}" required><br>
-        <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
-        {% set area_opts = ["五島市", "新上五島町", "宇久町", "小値賀町"] %}
-        <div style="margin-bottom:10px;">
-        {% for area in area_opts %}
-          <label style="min-width:unset;">
-          <input type="checkbox" name="areas" value="{{ area }}"
-          {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
-          {{ area }}
-          </label>
-        {% endfor %}
+
+        <label>カテゴリー</label><br>
+        <select name="category" id="category_select" onchange="onCategoryChange()">
+            {% set cat_list = ["観光", "飲食", "宿泊", "診療所", "役所", "交通", "バス", "イベント", "特売"] %}
+            {% for c in cat_list %}
+            <option value="{{ c }}" {% if entry_edit and entry_edit.category == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+        </select>
+        <hr>
+
+        <!-- 観光地用フォーム -->
+        <div id="form_tourism" style="display:none;">
+            <label>タイトル</label><br>
+            <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+            <label>説明</label><br>
+            <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+            <label>住所</label><br>
+            <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+            <label>地図URL</label><br>
+            <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+            <label>タグ <span style="font-size:0.92em; color:#888;">（カンマ区切りで複数OK）</span></label><br>
+            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}"><br>
+            <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
+            {% set area_opts = ["五島市", "新上五島町", "宇久町", "小値賀町"] %}
+            <div style="margin-bottom:10px;">
+            {% for area in area_opts %}
+              <label style="min-width:unset;">
+              <input type="checkbox" name="areas" value="{{ area }}"
+              {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
+              {{ area }}
+              </label>
+            {% endfor %}
+            </div>
+        </div>
+
+        <!-- 店舗系カテゴリ用フォーム -->
+        <div id="form_shop" style="display:none;">
+            <label>タイトル</label><br>
+            <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+            <label>説明</label><br>
+            <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+            <label>住所</label><br>
+            <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+            <label>電話番号</label><br>
+            <input type="text" name="tel" value="{{ entry_edit.tel if entry_edit else '' }}"><br>
+            <label>休み</label><br>
+            <input type="text" name="holiday" value="{{ entry_edit.holiday if entry_edit else '' }}"><br>
+            <label>営業時間</label><br>
+            <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
+            <label>駐車場</label>
+            <select name="parking">
+                <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
+                <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
+            </select>
+            台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
+            <label>支払方法</label><br>
+            <input type="checkbox" name="payment" value="現金" {% if entry_edit and entry_edit.payment and '現金' in entry_edit.payment %}checked{% endif %}>現金
+            <input type="checkbox" name="payment" value="カード" {% if entry_edit and entry_edit.payment and 'カード' in entry_edit.payment %}checked{% endif %}>カード
+            <input type="checkbox" name="payment" value="その他" {% if entry_edit and entry_edit.payment and 'その他' in entry_edit.payment %}checked{% endif %}>その他<br>
+            <label>備考（自由記述）</label><br>
+            <textarea name="remark" rows="2">{{ entry_edit.remark if entry_edit else '' }}</textarea><br>
+            <label>タグ <span style="font-size:0.92em; color:#888;">（カンマ区切りで複数OK）</span></label><br>
+            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}"><br>
+            <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
+            <div style="margin-bottom:10px;">
+            {% for area in area_opts %}
+              <label style="min-width:unset;">
+              <input type="checkbox" name="areas" value="{{ area }}"
+              {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
+              {{ area }}
+              </label>
+            {% endfor %}
+            </div>
+            <label>地図URL</label><br>
+            <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
         </div>
         <button class="add-btn" type="submit">{{ '編集' if edit_id else '登録' }}</button>
     </form>
@@ -88,14 +160,25 @@
             {% if e.map %}<a href="{{ e.map }}" target="_blank">MAP</a>{% endif %}<br>
             <span class="card-label">タグ：</span>{% if e.tags %}{{ ', '.join(e.tags) }}{% endif %}<br>
             <span class="card-label">エリア：</span>{% if e.areas %}{{ ', '.join(e.areas) }}{% endif %}<br>
+            {% if e.category and e.category != "観光" %}
+                <span class="card-label">電話：</span>{{ e.tel or "" }}<br>
+                <span class="card-label">休み：</span>{{ e.holiday or "" }}<br>
+                <span class="card-label">営業時間：</span>{{ e.open_hours or "" }}<br>
+                <span class="card-label">駐車場：</span>{{ e.parking or "" }}（{{ e.parking_num or "" }}台）<br>
+                <span class="card-label">支払方法：</span>{% if e.payment %}{{ ', '.join(e.payment) }}{% endif %}<br>
+                <span class="card-label">備考：</span>{{ e.remark or "" }}<br>
+            {% endif %}
+            <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
             <div class="entry-actions">
                 <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
                     <input type="hidden" name="edit" value="{{ loop.index0 }}">
                     <button type="submit" class="add-btn" style="background:#6abf4b;">編集</button>
                 </form>
+                {% if role == "admin" %}
                 <form method="post" action="{{ url_for('delete_entry', idx=loop.index0) }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
                     <button type="submit" class="del-btn">削除</button>
                 </form>
+                {% endif %}
             </div>
         </div>
     {% endfor %}
