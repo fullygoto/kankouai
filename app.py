@@ -36,8 +36,8 @@ def login_required(fn):
 
 # === 環境変数 / 設定 ===
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or ""
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or ""
 
 # ★ モデル切替用（.envで上書き可）
 OPENAI_MODEL_PRIMARY = os.environ.get("OPENAI_MODEL_PRIMARY", "gpt-4o-mini")
