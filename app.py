@@ -723,12 +723,13 @@ def admin_backup():
     )
 
 # === 復元機能 ===
-def _safe_extractall(zf: zipfile.ZipFile, dst="."):
+def _safe_extractall(zf: zipfile.ZipFile, dst):
     base = os.path.abspath(dst)
     for member in zf.namelist():
         target = os.path.abspath(os.path.join(dst, member))
         if not target.startswith(base + os.sep) and target != base:
             raise Exception("Unsafe path found in ZIP (zip slip)")
+    os.makedirs(dst, exist_ok=True)
     zf.extractall(dst)
 
 @app.route("/admin/restore", methods=["POST"])
@@ -741,7 +742,7 @@ def admin_restore():
         flash("アップロードファイルがありません")
         return redirect(url_for("admin_entry"))
     with zipfile.ZipFile(file, "r") as zf:
-        _safe_extractall(zf, ".")
+        _safe_extractall(zf, BASE_DIR)
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
 
