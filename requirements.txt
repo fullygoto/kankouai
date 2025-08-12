@@ -1,7 +1,5 @@
-flask
-openai
-python-dotenv
-line-bot-sdk
-PyPDF2
-python-docx
-chromadb
+flask>=2.3,<4
+gunicorn>=21.2
+openai>=1.0.0,<2
+python-dotenv>=1.0
+line-bot-sdk>=2.4
