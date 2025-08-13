@@ -162,39 +162,29 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
 
 # === OpenAIラッパ（モデル切替を一元管理） ===
 def openai_chat(model, messages, **kwargs):
-    """
-    まず Chat Completions をシンプルに叩く（トークン上限は渡さない）。
-    失敗時は Responses API に切替。max_tokens/max_completion_tokens は
-    max_output_tokens に集約して Responses 側だけに適用する。
-    """
     params = dict(kwargs)
-
-    # 受け取った上限パラメータは Responses 用に温存し、Chat には渡さない
     mt  = params.pop("max_tokens", None)
     mct = params.pop("max_completion_tokens", None)
-    mot = mct if mct is not None else mt  # Responses 用の最終上限
+    mot = mct if mct is not None else mt  # 統一上限
 
-    # ❶ Chat Completions（トークン上限なしでまず試す）
+    # ❶ Chat Completions（ここにも上限を適用）
     try:
+        chat_params = dict(params)
+        if mot is not None:
+            chat_params["max_completion_tokens"] = mot
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
-            **params,   # ← max_* は含まれていない
+            **chat_params,
         )
         return resp.choices[0].message.content
     except Exception as e1:
         print("[OpenAI error - chat.completions]", e1)
 
-    # ❷ Responses API（こちらにだけ上限をかける）
+    # ❷ Responses API（max_output_tokens を使う）
     try:
-        joined = "\n".join(
-            f"{m.get('role','user')}: {m.get('content','')}" for m in messages
-        )
-        rparams = {
-            "model": model,
-            "input": joined,
-            "temperature": params.get("temperature", 0.3),
-        }
+        joined = "\n".join(f"{m.get('role','user')}: {m.get('content','')}" for m in messages)
+        rparams = {"model": model, "input": joined, "temperature": params.get("temperature", 0.3)}
         if mot is not None:
             rparams["max_output_tokens"] = mot
         resp = client.responses.create(**rparams)
@@ -846,6 +836,20 @@ def login():
         else:
             flash("ユーザーIDまたはパスワードが違います")
     return render_template("login.html")
+
+@app.route("/admin/synonyms")
+@login_required
+def admin_synonyms():
+    if session.get("role") != "admin":
+        abort(403)
+    return render_template("admin_entries_edit.html", entries_raw=json.dumps(load_entries(), ensure_ascii=False, indent=2))
+
+@app.route("/admin/manual")
+@login_required
+def admin_manual():
+    if session.get("role") != "admin":
+        abort(403)
+    return "<h1>運用マニュアル（準備中）</h1>"
 
 @app.route("/logout")
 def logout():
