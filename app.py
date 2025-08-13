@@ -162,15 +162,41 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
 
 # === OpenAIラッパ（モデル切替を一元管理） ===
 def openai_chat(model, messages, **kwargs):
+    """
+    Chat Completions -> (失敗時) Responses API に自動フォールバック。
+    既存コードの max_tokens は自動で max_completion_tokens に変換します。
+    """
+    # ❶ パラメータ変換
+    params = dict(kwargs)
+    if "max_tokens" in params:
+        params["max_completion_tokens"] = params.pop("max_tokens")
+
+    # ❷ Chat Completions を試す
     try:
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
-            **kwargs,
+            **params,
         )
         return resp.choices[0].message.content
-    except Exception as e:
-        print("[OpenAI error]", e)
+    except Exception as e1:
+        print("[OpenAI error - chat.completions]", e1)
+
+    # ❸ Responses API にフォールバック（トークン上限指定は省略して安全側に）
+    try:
+        # messages を素直に 1 本のテキストに連結
+        joined = "\n".join(
+            f"{m.get('role','user')}: {m.get('content','')}" for m in messages
+        )
+        resp = client.responses.create(
+            model=model,
+            input=joined,
+            temperature=kwargs.get("temperature", 0.3),
+        )
+        # Python SDK v1 のショートカット
+        return getattr(resp, "output_text", "") or ""
+    except Exception as e2:
+        print("[OpenAI error - responses]", e2)
         return ""
 
 # === 言語検出＆翻訳 ===
@@ -529,16 +555,24 @@ def admin_entry():
         role=session["role"]
     )
 
+@app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
 @app.route("/admin/entry/delete/<int:idx>", methods=["POST"])
 @login_required
 def delete_entry(idx):
     if session.get("role") != "admin":
         abort(403)
+
+    if idx is None:
+        flash("削除対象が指定されていません")
+        return redirect(url_for("admin_entry"))
+
     entries = load_entries()
     if 0 <= idx < len(entries):
         entries.pop(idx)
         save_entries(entries)
         flash("削除しました")
+    else:
+        flash("指定された項目が見つかりません")
     return redirect(url_for("admin_entry"))
 
 import itertools
