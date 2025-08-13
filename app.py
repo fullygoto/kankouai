@@ -10,19 +10,26 @@ load_dotenv()
 from werkzeug.security import check_password_hash, generate_password_hash
 
 # LINE Bot関連
-from linebot import LineBotApi, WebhookHandler  # ←この1行を追加
+from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from linebot.exceptions import LineBotApiError, InvalidSignatureError  # ←追加
+from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
 from openai import OpenAI
 import zipfile
 import io
 
+from functools import wraps
+
 app = Flask(__name__)
-app.config["JSON_AS_ASCII"] = False  # ← ここに追加（日本語をJSONでそのまま返す）
+app.config["JSON_AS_ASCII"] = False  # 日本語をJSONでそのまま返す
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
 
-from functools import wraps
+# セッションの基本セキュリティ（任意強化）
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
+)
 
 def login_required(fn):
     @wraps(fn)
@@ -36,8 +43,8 @@ def login_required(fn):
 
 # === 環境変数 / 設定 ===
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or ""
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or ""
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or ""  # 未設定でも起動OK
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or ""              # 未設定でも起動OK
 
 # ★ モデル切替用（.envで上書き可）
 OPENAI_MODEL_PRIMARY = os.environ.get("OPENAI_MODEL_PRIMARY", "gpt-4o-mini")
@@ -56,7 +63,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # === データ格納先（Renderの永続ディスクを使うなら DATA_BASE_DIR を設定） ===
-BASE_DIR     = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/appdata
+BASE_DIR     = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/data
 ENTRIES_FILE = os.path.join(BASE_DIR, "entries.json")
 DATA_DIR     = os.path.join(BASE_DIR, "data")
 LOG_DIR      = os.path.join(BASE_DIR, "logs")
@@ -66,46 +73,9 @@ USERS_FILE   = os.path.join(BASE_DIR, "users.json")
 NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
 SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 
-
 # 必要フォルダ作成
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
-
-
-# === ディスク/パスの診断ログ（Renderのデプロイログに出力） ===
-app.logger.info("DATA_BASE_DIR=%s", BASE_DIR)
-app.logger.info("Resolved paths: ENTRIES_FILE=%s, USERS_FILE=%s, LOG_DIR=%s",
-                ENTRIES_FILE, USERS_FILE, LOG_DIR)
-
-# BASE_DIR への書き込みテスト
-try:
-    os.makedirs(BASE_DIR, exist_ok=True)
-    test_path = os.path.join(BASE_DIR, ".__writetest")
-    with open(test_path, "w", encoding="utf-8") as f:
-        f.write("ok")
-    os.remove(test_path)
-    app.logger.info("Write test to BASE_DIR: OK")
-except Exception as e:
-    app.logger.error("Write test to BASE_DIR: FAILED (%s)", e)
-
-# users.json の有無とサイズ
-try:
-    if os.path.exists(USERS_FILE):
-        app.logger.info("users.json exists, size=%d bytes", os.path.getsize(USERS_FILE))
-    else:
-        app.logger.warning("users.json not found")
-except Exception as e:
-    app.logger.error("users.json check error: %s", e)
-
-# BASE_DIR の中身（一覧）
-try:
-    if os.path.exists(BASE_DIR):
-        app.logger.info("BASE_DIR listing: %s", os.listdir(BASE_DIR))
-    else:
-        app.logger.error("BASE_DIR does not exist")
-except Exception as e:
-    app.logger.warning("BASE_DIR listing failed: %s", e)
-
 
 # === 初回ブートストラップ（データファイル生成＆管理者ユーザー作成） ===
 ADMIN_INIT_USER = os.environ.get("ADMIN_INIT_USER", "admin")
@@ -117,6 +87,9 @@ def _ensure_json(path, default_obj):
             json.dump(default_obj, f, ensure_ascii=False, indent=2)
 
 def _bootstrap_files_and_admin():
+    app.logger.info(f"[boot] BASE_DIR={BASE_DIR}")
+    app.logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
+
     # 必須JSONを空で用意（無ければ作成）
     _ensure_json(ENTRIES_FILE, [])
     _ensure_json(SYNONYM_FILE, {})
@@ -136,7 +109,6 @@ def _bootstrap_files_and_admin():
     has_admin = any(u.get("role") == "admin" for u in users)
 
     if not users_exists or not users:
-        # ファイルが無い/空 → 新規作成
         if ADMIN_INIT_PASSWORD:
             users = [{
                 "user_id": ADMIN_INIT_USER,
@@ -151,27 +123,14 @@ def _bootstrap_files_and_admin():
                 ADMIN_INIT_USER,
             )
         else:
-            # パス未指定なら空の users.json だけ用意
             with open(USERS_FILE, "w", encoding="utf-8") as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
             app.logger.warning(
                 "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
             )
-    elif not has_admin and ADMIN_INIT_PASSWORD:
-        # 既存にadminがいない場合だけ、追記でadmin作成
-        users.append({
-            "user_id": ADMIN_INIT_USER,
-            "name": "管理者",
-            "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD, method="scrypt"),
-            "role": "admin"
-        })
-        with open(USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
-        app.logger.warning("既存 users.json に管理者 '%s' を追加しました。", ADMIN_INIT_USER)
 
 # 実行
 _bootstrap_files_and_admin()
-
 
 # 必須キーが未設定なら警告（起動は継続）
 if not OPENAI_API_KEY:
@@ -188,7 +147,7 @@ def load_users():
 
 # === ログ保存用 ===
 def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
-    os.makedirs(LOG_DIR, exist_ok=True)  # ← LOG_DIR を使う
+    os.makedirs(LOG_DIR, exist_ok=True)
     log = {
         "timestamp": datetime.datetime.now().isoformat(),
         "source": source,
@@ -201,7 +160,6 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
         f.write(json.dumps(log, ensure_ascii=False) + "\n")
 
 # === OpenAIラッパ（モデル切替を一元管理） ===
-
 def openai_chat(model, messages, **kwargs):
     try:
         resp = client.chat.completions.create(
@@ -214,7 +172,7 @@ def openai_chat(model, messages, **kwargs):
         print("[OpenAI error]", e)
         return ""
 
-# === 言語検出＆翻訳（繁体字/英語 → 日本語で解析し、元言語で返答） ===
+# === 言語検出＆翻訳 ===
 OPENAI_MODEL_TRANSLATE = os.environ.get("OPENAI_MODEL_TRANSLATE", OPENAI_MODEL_HIGH)
 
 def detect_lang_simple(text: str) -> str:
@@ -222,42 +180,27 @@ def detect_lang_simple(text: str) -> str:
     if not text:
         return "ja"
     t = text.strip()
-
-    # かながあれば日本語
     if re.search(r"[ぁ-んァ-ン]", t):
         return "ja"
-
-    # 明確な中国語マーカー（繁/簡どちらも）
     zh_markers = [
         "今天","天氣","天气","請問","请问","交通","景點","景点","門票","门票",
         "美食","住宿","船班","航班","預約","预约","營業","营业","營業時間","营业时间"
     ]
     if any(m in t for m in zh_markers):
         return "zh-Hant"
-
-    # 英字のみ（数字・記号・空白は許容）なら英語とみなす
     if re.fullmatch(r"[A-Za-z0-9\s\-\.,!?'\"/()]+", t):
         return "en"
-
-    # それ以外は日本語を既定
     return "ja"
 
-
 def translate_text(text: str, target_lang: str) -> str:
-    """翻訳: まず OPENAI_MODEL_TRANSLATE、失敗時は OPENAI_MODEL_PRIMARY で再試行。
-    URL・数値・改行は保持する方針でプロンプト化。
-    """
     if not text:
         return text
-
     lang_label = {'ja': '日本語', 'zh-Hant': '繁體中文', 'en': '英語'}.get(target_lang, '日本語')
     prompt = (
         f"次のテキストを{lang_label}に自然に翻訳してください。"
         "意味は変えず、URL・数値・記号・改行はそのまま維持。"
         "箇条書きや見出しの構造も保持してください。\n===\n" + text
     )
-
-    # 1回目: 翻訳用モデル（既に上で決めている OPENAI_MODEL_TRANSLATE を使用）
     model_t = OPENAI_MODEL_TRANSLATE
     out = openai_chat(
         model_t,
@@ -265,8 +208,6 @@ def translate_text(text: str, target_lang: str) -> str:
         temperature=0.2,
         max_tokens=1200,
     )
-
-    # 失敗時: プライマリで再試行
     if not out and model_t != OPENAI_MODEL_PRIMARY:
         out = openai_chat(
             OPENAI_MODEL_PRIMARY,
@@ -274,7 +215,6 @@ def translate_text(text: str, target_lang: str) -> str:
             temperature=0.2,
             max_tokens=1200,
         )
-
     return out or text
 
 # === お知らせ・イベント・特売掲示板用 ===
@@ -289,7 +229,6 @@ def save_notices(notices):
         json.dump(notices, f, ensure_ascii=False, indent=2)
 
 # === 管理画面: 観光データ登録・編集 ===
-
 def load_entries():
     if not os.path.exists(ENTRIES_FILE):
         return []
@@ -299,7 +238,6 @@ def load_entries():
 def save_entries(entries):
     with open(ENTRIES_FILE, "w", encoding="utf-8") as f:
         json.dump(entries, f, ensure_ascii=False, indent=2)
-
 
 def suggest_tags_and_title(question, answer, model=None):
     model = model or OPENAI_MODEL_PRIMARY
@@ -332,7 +270,6 @@ def suggest_tags_and_title(question, answer, model=None):
         print("[AIサジェストエラー]", e)
         return "", ""
 
-
 def ai_suggest_faq(question, model=None):
     model = model or OPENAI_MODEL_PRIMARY
     prompt = (
@@ -352,7 +289,6 @@ def ai_suggest_faq(question, model=None):
         print("[FAQサジェストエラー]", e)
         return ""
 
-
 def generate_unhit_report(n=7):
     """直近n日分の未ヒット・誤答ログ集計"""
     import datetime as dt
@@ -360,7 +296,7 @@ def generate_unhit_report(n=7):
 
     logs = []
     try:
-        with open(LOG_FILE, encoding="utf-8") as f:  # ← LOG_FILE を使用
+        with open(LOG_FILE, encoding="utf-8") as f:
             for line in f:
                 d = json.loads(line)
                 logs.append(d)
@@ -383,8 +319,7 @@ def generate_unhit_report(n=7):
     counter = Counter(questions)
     return counter.most_common()
 
-# === 類義語（シノニム）辞書のロード＆保存 ===
-
+# === 類義語（シノニム）辞書 ===
 def load_synonyms():
     if not os.path.exists(SYNONYM_FILE):
         return {}
@@ -395,7 +330,6 @@ def save_synonyms(synonyms):
     with open(SYNONYM_FILE, "w", encoding="utf-8") as f:
         json.dump(synonyms, f, ensure_ascii=False, indent=2)
 
-
 def find_tags_by_synonym(question, synonyms):
     tags = set()
     for tag, synlist in synonyms.items():
@@ -405,7 +339,6 @@ def find_tags_by_synonym(question, synonyms):
     return list(tags)
 
 # === AIによるタグ・類義語案サジェスト ===
-
 def ai_suggest_synonyms(question, all_tags, model=None):
     model = model or OPENAI_MODEL_PRIMARY
     prompt = (
@@ -439,17 +372,9 @@ def get_top_tags(k=8):
     return [t for t, _ in counter.most_common(k)]
 
 def build_refine_suggestions(question):
-    """未ヒット時に、エリア/タグ/フィルタの絞り込み候補を提示する。
-    - タグはユーザーの質問語に応じて優先度を動的に並び替える
-    - noticesのイベントから「今週のイベント」有無を検知
-    - 雨関連語が含まれる場合は「雨の日OK」フィルタを提示
-    """
     areas = ["五島市", "新上五島町", "小値賀町", "宇久町"]
-
-    # 元データから頻出タグを取得
     top_tags = get_top_tags()
 
-    # 内部関数: 質問語に合わせてタグの優先度を並び替え
     def rank_tags(tags, q):
         q = q or ""
         prefs = {
@@ -471,7 +396,6 @@ def build_refine_suggestions(question):
         ranked = sorted(tags, key=lambda t: (-score.get(t, 0), tags.index(t)))
         return ranked
 
-    # 内部関数: 今週のイベント有無
     def has_events_this_week():
         try:
             notices = load_notices()
@@ -500,10 +424,7 @@ def build_refine_suggestions(question):
                 return True
         return False
 
-    # 並び替え適用
     top_tags = rank_tags(top_tags, question)
-
-    # フィルタ候補
     filters = []
     if "雨" in (question or ""):
         filters.append("雨の日OK（屋内スポット）")
@@ -512,7 +433,6 @@ def build_refine_suggestions(question):
     if any(w in (question or "") for w in ["子連れ", "家族", "ファミリー"]):
         filters.append("子連れOK")
 
-    # 文面生成
     area_line = " / ".join(areas)
     tag_line = ", ".join(top_tags)
     examples = []
@@ -567,10 +487,9 @@ def admin_entry():
         open_hours = request.form.get("open_hours", "")
         parking = request.form.get("parking", "")
         parking_num = request.form.get("parking_num", "")
-        payment = request.form.getlist("payment")  # チェックボックス
+        payment = request.form.getlist("payment")
         remark = request.form.get("remark", "")
 
-        # カテゴリで保存構造を分岐
         data = {
             "category": category,
             "title": title,
@@ -591,7 +510,6 @@ def admin_entry():
                 "remark": remark
             })
 
-        # 編集 or 新規
         if request.form.get("edit_id"):
             idx = int(request.form["edit_id"])
             entries[idx] = data
@@ -609,7 +527,6 @@ def admin_entry():
         edit_id=edit_id,
         role=session["role"]
     )
-
 
 @app.route("/admin/entry/delete/<int:idx>", methods=["POST"])
 @login_required
@@ -632,7 +549,6 @@ def shop_entry():
         return redirect(url_for("admin_entry"))
     user_id = session["user_id"]
 
-    # POST（登録/更新）
     if request.method == "POST":
         category = request.form.get("category", "")
         title = request.form.get("title", "")
@@ -668,7 +584,6 @@ def shop_entry():
             "map": map_url
         }
 
-        # entries.jsonに自分の情報を「上書きまたは新規追加」
         entries = load_entries()
         entry_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
         if entry_idx is not None:
@@ -680,7 +595,6 @@ def shop_entry():
         flash("店舗情報を保存しました")
         return redirect(url_for("shop_entry"))
 
-    # GET時：自分の店舗データのみ
     user_entries = [e for e in load_entries() if e.get("user_id") == user_id]
     shop_entry_data = user_entries[-1] if user_entries else None
     return render_template("shop_entry.html", role="shop", shop_edit=shop_entry_data)
@@ -688,7 +602,6 @@ def shop_entry():
 @app.route("/admin/entries_edit", methods=["GET", "POST"])
 @login_required
 def admin_entries_edit():
-    # 管理者のみ
     if session.get("role") != "admin":
         abort(403)
 
@@ -698,25 +611,21 @@ def admin_entries_edit():
             data = json.loads(raw_json)
             if not isinstance(data, list):
                 raise ValueError("ルート要素は配列(list)にしてください")
-            # ここで保存（ensure_ascii=False は save_entries 側で設定済み）
             save_entries(data)
             flash("entries.jsonを上書きしました")
             return redirect(url_for("admin_entries_edit"))
         except Exception as e:
-            # エラー時は元のJSON文字列をそのまま再表示
             flash("JSONエラー: " + str(e))
             return render_template("admin_entries_edit.html", entries_raw=raw_json), 400
 
-    # GET: 現在の内容を整形して表示（ファイル未作成でも落ちないように）
     try:
-        entries = load_entries()  # ファイルが無ければ [] を返す実装
+        entries = load_entries()
         entries_raw = json.dumps(entries, ensure_ascii=False, indent=2)
     except Exception as e:
         entries_raw = "[]"
         flash("entries.jsonの読み込みに失敗しました: " + str(e))
 
     return render_template("admin_entries_edit.html", entries_raw=entries_raw)
-
 
 @app.route("/admin/logs")
 @login_required
@@ -780,49 +689,49 @@ def admin_add_entry():
     flash("DBに追加しました")
     return redirect(url_for("admin_entry"))
 
-# === バックアップ機能 ===
+# === バックアップ（手動 & 共通関数） ===
+def write_full_backup_zip(out_dir: str) -> str:
+    """アプリ内バックアップを out_dir に保存し、ファイルパスを返す"""
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"gotokanko_{ts}.zip"
+    out_path = os.path.join(out_dir, filename)
+
+    with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # 単体ファイル
+        if os.path.exists(ENTRIES_FILE):   zf.write(ENTRIES_FILE,  arcname="entries.json")
+        if os.path.exists(SYNONYM_FILE):   zf.write(SYNONYM_FILE,  arcname="synonyms.json")
+        if os.path.exists(NOTICES_FILE):   zf.write(NOTICES_FILE,  arcname="notices.json")
+        if os.path.exists(SHOP_INFO_FILE): zf.write(SHOP_INFO_FILE,arcname="shop_infos.json")
+
+        # data/
+        if os.path.exists(DATA_DIR):
+            for root, dirs, files in os.walk(DATA_DIR):
+                for fname in files:
+                    fpath   = os.path.join(root, fname)
+                    arcname = os.path.relpath(fpath, BASE_DIR)
+                    zf.write(fpath, arcname)
+
+        # logs/
+        if os.path.exists(LOG_DIR):
+            for root, dirs, files in os.walk(LOG_DIR):
+                for fname in files:
+                    fpath   = os.path.join(root, fname)
+                    arcname = os.path.relpath(fpath, BASE_DIR)
+                    zf.write(fpath, arcname)
+
+    return out_path
+
 @app.route("/admin/backup")
 @login_required
 def admin_backup():
     if session.get("role") != "admin":
         abort(403)
-    mem_zip = io.BytesIO()
-    with zipfile.ZipFile(mem_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # 単体ファイル（arcnameは固定名に）
-        if os.path.exists(ENTRIES_FILE):
-            zf.write(ENTRIES_FILE, arcname="entries.json")
-        if os.path.exists(SYNONYM_FILE):
-            zf.write(SYNONYM_FILE, arcname="synonyms.json")
-        if os.path.exists(NOTICES_FILE):
-            zf.write(NOTICES_FILE, arcname="notices.json")
-        if os.path.exists(SHOP_INFO_FILE):
-            zf.write(SHOP_INFO_FILE, arcname="shop_infos.json")
-
-        # data/ 配下
-        if os.path.exists(DATA_DIR):
-            for root, dirs, files in os.walk(DATA_DIR):
-                for fname in files:
-                    fpath = os.path.join(root, fname)
-                    arcname = os.path.relpath(fpath, BASE_DIR)
-                    zf.write(fpath, arcname)
-
-        # logs/ 配下
-        if os.path.exists(LOG_DIR):
-            for root, dirs, files in os.walk(LOG_DIR):
-                for fname in files:
-                    fpath = os.path.join(root, fname)
-                    arcname = os.path.relpath(fpath, BASE_DIR)
-                    zf.write(fpath, arcname)
-
-        # .env は意図的に含めない（認証情報のため）
-
-    mem_zip.seek(0)
-    return send_file(
-        mem_zip,
-        as_attachment=True,
-        download_name="gotokanko_fullbackup.zip",
-        mimetype="application/zip"
-    )
+    out_dir = os.path.join(BASE_DIR, "manual_backups")
+    path = write_full_backup_zip(out_dir)
+    app.logger.info(f"[backup] manual saved: {path}")
+    # 生成済みファイルをそのまま送る（履歴もディスクに残る）
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="application/zip")
 
 # === 復元機能 ===
 def _safe_extractall(zf: zipfile.ZipFile, dst):
@@ -848,7 +757,32 @@ def admin_restore():
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
 
+# === 自動バックアップ用 内部API（Cron Jobから叩く） ===
+@app.route("/internal/backup", methods=["POST"])
+def internal_backup():
+    token = request.headers.get("X-Backup-Token", "")
+    if token != os.environ.get("BACKUP_JOB_TOKEN"):
+        abort(403)
 
+    out_dir = os.path.join(BASE_DIR, "auto_backups")
+    path = write_full_backup_zip(out_dir)
+
+    # 任意：古いファイルをローテーション (最新10個だけ残す)
+    try:
+        files = sorted(
+            [os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".zip")],
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )
+        for old in files[10:]:
+            os.remove(old)
+    except Exception:
+        app.logger.exception("backup rotation failed")
+
+    app.logger.info(f"[backup] saved: {path}")
+    return jsonify({"ok": True, "saved": path})
+
+# === 認証 ===
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -882,11 +816,11 @@ WEATHER_LINKS = [
     {"area": "宇久町", "url": "https://weathernews.jp/onebox/33.262381/129.131027/q=%E9%95%B7%E5%B4%8E%E7%9C%8C%E4%BD%90%E4%B8%96%E4%BF%9D%E5%B8%82%E5%AE%87%E4%B9%85%E7%94%BA&v=da56215a2617fc2203c6cae4306d5fd8c92e3e26c724245d91160a4b3597570a&lang=ja&type=week"}
 ]
 FERRY_INFO = """【長崎ー五島航路 運行状況】
-・野母商船「フェリー太古」運航情報  
+・野母商船「フェリー太古」運航情報
 http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship
-・九州商船「フェリー・ジェットフォイル」運航情報  
+・九州商船「フェリー・ジェットフォイル」運航情報
 https://kyusho.co.jp/status
-・五島産業汽船「フェリー」運航情報  
+・五島産業汽船「フェリー」運航情報
 https://www.goto-sangyo.co.jp/
 その他の航路や詳細は各リンクをご覧ください。
 """
@@ -900,13 +834,10 @@ def get_weather_reply(question):
     if not question:
         return None, False
 
-    # 外国語対応OFFなら日本語固定／ONなら原文言語で
     lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
-
     if not any(kw in question for kw in weather_keywords):
         return None, False
 
-    # エリア別（表記は漢字共通なので包含でOK）
     for entry in WEATHER_LINKS:
         if entry["area"] in question:
             if lang == "zh-Hant":
@@ -915,7 +846,6 @@ def get_weather_reply(question):
                 return f"[{entry['area']} weather]\nLatest forecast:\n{entry['url']}", True
             return f"【{entry['area']}の天気】\n最新の{entry['area']}の天気情報はこちら\n{entry['url']}", True
 
-    # 総合リンク
     if lang == "zh-Hant":
         reply = "【五島列島的主要天氣連結】\n"
         for e in WEATHER_LINKS:
@@ -933,7 +863,6 @@ def get_weather_reply(question):
     return reply.strip(), True
 
 # === 観光データ横断検索 ===
-
 def clean_query_for_search(question):
     ignore_patterns = [
         r"(について)?教えて.*$", r"の情報.*$", r"の場所.*$", r"どこ.*$", r"案内.*$", r"を教えて.*$", r"を知りたい.*$", r"アクセス.*$", r"詳細.*$"
@@ -942,7 +871,6 @@ def clean_query_for_search(question):
     for pat in ignore_patterns:
         q = re.sub(pat, "", q)
     return q.strip()
-
 
 def find_entry_info(question):
     entries = load_entries()
@@ -957,22 +885,17 @@ def find_entry_info(question):
     hits = [e for e in entries if cleaned_query and e.get("title", "") == cleaned_query and (not target_areas or any(area in e.get("areas", []) for area in target_areas))]
     if hits:
         return hits
-    # 2. 各カラム部分一致（title, tags, desc, address）
+    # 2. 各カラム部分一致
     hits = []
     for e in entries:
-        haystacks = [
-            e.get("title", ""),
-            " ".join(e.get("tags", [])),
-            e.get("desc", ""),
-            e.get("address", "")
-        ]
+        haystacks = [e.get("title", ""), " ".join(e.get("tags", [])), e.get("desc", ""), e.get("address", "")]
         target_str = " ".join(haystacks)
         if cleaned_query and cleaned_query in target_str:
             if not target_areas or any(area in e.get("areas", []) for area in target_areas):
                 hits.append(e)
     if hits:
         return hits
-    # 3. 元のtitle, desc部分一致にも対応
+    # 3. 元のtitle, desc部分一致
     hits = [e for e in entries if question in e.get("title", "") or question in e.get("desc", "")]
     if hits:
         return hits
@@ -989,45 +912,98 @@ def find_entry_info(question):
         return hits
     return []
 
-@app.route("/admin/manual")
-@login_required
-def admin_manual():
-    if session.get("role") != "admin":
-        abort(403)
-    return render_template("admin_manual.html")
+def ai_summarize(snippets, question, model=None):
+    model = model or OPENAI_MODEL_PRIMARY
+    prompt = (
+        "以下は五島観光・生活ガイド資料から関連する抜粋です。\n"
+        f"質問: 「{question}」\n"
+        "抜粋資料を参考に、やさしく正確に回答してください。\n\n"
+        "-----\n"
+        + "\n---\n".join(snippets)
+        + "\n-----"
+    )
+    return openai_chat(
+        model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.5,
+        max_tokens=512,
+    )
 
-@app.route("/admin/synonyms", methods=["GET", "POST"])
-@login_required
-def admin_synonyms():
-    # 管理者のみ許可
-    if session.get("role") != "admin":
-        flash("権限がありません")
-        return redirect(url_for("login"))
+def smart_search_answer_with_hitflag(question):
+    meta = {"model_primary": OPENAI_MODEL_PRIMARY, "fallback": None}
 
-    synonyms = load_synonyms()
+    weather_reply, weather_hit = get_weather_reply(question)
+    if weather_hit:
+        return weather_reply, True, meta
 
-    if request.method == "POST":
-        new_synonyms = {}
-        tags = request.form.getlist("tag")
-        for i, tag in enumerate(tags):
-            syns = request.form.get(f"synonyms_{i}", "")
-            syn_list = [s.strip() for s in syns.split(",") if s.strip()]
-            if tag:
-                new_synonyms[tag] = syn_list
+    if any(word in question for word in ["飛行機", "空港", "航空便", "欠航", "到着", "出発"]):
+        return (
+            "五島つばき空港の最新の運行状況は、公式Webサイトでご確認ください。\n"
+            "▶ https://www.fukuekuko.jp/",
+            True,
+            meta,
+        )
 
-        add_tag = request.form.get("add_tag", "").strip()
-        add_synonyms = request.form.get("add_synonyms", "").strip()
-        if add_tag:
-            new_synonyms[add_tag] = [s.strip() for s in add_synonyms.split(",") if s.strip()]
+    if any(word in question for word in ["フェリー", "船", "運航", "ジェットフォイル", "太古"]):
+        return FERRY_INFO, True, meta
 
-        save_synonyms(new_synonyms)
-        flash("類義語辞書を更新しました。")
-        return redirect(url_for("admin_synonyms"))
+    entries = find_entry_info(question)
+    if entries:
+        if len(entries) == 1:
+            entry = entries[0]
+            msg = f"\n"
+            msg += f"説明: {entry.get('desc','')}\n"
+            msg += f"住所: {entry.get('address','')}\n"
+            if entry.get("map"): msg += f"地図: {entry.get('map')}\n"
+            msg += f"タグ: {', '.join(entry.get('tags',[]))}\n"
+            return msg, True, meta
+        else:
+            try:
+                snippets = [f"タイトル: {e['title']}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n" for e in entries]
+                ai_ans = ai_summarize(snippets, question, model=OPENAI_MODEL_PRIMARY)
+                return ai_ans, True, meta
+            except Exception as e:
+                return "複数スポットが見つかりましたが要約に失敗しました。", False, meta
 
-    return render_template("admin_synonyms.html", synonyms=synonyms)
+    snippets = search_text_files(question, data_dir=DATA_DIR)
+    if snippets:
+        try:
+            return ai_summarize(snippets, question, model=OPENAI_MODEL_PRIMARY), True, meta
+        except Exception as e:
+            return "AI要約でエラー: " + str(e), False, meta
+
+    web_texts = fetch_and_search_web(question)
+    if web_texts:
+        try:
+            return ai_summarize(web_texts, question, model=OPENAI_MODEL_PRIMARY), True, meta
+        except Exception as e:
+            return "Web要約でエラー: " + str(e), False, meta
+
+    suggest_text, suggest_meta = ("", {})
+    if SUGGEST_UNHIT:
+        suggest_text, suggest_meta = build_refine_suggestions(question)
+        meta["suggestions"] = suggest_meta
+
+    if REASK_UNHIT:
+        fallback_text = ai_suggest_faq(question, model=OPENAI_MODEL_HIGH)
+        if fallback_text:
+            meta["fallback"] = {"mode": "high_faq", "model": OPENAI_MODEL_HIGH}
+            answer = "【参考回答（データ未登録のため要確認）】\n" + fallback_text
+            if suggest_text:
+                answer += "\n---\n" + suggest_text
+            return answer, False, meta
+
+        if suggest_text:
+            return ("申し訳ありません。該当データが見つかりませんでした。\n" + suggest_text, False, meta)
+
+        return ("申し訳ありません。現在この質問には確実な情報を持っていません。", False, meta)
+
+    if suggest_text:
+        return ("申し訳ありません。該当データが見つかりませんでした。\n" + suggest_text, False, meta)
+
+    return ("申し訳ありません。現在この質問には確実な情報を持っていません。", False, meta)
 
 # === data/配下パンフ全文検索 ===
-
 def search_text_files(question, data_dir=DATA_DIR, max_snippets=5, window=80):
     snippets = []
     words = set(re.split(r'\s+|　|,|、|。', question))
@@ -1054,135 +1030,8 @@ def search_text_files(question, data_dir=DATA_DIR, max_snippets=5, window=80):
     return snippets if snippets else None
 
 # === Webクロール（拡張用フック。初期はダミー返答） ===
-
 def fetch_and_search_web(question):
     return None
-
-# === AI要約（OpenAI GPT利用） ===
-
-def ai_summarize(snippets, question, model=None):
-    model = model or OPENAI_MODEL_PRIMARY
-    prompt = (
-        "以下は五島観光・生活ガイド資料から関連する抜粋です。\n"
-        f"質問: 「{question}」\n"
-        "抜粋資料を参考に、やさしく正確に回答してください。\n\n"
-        "-----\n"
-        + "\n---\n".join(snippets)
-        + "\n-----"
-    )
-    return openai_chat(
-        model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5,
-        max_tokens=512,
-    )
-
-# === 総合応答ロジック（API/LINE/WEB共通）＋ヒットフラグ＋メタ ===
-
-def smart_search_answer_with_hitflag(question):
-    meta = {"model_primary": OPENAI_MODEL_PRIMARY, "fallback": None}
-
-    weather_reply, weather_hit = get_weather_reply(question)
-    if weather_hit:
-        return weather_reply, True, meta
-
-    # 飛行機・空港・航空便の質問は必ず公式サイトを案内
-    if any(word in question for word in ["飛行機", "空港", "航空便", "欠航", "到着", "出発"]):
-        return (
-            "五島つばき空港の最新の運行状況は、公式Webサイトでご確認ください。\n"
-            "▶ https://www.fukuekuko.jp/",
-            True,
-            meta,
-        )
-
-    if any(word in question for word in ["フェリー", "船", "運航", "ジェットフォイル", "太古"]):
-        return FERRY_INFO, True, meta
-
-    # DB検索
-    entries = find_entry_info(question)
-    if entries:
-        if len(entries) == 1:
-            entry = entries[0]
-            msg = f"【{', '.join(entry.get('areas', []))}: {entry.get('title','')}】\n"
-            msg += f"説明: {entry.get('desc','')}\n"
-            msg += f"住所: {entry.get('address','')}\n"
-            if entry.get("map"): msg += f"地図: {entry.get('map')}\n"
-            msg += f"タグ: {', '.join(entry.get('tags',[]))}\n"
-            return msg, True, meta
-        else:
-            try:
-                snippets = [f"タイトル: {e['title']}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n" for e in entries]
-                ai_ans = ai_summarize(snippets, question, model=OPENAI_MODEL_PRIMARY)
-                return ai_ans, True, meta
-            except Exception as e:
-                return "複数スポットが見つかりましたが要約に失敗しました。", False, meta
-
-    # data/全文検索
-    snippets = search_text_files(question, data_dir=DATA_DIR)
-    if snippets:
-        try:
-            return ai_summarize(snippets, question, model=OPENAI_MODEL_PRIMARY), True, meta
-        except Exception as e:
-            return "AI要約でエラー: " + str(e), False, meta
-
-    # Web検索（未実装フック）
-    web_texts = fetch_and_search_web(question)
-    if web_texts:
-        try:
-            return ai_summarize(web_texts, question, model=OPENAI_MODEL_PRIMARY), True, meta
-        except Exception as e:
-            return "Web要約でエラー: " + str(e), False, meta
-
-    # どのデータにもヒットしない場合のフォールバック＋絞り込み候補
-    suggest_text, suggest_meta = ("", {})
-    if SUGGEST_UNHIT:
-        suggest_text, suggest_meta = build_refine_suggestions(question)
-        meta["suggestions"] = suggest_meta
-
-    if REASK_UNHIT:
-        fallback_text = ai_suggest_faq(
-            question,
-            model=OPENAI_MODEL_HIGH,
-        )
-
-        # 参考回答が生成できたら、それを返す
-        if fallback_text:
-            meta["fallback"] = {
-                "mode": "high_faq",
-                "model": OPENAI_MODEL_HIGH,
-            }
-            answer = "【参考回答（データ未登録のため要確認）】\n" + fallback_text
-            if suggest_text:
-                answer += "\n---\n" + suggest_text
-            return answer, False, meta
-
-        # 生成に失敗：候補があれば候補だけ返す
-        if suggest_text:
-            return (
-                "申し訳ありません。該当データが見つかりませんでした。\n" + suggest_text,
-                False,
-                meta,
-            )
-
-        # 候補も無い場合の最終フォールバック
-        return (
-            "申し訳ありません。現在この質問には確実な情報を持っていません。",
-            False,
-            meta,
-        )
-
-    # （REASK_UNHIT=False のとき）厳格モード：候補だけでも返す
-    if suggest_text:
-        return (
-            "申し訳ありません。該当データが見つかりませんでした。\n" + suggest_text,
-            False,
-            meta,
-        )
-    return (
-        "申し訳ありません。現在この質問には確実な情報を持っていません。",
-        False,
-        meta,
-    )
 
 # === APIエンドポイント（/ask） ===
 @app.route("/ask", methods=["POST"])
@@ -1190,7 +1039,6 @@ def ask():
     data = request.get_json(silent=True) or {}
     question = data.get("question", "")
 
-    # 1) 原文で天気を先に判定 → 入力言語で即返信
     weather_reply, weather_hit = get_weather_reply(question)
     if weather_hit:
         save_qa_log(question, weather_reply, source="web", hit_db=True, extra={"kind": "weather"})
@@ -1199,19 +1047,14 @@ def ask():
     if not question:
         return jsonify({"error": "質問が空です"}), 400
 
-    # 言語検出→解析は日本語→最終は設定に応じて元言語/日本語
     orig_lang = detect_lang_simple(question)
     lang = orig_lang
-    # ★外国語対応OFFなら、常に日本語として返す
     if not ENABLE_FOREIGN_LANG:
         lang = "ja"
 
-    # 解析用は“原文が日本語でなければ”日本語に翻訳
     q_for_logic = question if orig_lang == "ja" else translate_text(question, "ja")
-
     answer_ja, hit_db, meta = smart_search_answer_with_hitflag(q_for_logic)
 
-    # 最終返信
     if lang == "ja":
         answer = answer_ja
     else:
@@ -1228,7 +1071,6 @@ def admin_unhit_report():
         abort(403)
     report = generate_unhit_report(7)
     return render_template("admin_unhit_report.html", unhit_report=report)
-
 
 # === LINE Webhook ===
 @app.route("/callback", methods=["POST"])
@@ -1249,7 +1091,6 @@ def callback():
 def handle_message(event):
     user_message = event.message.text
 
-    # 1) 原文で天気を先に判定 → 入力言語で即返信（二重返信防止のため return）
     weather_reply, weather_hit = get_weather_reply(user_message)
     if weather_hit:
         save_qa_log(user_message, weather_reply, source="line", hit_db=True, extra={"kind": "weather"})
@@ -1261,19 +1102,14 @@ def handle_message(event):
             app.logger.exception("LineBotApi reply error")
         return
 
-    # 言語検出→解析は日本語→最終は設定に応じて元言語/日本語
     orig_lang = detect_lang_simple(user_message)
     lang = orig_lang
-    # ★外国語対応OFFなら、常に日本語として返す
     if not ENABLE_FOREIGN_LANG:
         lang = "ja"
 
-    # 解析用は“原文が日本語でなければ”日本語に翻訳
     q_for_logic = user_message if orig_lang == "ja" else translate_text(user_message, "ja")
-
     answer_ja, hit_db, meta = smart_search_answer_with_hitflag(q_for_logic)
 
-    # 最終返信
     if lang == "ja":
         answer = answer_ja
     else:
@@ -1320,7 +1156,7 @@ def admin_notices():
         flash("権限がありません")
         return redirect(url_for("login"))
     notices = load_notices()
-    edit_id = request.values.get("edit")  # GET or POST
+    edit_id = request.values.get("edit")
     edit_notice = None
 
     if edit_id:
@@ -1378,7 +1214,6 @@ def admin_notices():
         return redirect(url_for("admin_notices"))
     return render_template("admin_notices.html", notices=notices, edit_notice=edit_notice)
 
-
 @app.route("/admin/notices/delete/<int:idx>", methods=["POST"])
 @login_required
 def delete_notice(idx):
@@ -1391,12 +1226,10 @@ def delete_notice(idx):
     flash("お知らせを削除しました")
     return redirect(url_for("admin_notices"))
 
-
 @app.route("/notices")
 def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
