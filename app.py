@@ -28,6 +28,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
 app.config.update(
     SESSION_COOKIE_SECURE=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_HTTPONLY=True,  # ← これを追加
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
 )
 
@@ -953,7 +954,7 @@ def smart_search_answer_with_hitflag(question):
             entry = entries[0]
             areas = ', '.join(entry.get('areas', []))
             title = entry.get('title', '')
-            msg = f"\n"
+            msg = f"\n" if title or areas else ""
             msg += f"説明: {entry.get('desc','')}\n"
             msg += f"住所: {entry.get('address','')}\n"
             if entry.get('map'):
