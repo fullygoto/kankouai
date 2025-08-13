@@ -163,37 +163,41 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
 # === OpenAIラッパ（モデル切替を一元管理） ===
 def openai_chat(model, messages, **kwargs):
     """
-    Chat Completions -> (失敗時) Responses API に自動フォールバック。
-    既存コードの max_tokens は自動で max_completion_tokens に変換します。
+    まず Chat Completions をシンプルに叩く（トークン上限は渡さない）。
+    失敗時は Responses API に切替。max_tokens/max_completion_tokens は
+    max_output_tokens に集約して Responses 側だけに適用する。
     """
-    # ❶ パラメータ変換
     params = dict(kwargs)
-    if "max_tokens" in params:
-        params["max_completion_tokens"] = params.pop("max_tokens")
 
-    # ❷ Chat Completions を試す
+    # 受け取った上限パラメータは Responses 用に温存し、Chat には渡さない
+    mt  = params.pop("max_tokens", None)
+    mct = params.pop("max_completion_tokens", None)
+    mot = mct if mct is not None else mt  # Responses 用の最終上限
+
+    # ❶ Chat Completions（トークン上限なしでまず試す）
     try:
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
-            **params,
+            **params,   # ← max_* は含まれていない
         )
         return resp.choices[0].message.content
     except Exception as e1:
         print("[OpenAI error - chat.completions]", e1)
 
-    # ❸ Responses API にフォールバック（トークン上限指定は省略して安全側に）
+    # ❷ Responses API（こちらにだけ上限をかける）
     try:
-        # messages を素直に 1 本のテキストに連結
         joined = "\n".join(
             f"{m.get('role','user')}: {m.get('content','')}" for m in messages
         )
-        resp = client.responses.create(
-            model=model,
-            input=joined,
-            temperature=kwargs.get("temperature", 0.3),
-        )
-        # Python SDK v1 のショートカット
+        rparams = {
+            "model": model,
+            "input": joined,
+            "temperature": params.get("temperature", 0.3),
+        }
+        if mot is not None:
+            rparams["max_output_tokens"] = mot
+        resp = client.responses.create(**rparams)
         return getattr(resp, "output_text", "") or ""
     except Exception as e2:
         print("[OpenAI error - responses]", e2)
@@ -552,7 +556,7 @@ def admin_entry():
         entries=entries,
         entry_edit=entry_edit,
         edit_id=edit_id,
-        role=session["role"]
+        role=session.get("role", "")
     )
 
 @app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
@@ -561,6 +565,12 @@ def admin_entry():
 def delete_entry(idx):
     if session.get("role") != "admin":
         abort(403)
+
+    # フォームに隠し項目で idx が来るパターンも許可
+    if idx is None:
+        form_idx = request.form.get("idx")
+        if form_idx is not None and str(form_idx).isdigit():
+            idx = int(form_idx)
 
     if idx is None:
         flash("削除対象が指定されていません")
