@@ -7,7 +7,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 from dotenv import load_dotenv
 load_dotenv()
 
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 # LINE Bot関連
 from linebot import LineBotApi, WebhookHandler  # ←この1行を追加
@@ -70,6 +70,108 @@ SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 # 必要フォルダ作成
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+
+
+# === ディスク/パスの診断ログ（Renderのデプロイログに出力） ===
+app.logger.info("DATA_BASE_DIR=%s", BASE_DIR)
+app.logger.info("Resolved paths: ENTRIES_FILE=%s, USERS_FILE=%s, LOG_DIR=%s",
+                ENTRIES_FILE, USERS_FILE, LOG_DIR)
+
+# BASE_DIR への書き込みテスト
+try:
+    os.makedirs(BASE_DIR, exist_ok=True)
+    test_path = os.path.join(BASE_DIR, ".__writetest")
+    with open(test_path, "w", encoding="utf-8") as f:
+        f.write("ok")
+    os.remove(test_path)
+    app.logger.info("Write test to BASE_DIR: OK")
+except Exception as e:
+    app.logger.error("Write test to BASE_DIR: FAILED (%s)", e)
+
+# users.json の有無とサイズ
+try:
+    if os.path.exists(USERS_FILE):
+        app.logger.info("users.json exists, size=%d bytes", os.path.getsize(USERS_FILE))
+    else:
+        app.logger.warning("users.json not found")
+except Exception as e:
+    app.logger.error("users.json check error: %s", e)
+
+# BASE_DIR の中身（一覧）
+try:
+    if os.path.exists(BASE_DIR):
+        app.logger.info("BASE_DIR listing: %s", os.listdir(BASE_DIR))
+    else:
+        app.logger.error("BASE_DIR does not exist")
+except Exception as e:
+    app.logger.warning("BASE_DIR listing failed: %s", e)
+
+
+# === 初回ブートストラップ（データファイル生成＆管理者ユーザー作成） ===
+ADMIN_INIT_USER = os.environ.get("ADMIN_INIT_USER", "admin")
+ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")  # 初回だけ使う。作成後は環境変数を消すの推奨
+
+def _ensure_json(path, default_obj):
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(default_obj, f, ensure_ascii=False, indent=2)
+
+def _bootstrap_files_and_admin():
+    # 必須JSONを空で用意（無ければ作成）
+    _ensure_json(ENTRIES_FILE, [])
+    _ensure_json(SYNONYM_FILE, {})
+    _ensure_json(NOTICES_FILE, [])
+    _ensure_json(SHOP_INFO_FILE, {})
+
+    # users.json が無い or 空なら作成。ADMIN_INIT_PASSWORD があれば管理者も1件作る
+    users = []
+    users_exists = os.path.exists(USERS_FILE)
+    if users_exists:
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                users = json.load(f)
+        except Exception:
+            users = []
+
+    has_admin = any(u.get("role") == "admin" for u in users)
+
+    if not users_exists or not users:
+        # ファイルが無い/空 → 新規作成
+        if ADMIN_INIT_PASSWORD:
+            users = [{
+                "user_id": ADMIN_INIT_USER,
+                "name": "管理者",
+                "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD, method="scrypt"),
+                "role": "admin"
+            }]
+            with open(USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(users, f, ensure_ascii=False, indent=2)
+            app.logger.warning(
+                "users.json を新規作成し、管理者ユーザー '%s' を作成しました。初回ログイン後 ADMIN_INIT_PASSWORD を環境変数から削除してください。",
+                ADMIN_INIT_USER,
+            )
+        else:
+            # パス未指定なら空の users.json だけ用意
+            with open(USERS_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f, ensure_ascii=False, indent=2)
+            app.logger.warning(
+                "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
+            )
+    elif not has_admin and ADMIN_INIT_PASSWORD:
+        # 既存にadminがいない場合だけ、追記でadmin作成
+        users.append({
+            "user_id": ADMIN_INIT_USER,
+            "name": "管理者",
+            "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD, method="scrypt"),
+            "role": "admin"
+        })
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, ensure_ascii=False, indent=2)
+        app.logger.warning("既存 users.json に管理者 '%s' を追加しました。", ADMIN_INIT_USER)
+
+# 実行
+_bootstrap_files_and_admin()
+
 
 # 必須キーが未設定なら警告（起動は継続）
 if not OPENAI_API_KEY:
