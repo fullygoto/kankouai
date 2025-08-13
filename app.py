@@ -951,11 +951,14 @@ def smart_search_answer_with_hitflag(question):
     if entries:
         if len(entries) == 1:
             entry = entries[0]
+            areas = ', '.join(entry.get('areas', []))
+            title = entry.get('title', '')
             msg = f"\n"
             msg += f"説明: {entry.get('desc','')}\n"
             msg += f"住所: {entry.get('address','')}\n"
-            if entry.get("map"): msg += f"地図: {entry.get('map')}\n"
-            msg += f"タグ: {', '.join(entry.get('tags',[]))}\n"
+            if entry.get('map'):
+                msg += f"地図: {entry.get('map')}\n"
+            msg += f"タグ: {', '.join(entry.get('tags', []))}\n"
             return msg, True, meta
         else:
             try:
