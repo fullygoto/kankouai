@@ -837,19 +837,56 @@ def login():
             flash("ユーザーIDまたはパスワードが違います")
     return render_template("login.html")
 
-@app.route("/admin/synonyms")
+# ======= ここから：復活&強化した 2 ルート =======
+
+@app.route("/admin/synonyms", methods=["GET", "POST"])
 @login_required
 def admin_synonyms():
     if session.get("role") != "admin":
         abort(403)
-    return render_template("admin_entries_edit.html", entries_raw=json.dumps(load_entries(), ensure_ascii=False, indent=2))
+
+    if request.method == "POST":
+        # DOM順の tag リスト
+        tags_in_dom_order = [t.strip() for t in request.form.getlist("tag")]
+
+        # synonyms_* のインデックス（欠番対応）
+        syn_keys = [k for k in request.form.keys() if k.startswith("synonyms_")]
+        syn_indices = sorted(
+            [int(k.split("_", 1)[1]) for k in syn_keys if k.split("_", 1)[1].isdigit()]
+        )
+
+        new_synonyms = {}
+        # DOM順に並んだ tag と、インデックス昇順の synonyms_* を対応づける
+        for tag, idx in zip(tags_in_dom_order, syn_indices):
+            if not tag:
+                continue
+            syn_str = request.form.get(f"synonyms_{idx}", "") or ""
+            syn_list = [s.strip() for s in syn_str.split(",") if s.strip()]
+            new_synonyms[tag] = syn_list
+
+        # 追加行
+        add_tag = (request.form.get("add_tag") or "").strip()
+        add_syns_str = request.form.get("add_synonyms", "") or ""
+        if add_tag:
+            add_list = [s.strip() for s in add_syns_str.split(",") if s.strip()]
+            new_synonyms[add_tag] = add_list
+
+        save_synonyms(new_synonyms)
+        flash("類義語辞書を保存しました")
+        return redirect(url_for("admin_synonyms"))
+
+    # GET
+    synonyms = load_synonyms()
+    return render_template("admin_synonyms.html", synonyms=synonyms)
 
 @app.route("/admin/manual")
 @login_required
 def admin_manual():
     if session.get("role") != "admin":
         abort(403)
-    return "<h1>運用マニュアル（準備中）</h1>"
+    return render_template("admin_manual.html")
+
+# ======= ここまで：復活&強化した 2 ルート =======
 
 @app.route("/logout")
 def logout():
