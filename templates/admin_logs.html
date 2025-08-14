@@ -9,89 +9,35 @@
     .nav{margin-bottom:18px;}
     .nav a{margin-right:16px;font-size:1em;color:#2a8ed8;text-decoration:none;font-weight:500;}
     .nav a:hover{text-decoration:underline;}
-    h1{margin:0 0 10px 0;}
-    .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0 18px;}
-    .toolbar input[type=text], .toolbar select{padding:8px 10px;border:1px solid #b0c4d7;border-radius:8px;font-size:0.98em;}
-    .toolbar .badge{display:inline-block;padding:6px 10px;border-radius:999px;font-size:0.86em;background:#eef6ff;color:#2a8ed8;}
-    .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
-    .btn.secondary{background:#5aa}
-    .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+    h1{margin:0 0 6px 0;}
+    .muted{color:#789;font-size:0.92em}
     .log-card{background:#f7faf7;margin:12px 0;border-radius:12px;padding:14px 16px;box-shadow:0 2px 6px #e0e6ed30;}
-    .meta{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:0.92em;color:#567;margin:4px 0 8px;}
-    .meta .tag{padding:2px 8px;border-radius:999px;background:#eef6ff;color:#2a8ed8;}
-    .meta .tag.hit{background:#e9f8ef;color:#178a49;}
-    .meta .tag.miss{background:#fff1f1;color:#c44;}
-    .question{font-weight:600;margin:6px 0 6px;font-size:1.02em}
-    details.answer{margin-top:6px;background:#fff;border:1px solid #e6eef2;border-radius:8px;padding:8px 10px}
-    details>summary{cursor:pointer;color:#2a8ed8;font-weight:600;list-style:none}
-    details>summary::-webkit-details-marker{display:none}
-    .kv{border-collapse:collapse;margin:6px 0 0}
-    .kv td{border:1px solid #e3e9ee;padding:4px 6px;font-size:0.92em}
-    .kv td.k{background:#f6f9fb;min-width:120px;font-weight:500;color:#345}
+    .meta{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:0.92em;color:#567;margin-bottom:10px}
+    .tag{padding:2px 8px;border-radius:999px;background:#eef6ff;color:#2a8ed8;}
+    .hit{background:#e9f8ef;color:#178a49;}
+    .miss{background:#fff1f1;color:#c44;}
+    .label{font-weight:600;color:#345;margin:6px 0 2px}
+    .box{background:#fff;border:1px solid #e6eef2;border-radius:8px;padding:10px 12px;white-space:pre-wrap;word-break:break-word}
     .row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-    .muted{color:#789;font-size:0.9em}
-    .empty{padding:10px 12px;background:#fff;border:1px dashed #cfe2ef;border-radius:10px;color:#789}
-    @media (max-width:720px){
-      .container{padding:14px}
-    }
+    .btn{padding:7px 12px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+    .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+    .empty{padding:10px 12px;background:#fff;border:1px dashed #cfe2ef;border-radius:10px;color:#789;margin-top:12px}
+    @media (max-width:720px){.container{padding:14px}}
   </style>
   <script>
+    function copyText(t){ navigator.clipboard.writeText(t).then(()=>alert('コピーしました')); }
     function fmt(ts){
       try{
-        // ISO文字列→ ローカル日時簡易表示
-        const d = new Date(ts);
-        const y = d.getFullYear();
-        const m = ('0'+(d.getMonth()+1)).slice(-2);
-        const dd= ('0'+d.getDate()).slice(-2);
-        const hh= ('0'+d.getHours()).slice(-2);
+        const d=new Date(ts);const y=d.getFullYear();
+        const m=('0'+(d.getMonth()+1)).slice(-2);
+        const dd=('0'+d.getDate()).slice(-2);
+        const hh=('0'+d.getHours()).slice(-2);
         const mm=('0'+d.getMinutes()).slice(-2);
         return `${y}-${m}-${dd} ${hh}:${mm}`;
       }catch(e){ return ts; }
     }
-    function copyText(t){
-      navigator.clipboard.writeText(t).then(()=>{ alert('コピーしました'); });
-    }
-    function filterLogs(){
-      const q = document.getElementById('q').value.trim().toLowerCase();
-      const hit = document.getElementById('hit').value; // all/hit/miss
-      const src = document.getElementById('src').value; // all/web/line
-      const from = document.getElementById('from').value; // yyyy-mm-dd
-      const to   = document.getElementById('to').value;
-      const cards = document.querySelectorAll('.log-card');
-      let shown = 0;
-      cards.forEach(card=>{
-        const txt = card.dataset.text;
-        const hitdb = card.dataset.hitdb;  // "true" / "false"
-        const source= card.dataset.source; // "web" / "line"
-        const tsv   = card.dataset.ts;     // ISO
-        let ok = true;
-        if(q && !txt.includes(q)) ok = false;
-        if(hit !== 'all'){
-          if(hit==='hit'  && hitdb!=='true') ok=false;
-          if(hit==='miss' && hitdb!=='false') ok=false;
-        }
-        if(src!=='all' && source!==src) ok=false;
-        if(from){
-          try{ if(new Date(tsv) < new Date(from)) ok=false; }catch(e){}
-        }
-        if(to){
-          try{ 
-            // to の 23:59:59 まで含める
-            const toD = new Date(to); toD.setHours(23,59,59,999);
-            if(new Date(tsv) > toD) ok=false;
-          }catch(e){}
-        }
-        card.style.display = ok ? '' : 'none';
-        if(ok) shown++;
-      });
-      document.getElementById('count').textContent = shown;
-    }
     document.addEventListener('DOMContentLoaded', ()=>{
-      // 初期フォーマット
-      document.querySelectorAll('[data-ts]').forEach(el=>{
-        el.textContent = fmt(el.getAttribute('data-ts'));
-      });
-      filterLogs();
+      document.querySelectorAll('[data-ts]').forEach(el=>{ el.textContent = fmt(el.getAttribute('data-ts')); });
     });
   </script>
 </head>
@@ -108,82 +54,57 @@
       <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
       <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
     </div>
-    <h1>質問・回答ログ</h1>
-    <div class="muted">直近 {{ logs|length }} 件を表示（ページ内フィルタ可）</div>
 
-    <div class="toolbar">
-      <input type="text" id="q" placeholder="キーワード（質問/回答/メタ）" oninput="filterLogs()">
-      <select id="hit" onchange="filterLogs()">
-        <option value="all">ヒット/未ヒット：すべて</option>
-        <option value="hit">ヒットのみ</option>
-        <option value="miss">未ヒットのみ</option>
-      </select>
-      <select id="src" onchange="filterLogs()">
-        <option value="all">ソース：すべて</option>
-        <option value="web">Web</option>
-        <option value="line">LINE</option>
-      </select>
-      <span class="badge">表示件数：<span id="count">0</span></span>
-      <span class="muted">期間：</span>
-      <input type="date" id="from" onchange="filterLogs()">〜
-      <input type="date" id="to" onchange="filterLogs()">
-    </div>
+    <h1>質問・回答ログ</h1>
+    <div class="muted">直近 {{ logs|length }} 件を表示</div>
 
     {% if not logs %}
       <div class="empty">ログがありません。</div>
     {% endif %}
 
     {% for item in logs %}
-      {% set ts = item.timestamp or item.get('timestamp') %}
+      {% set ts = item.timestamp or item.get('timestamp','') %}
       {% set source = item.source or item.get('source','web') %}
       {% set q = item.question or item.get('question','') %}
       {% set a = item.answer or item.get('answer','') %}
       {% set hit_db = item.hit_db or item.get('hit_db', False) %}
       {% set extra = item.extra or item.get('extra', {}) %}
 
-      <div class="log-card"
-           data-text="{{ (q ~ ' ' ~ a ~ ' ' ~ source ~ ' ' ~ (extra|tojson))|lower }}"
-           data-hitdb="{{ 'true' if hit_db else 'false' }}"
-           data-source="{{ source }}"
-           data-ts="{{ ts }}">
+      <div class="log-card">
         <div class="meta">
           <span class="tag">{{ source|upper }}</span>
-          {% if hit_db %}
-            <span class="tag hit">ヒット</span>
-          {% else %}
-            <span class="tag miss">未ヒット</span>
-          {% endif %}
+          <span class="tag {{ 'hit' if hit_db else 'miss' }}">{{ 'ヒット' if hit_db else '未ヒット' }}</span>
           <span class="muted">日時：<b data-ts="{{ ts }}"></b></span>
           {% if extra and extra.get('kind') %}
             <span class="tag">{{ extra.get('kind') }}</span>
           {% endif %}
         </div>
 
-        <div class="question">Q. {{ q }}</div>
+        <div class="label">Q.</div>
+        <div class="box">{{ q }}</div>
 
-        <details class="answer">
-          <summary>回答を表示</summary>
-          <div style="white-space:pre-wrap; margin-top:6px;">{{ a }}</div>
-          {% if extra and extra.items()|length > 0 %}
-            <table class="kv">
-              {% for k, v in extra.items() %}
-                <tr><td class="k">{{ k }}</td><td style="white-space:pre-wrap">{{ v }}</td></tr>
-              {% endfor %}
-            </table>
-          {% endif %}
-        </details>
+        <div class="label">A.</div>
+        <div class="box">{{ a }}</div>
+
+        {% if extra and extra.items()|length > 0 %}
+          <div class="label">メタ情報</div>
+          <div class="box">
+            {% for k, v in extra.items() %}
+              <div><b>{{ k }}：</b><span style="white-space:pre-wrap">{{ v }}</span></div>
+            {% endfor %}
+          </div>
+        {% endif %}
 
         <div class="row-actions">
           <button class="btn ghost" onclick="copyText(`{{ q|replace('`','\\`') }}`)">質問をコピー</button>
           <button class="btn ghost" onclick="copyText(`{{ a|replace('`','\\`') }}`)">回答をコピー</button>
           {% if not hit_db %}
-            <!-- 未ヒットをDB登録しやすくする簡易起票（タイトル=質問、説明=回答先頭120字） -->
             <form method="post" action="{{ url_for('admin_add_entry') }}" style="display:inline;">
               <input type="hidden" name="title" value="{{ q[:80] }}">
               <input type="hidden" name="desc" value="{{ a[:120] }}">
               <input type="hidden" name="tags" value="">
               <input type="hidden" name="areas" value="">
-              <button class="btn secondary" type="submit" title="最小情報でDBへ下書き追加（後で編集）">DBに追加</button>
+              <button class="btn" type="submit" title="最小情報でDBへ下書き追加（後で編集）">DBに追加</button>
             </form>
           {% endif %}
         </div>
