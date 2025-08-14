@@ -698,6 +698,95 @@ def admin_entries_edit():
 
     return render_template("admin_entries_edit.html", entries_raw=entries_raw)
 
+
+# === CSV取り込み（既存に追加） ===
+@app.route("/admin/entries_import_csv", methods=["POST"])
+@login_required
+def admin_entries_import_csv():
+    if session.get("role") != "admin":
+        abort(403)
+
+    file = request.files.get("csv_file")
+    if not file:
+        flash("CSVファイルが選択されていません")
+        return redirect(url_for("admin_entries_edit"))
+
+    import csv, io, json as _json
+
+    # UTF-8 (BOMあり) もOK
+    buf = io.TextIOWrapper(file.stream, encoding="utf-8-sig", newline="")
+    reader = csv.DictReader(buf)
+
+    def split_list(s):
+        if not s: return []
+        parts = []
+        for chunk in str(s).replace("\r\n","\n").split("\n"):
+            for p in chunk.split(","):
+                p = p.strip()
+                if p: parts.append(p)
+        return parts
+
+    new_entries = []
+    for row in reader:
+        category = (row.get("category") or "観光").strip()
+        title    = (row.get("title") or "").strip()
+        desc     = (row.get("desc") or "").strip()
+        address  = (row.get("address") or "").strip()
+        map_url  = (row.get("map") or "").strip()
+        tags     = split_list(row.get("tags"))
+        areas    = split_list(row.get("areas"))
+        links    = split_list(row.get("links"))
+
+        # extras は ①"extras"列にJSON ②extra_○○/extra:○○列 を集約
+        extras = {}
+        extras_raw = row.get("extras")
+        if extras_raw:
+            try:
+                obj = _json.loads(extras_raw)
+                if isinstance(obj, dict):
+                    extras.update({str(k): str(v) for k,v in obj.items()})
+            except Exception:
+                pass
+        for k, v in row.items():
+            if k is None: 
+                continue
+            ks = str(k)
+            if ks.startswith("extra_") or ks.startswith("extra:"):
+                name = ks.split("_",1)[1] if ks.startswith("extra_") else ks.split(":",1)[1]
+                name = name.strip()
+                if name:
+                    extras[name] = str(v or "").strip()
+
+        if not title or not desc:
+            # 必須不足はスキップ（厳格にしたければ flash で弾いてOK）
+            continue
+
+        e = {
+            "category": category,
+            "title": title,
+            "desc": desc,
+            "address": address,
+            "map": map_url,
+            "tags": tags,
+            "areas": areas,
+        }
+        if links:  e["links"] = links
+        if extras: e["extras"] = extras
+
+        new_entries.append(e)
+
+    if not new_entries:
+        flash("CSVから有効な行が見つかりませんでした（title/desc 必須）")
+        return redirect(url_for("admin_entries_edit"))
+
+    entries = load_entries()
+    entries.extend(new_entries)
+    save_entries(entries)
+
+    flash(f"CSVから {len(new_entries)} 件を追加しました（既存に追記）")
+    return redirect(url_for("admin_entries_edit"))
+
+
 @app.route("/admin/logs")
 @login_required
 def admin_logs():
