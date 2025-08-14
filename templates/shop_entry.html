@@ -11,7 +11,31 @@
         textarea {resize:vertical;}
         select, input[type=checkbox] {margin-bottom:10px;}
         .add-btn {padding: 7px 24px; font-size:1em; border-radius:7px; background: #2a8ed8; color:#fff; border:none; margin-top: 8px;}
+        .extra-row {margin:6px 0;}
+        .mini-note {font-size:0.92em; color:#888;}
     </style>
+    <script>
+      function addExtraRowShop() {
+        const wrap = document.getElementById('extras-list-shop');
+        const div = document.createElement('div');
+        div.className = 'extra-row';
+        div.innerHTML = `
+          <input name="extras_key[]" placeholder="キー">
+          ＝
+          <input name="extras_val[]" placeholder="値">
+          <button type="button" onclick="this.parentNode.remove()">－</button>
+        `;
+        wrap.appendChild(div);
+      }
+      function validateAreasShop() {
+        const checks = document.querySelectorAll('#shop_entry_form input[name="areas"]:checked');
+        if (checks.length === 0) {
+          alert('エリアは1つ以上選択してください。');
+          return false;
+        }
+        return true;
+      }
+    </script>
 </head>
 <body>
 <div class="container">
@@ -25,7 +49,8 @@
         </ul>
       {% endif %}
     {% endwith %}
-    <form method="post" id="shop_entry_form">
+
+    <form method="post" id="shop_entry_form" onsubmit="return validateAreasShop()">
         <label>カテゴリー</label><br>
         <select name="category">
             {% set cat_list = ["飲食", "宿泊", "診療所", "役所", "交通", "バス", "イベント", "特売"] %}
@@ -33,43 +58,86 @@
             <option value="{{ c }}" {% if shop_edit and shop_edit.category == c %}selected{% endif %}>{{ c }}</option>
             {% endfor %}
         </select><br>
+
         <label>店舗名</label><br>
         <input type="text" name="title" value="{{ shop_edit.title if shop_edit else '' }}" required><br>
+
         <label>説明</label><br>
         <textarea name="desc" rows="3" required>{{ shop_edit.desc if shop_edit else '' }}</textarea><br>
+
         <label>住所</label><br>
         <input type="text" name="address" value="{{ shop_edit.address if shop_edit else '' }}"><br>
+
         <label>電話番号</label><br>
         <input type="text" name="tel" value="{{ shop_edit.tel if shop_edit else '' }}"><br>
+
         <label>休み</label><br>
         <input type="text" name="holiday" value="{{ shop_edit.holiday if shop_edit else '' }}"><br>
+
         <label>営業時間</label><br>
         <input type="text" name="open_hours" value="{{ shop_edit.open_hours if shop_edit else '' }}"><br>
+
         <label>駐車場</label>
         <select name="parking">
             <option value="あり" {% if shop_edit and shop_edit.parking == 'あり' %}selected{% endif %}>あり</option>
             <option value="なし" {% if shop_edit and shop_edit.parking == 'なし' %}selected{% endif %}>なし</option>
         </select>
         台数：<input type="text" name="parking_num" value="{{ shop_edit.parking_num if shop_edit else '' }}" style="width:80px;">台<br>
+
         <label>支払方法</label><br>
         <input type="checkbox" name="payment" value="現金" {% if shop_edit and shop_edit.payment and '現金' in shop_edit.payment %}checked{% endif %}>現金
         <input type="checkbox" name="payment" value="カード" {% if shop_edit and shop_edit.payment and 'カード' in shop_edit.payment %}checked{% endif %}>カード
         <input type="checkbox" name="payment" value="その他" {% if shop_edit and shop_edit.payment and 'その他' in shop_edit.payment %}checked{% endif %}>その他<br>
+
         <label>備考（自由記述）</label><br>
         <textarea name="remark" rows="2">{{ shop_edit.remark if shop_edit else '' }}</textarea><br>
-        <label>タグ <span style="font-size:0.92em; color:#888;">（カンマ区切り）</span></label><br>
+
+        <label>タグ <span class="mini-note">（カンマ区切り）</span></label><br>
         <input type="text" name="tags" value="{% if shop_edit and shop_edit.tags %}{{ ','.join(shop_edit.tags) }}{% endif %}"><br>
-        <label>エリア（市町）</label><br>
+
+        <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
         {% set area_opts = ["五島市", "新上五島町", "宇久町", "小値賀町"] %}
+        <div class="row">
         {% for area in area_opts %}
           <label style="min-width:unset;">
-          <input type="checkbox" name="areas" value="{{ area }}"
-          {% if shop_edit and shop_edit.areas and area in shop_edit.areas %}checked{% endif %}>
-          {{ area }}
+            <input type="checkbox" name="areas" value="{{ area }}"
+            {% if shop_edit and shop_edit.areas and area in shop_edit.areas %}checked{% endif %}>
+            {{ area }}
           </label>
         {% endfor %}
+        </div>
+
         <label>地図URL</label><br>
         <input type="text" name="map" value="{{ shop_edit.map if shop_edit else '' }}"><br>
+
+        <!-- ▼ 追加: リンク（複数） -->
+        <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
+        <textarea name="links" rows="3" placeholder="https://example.com
+https://instagram.com/xxx">{{ shop_edit.links | join('\n') if shop_edit and shop_edit.links else '' }}</textarea><br>
+
+        <!-- ▼ 追加: 自由項目（キー＝値） -->
+        <label>自由項目（キー＝値）</label>
+        <div id="extras-list-shop">
+          {% set _extras = (shop_edit.extras if shop_edit and shop_edit.extras else {}) %}
+          {% for k, v in _extras.items() %}
+            <div class="extra-row">
+              <input name="extras_key[]" value="{{ k }}" placeholder="例）問い合わせ窓口">
+              ＝
+              <input name="extras_val[]" value="{{ v }}" placeholder="例）info@example.com">
+              <button type="button" onclick="this.parentNode.remove()">－</button>
+            </div>
+          {% endfor %}
+          {% if not _extras %}
+            <div class="extra-row">
+              <input name="extras_key[]" placeholder="例）問い合わせ窓口">
+              ＝
+              <input name="extras_val[]" placeholder="例）info@example.com">
+              <button type="button" onclick="this.parentNode.remove()">－</button>
+            </div>
+          {% endif %}
+        </div>
+        <button class="add-btn" type="button" style="background:#5aa;" onclick="addExtraRowShop()">＋ 行を追加</button>
+
         <button class="add-btn" type="submit">保存</button>
     </form>
 </div>
