@@ -1,37 +1,166 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>観光データ一括編集</title>
-    <style>
-      textarea {width:99%; min-height:420px; font-size:1em; font-family:monospace;}
-      .container {max-width:820px; margin:40px auto; background:#fff; border-radius:17px; padding:30px;}
-      .btn {padding:8px 24px; background:#2a8ed8; color:#fff; border:none; border-radius:7px;}
-    </style>
+<meta charset="utf-8">
+<title>観光データ一括編集（UI）</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","メイリオ",sans-serif;background:#f6faf9;margin:0}
+  .wrap{max-width:1200px;margin:28px auto;padding:0 16px}
+  .top{display:flex;gap:10px;align-items:center;margin-bottom:14px}
+  .btn{padding:8px 14px;border:0;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+  .btn.secondary{background:#6b7280}
+  .btn.danger{background:#e11d48}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px #c6d4e71a}
+  th,td{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;font-size:13px}
+  th{background:#f1f5f9;text-align:left;white-space:nowrap}
+  input[type=text], textarea, select{width:100%;box-sizing:border-box;font-size:13px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+  textarea{min-height:42px;resize:vertical}
+  .muted{opacity:.45}
+  .row-actions{display:flex;gap:6px}
+  .note{font-size:12px;color:#64748b;margin-left:8px}
+  .savebar{position:sticky;bottom:0;background:#f6faf9;padding:10px 0;margin-top:10px}
+</style>
+<script>
+function addRow(){
+  const tpl = document.getElementById('row-template');
+  const tbody = document.getElementById('tbody');
+  const clone = tpl.content.cloneNode(true);
+  tbody.appendChild(clone);
+}
+function removeRow(btn){
+  const tr = btn.closest('tr');
+  tr.parentNode.removeChild(tr);
+}
+function onCategoryChange(sel){
+  const tr = sel.closest('tr');
+  const isTourism = (sel.value === '観光');
+  tr.querySelectorAll('[data-shop]').forEach(el=>{
+    el.disabled = isTourism;
+    el.classList.toggle('muted', isTourism);
+  });
+}
+window.addEventListener('DOMContentLoaded', ()=>{
+  document.querySelectorAll('select[name="category[]"]').forEach(onCategoryChange);
+});
+</script>
 </head>
 <body>
-<div class="container">
-  <h2>観光データ（entries.json）全体編集</h2>
+<div class="wrap">
+  <div class="top">
+    <h1 style="margin:0;font-size:20px;">観光データ一括編集（UI）</h1>
+    <span class="note">※タグ/エリア/支払方法はカンマ区切りで入力</span>
+    <a class="btn secondary" href="{{ url_for('admin_entry') }}">← 登録フォームへ戻る</a>
+  </div>
+
   <form method="post">
-    <textarea name="entries_raw" required>{{ entries_raw }}</textarea>
-    <br>
-    <button class="btn" type="submit">上書き保存</button>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:110px;">カテゴリー</th>
+          <th style="width:180px;">タイトル</th>
+          <th>説明</th>
+          <th style="width:180px;">住所</th>
+          <th style="width:180px;">地図URL</th>
+          <th style="width:160px;">タグ</th>
+          <th style="width:160px;">エリア</th>
+          <th style="width:110px;">電話</th>
+          <th style="width:120px;">休み</th>
+          <th style="width:140px;">営業時間</th>
+          <th style="width:90px;">駐車</th>
+          <th style="width:70px;">台数</th>
+          <th style="width:150px;">支払方法</th>
+          <th style="width:160px;">備考</th>
+          <th style="width:80px;">操作</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        {% for e in entries %}
+        <tr>
+          <td>
+            <select name="category[]" onchange="onCategoryChange(this)">
+              {% set cats = ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
+              {% for c in cats %}
+                <option value="{{ c }}" {% if e.category==c %}selected{% endif %}>{{ c }}</option>
+              {% endfor %}
+            </select>
+          </td>
+          <td><input type="text" name="title[]" value="{{ e.title or '' }}"></td>
+          <td><textarea name="desc[]">{{ e.desc or '' }}</textarea></td>
+          <td><input type="text" name="address[]" value="{{ e.address or '' }}"></td>
+          <td><input type="text" name="map[]" value="{{ e.map or '' }}"></td>
+          <td><input type="text" name="tags[]" value="{% if e.tags %}{{ ','.join(e.tags) }}{% endif %}"></td>
+          <td><input type="text" name="areas[]" value="{% if e.areas %}{{ ','.join(e.areas) }}{% endif %}"></td>
+
+          <td><input data-shop type="text" name="tel[]" value="{{ e.tel or '' }}"></td>
+          <td><input data-shop type="text" name="holiday[]" value="{{ e.holiday or '' }}"></td>
+          <td><input data-shop type="text" name="open_hours[]" value="{{ e.open_hours or '' }}"></td>
+          <td>
+            <select data-shop name="parking[]">
+              <option value="" {% if not e.parking %}selected{% endif %}>-</option>
+              <option value="あり" {% if e.parking=='あり' %}selected{% endif %}>あり</option>
+              <option value="なし" {% if e.parking=='なし' %}selected{% endif %}>なし</option>
+            </select>
+          </td>
+          <td><input data-shop type="text" name="parking_num[]" value="{{ e.parking_num or '' }}"></td>
+          <td><input data-shop type="text" name="payment[]" value="{% if e.payment %}{{ ','.join(e.payment) }}{% endif %}"></td>
+          <td><input data-shop type="text" name="remark[]" value="{{ e.remark or '' }}"></td>
+
+          <td class="row-actions">
+            <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="savebar">
+      <button class="btn" type="button" onclick="addRow()">＋ 行を追加</button>
+      <button class="btn" type="submit">💾 保存する</button>
+    </div>
+
+    <!-- 追加用テンプレート -->
+    <template id="row-template">
+      <tr>
+        <td>
+          <select name="category[]" onchange="onCategoryChange(this)">
+            <option value="観光" selected>観光</option>
+            <option value="飲食">飲食</option>
+            <option value="宿泊">宿泊</option>
+            <option value="診療所">診療所</option>
+            <option value="役所">役所</option>
+            <option value="交通">交通</option>
+            <option value="バス">バス</option>
+            <option value="イベント">イベント</option>
+            <option value="特売">特売</option>
+          </select>
+        </td>
+        <td><input type="text" name="title[]" value=""></td>
+        <td><textarea name="desc[]"></textarea></td>
+        <td><input type="text" name="address[]" value=""></td>
+        <td><input type="text" name="map[]" value=""></td>
+        <td><input type="text" name="tags[]" value=""></td>
+        <td><input type="text" name="areas[]" value=""></td>
+
+        <td><input data-shop type="text" name="tel[]" value=""></td>
+        <td><input data-shop type="text" name="holiday[]" value=""></td>
+        <td><input data-shop type="text" name="open_hours[]" value=""></td>
+        <td>
+          <select data-shop name="parking[]">
+            <option value="" selected>-</option>
+            <option value="あり">あり</option>
+            <option value="なし">なし</option>
+          </select>
+        </td>
+        <td><input data-shop type="text" name="parking_num[]" value=""></td>
+        <td><input data-shop type="text" name="payment[]" value=""></td>
+        <td><input data-shop type="text" name="remark[]" value=""></td>
+
+        <td class="row-actions">
+          <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
+        </td>
+      </tr>
+    </template>
   </form>
-  <div style="color:#e22; margin-top:10px;">
-    ※正しいJSON形式で入力してください（ミスがあるとエラー表示されます）。
-  </div>
-  <div style="margin-top:20px;">
-    <a href="{{ url_for('admin_entry') }}">← 通常の管理画面に戻る</a>
-  </div>
-  {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      <ul>
-      {% for message in messages %}
-        <li style="color:green; font-weight:500;">{{ message }}</li>
-      {% endfor %}
-      </ul>
-    {% endif %}
-  {% endwith %}
 </div>
 </body>
 </html>

@@ -1,32 +1,54 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>お知らせ・イベント・特売一覧</title>
-    <style>
-        body {font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #f6faf9;}
-        .container {background:#fff; padding:28px 32px; margin:40px auto; max-width:700px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d;}
-        .notice-card {background:#f7faf7; margin:14px 0; border-radius:11px; padding:14px 16px; box-shadow: 0 2px 6px #e0e6ed30;}
-        .card-label {color:#2a8ed8; font-size:0.98em;}
-    </style>
+  <meta charset="utf-8">
+  <title>お知らせ・イベント・特売</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","メイリオ",sans-serif;background:#f7fafc;margin:0}
+    .wrap{max-width:900px;margin:28px auto;padding:0 16px}
+    .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+    .back{display:inline-block;padding:8px 12px;border-radius:8px;background:#2a8ed8;color:#fff;text-decoration:none}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+    .card{background:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 4px 16px #c6d4e71f}
+    .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:999px;background:#eef6ff;color:#1c6fdc;margin-right:6px}
+    .date{font-size:12px;color:#6b7280}
+    h3{margin:8px 0 6px;font-size:18px}
+    p{margin:6px 0 0;white-space:pre-wrap}
+    img{max-width:100%;border-radius:10px;margin-top:8px}
+    .empty{padding:24px;text-align:center;color:#6b7280}
+  </style>
 </head>
 <body>
-<div class="container">
-    <h1>お知らせ・イベント・特売一覧</h1>
-    {% for n in notices %}
-      <div class="notice-card">
-        <span class="card-label">タイトル：</span>{{ n.title }}<br>
-        <span class="card-label">カテゴリ：</span>{{ n.category }}<br>
-        <span class="card-label">日付：</span>{{ n.date }}<br>
-        <span class="card-label">内容：</span>{{ n.content }}<br>
-        {% if n.image_url %}
-        <span class="card-label">画像：</span><a href="{{ n.image_url }}" target="_blank">画像を見る</a><br>
-        {% endif %}
-        {% if n.expire_date %}
-        <span class="card-label">有効期限：</span>{{ n.expire_date }}<br>
-        {% endif %}
-      </div>
-    {% endfor %}
-</div>
+  <div class="wrap">
+    <div class="topbar">
+      <h1 style="margin:0;font-size:22px;">お知らせ・イベント・特売</h1>
+      {% if role == "admin" %}
+        <a class="back" href="{{ url_for('admin_notices') }}">← 管理画面へ戻る</a>
+      {% endif %}
+    </div>
+
+    {% if notices and notices|length > 0 %}
+    <div class="grid">
+      {% for n in notices|sort(attribute='date', reverse=True) %}
+        <div class="card">
+          <div>
+            <span class="badge">{{ n.category or "お知らせ" }}</span>
+            <span class="date">
+              {{ n.date }}
+              {% if n.start_date %} / {{ n.start_date }}{% endif %}
+              {% if n.end_date %} - {{ n.end_date }}{% endif %}
+              {% if n.expire_date %}（掲載期限: {{ n.expire_date }}）{% endif %}
+            </span>
+          </div>
+          <h3>{{ n.title }}</h3>
+          <p>{{ n.content }}</p>
+          {% if n.image_url %}<img src="{{ n.image_url }}" alt="image">{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+    {% else %}
+      <div class="empty">現在、表示できるお知らせはありません。</div>
+    {% endif %}
+  </div>
 </body>
 </html>

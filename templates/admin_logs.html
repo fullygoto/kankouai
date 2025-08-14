@@ -1,48 +1,66 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>質問・回答ログ一覧</title>
-    <style>
-        body { font-family: sans-serif; background: #f6faf9; }
-        .container { background: #fff; padding: 24px; margin: 30px auto; max-width: 900px; border-radius: 13px; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #ddd; padding: 8px; font-size: 0.96em; }
-        th { background: #eef3f9; }
-        tr:nth-child(even){background-color: #f9f9fb;}
-        .ans { white-space: pre-wrap; }
-        .hit-yes { color: #197d19; font-weight: bold; }
-        .hit-no  { color: #b33; font-weight: bold; }
-    </style>
+<meta charset="utf-8">
+<title>質問・回答ログ（直近最大300件）</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","メイリオ",sans-serif;background:#f7faf9;margin:0}
+  .wrap{max-width:1200px;margin:28px auto;padding:0 16px}
+  h1{margin:0 0 14px;font-size:20px}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px #c6d4e71a}
+  th,td{border-bottom:1px solid #e5e7eb;padding:10px;vertical-align:top;font-size:13px}
+  th{background:#f1f5f9;text-align:left;white-space:nowrap}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+  .ok{background:#e6f7ef;color:#037a4a}
+  .ng{background:#fde8ec;color:#b8143b}
+  .src{color:#64748b}
+  details>summary{cursor:pointer;color:#2563eb}
+  .q{white-space:pre-wrap}
+  .a{white-space:pre-wrap}
+</style>
 </head>
 <body>
-<div class="container">
-    <a href="{{ url_for('admin_entry') }}" style="float:right;">[データ管理に戻る]</a>
-    <h1>質問・回答ログ（直近最大300件）</h1>
-    <table>
-        <tr>
-            <th>日時</th>
-            <th>経路</th>
-            <th>質問</th>
-            <th>回答</th>
-            <th>DB/パンフHit</th>
-        </tr>
-        {% for log in logs %}
-        <tr>
-            <td>{{ log.timestamp[:19].replace('T',' ') }}</td>
-            <td>{{ log.source }}</td>
-            <td>{{ log.question }}</td>
-            <td class="ans">{{ log.answer|e }}</td>
-            <td>
-                {% if log.hit_db %}
-                  <span class="hit-yes">●</span>
-                {% else %}
-                  <span class="hit-no">―</span>
-                {% endif %}
-            </td>
-        </tr>
-        {% endfor %}
-    </table>
+<div class="wrap">
+  <h1>質問・回答ログ（直近最大300件）</h1>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:170px;">時刻</th>
+        <th style="width:80px;">ソース</th>
+        <th style="width:90px;">ヒット</th>
+        <th>質問</th>
+        <th>回答</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in logs %}
+      <tr>
+        <td class="mono">{{ r.timestamp }}</td>
+        <td class="src mono">{{ r.source or '' }}</td>
+        <td>
+          {% if r.hit_db %}
+            <span class="badge ok">ヒット</span>
+          {% else %}
+            <span class="badge ng">未登録</span>
+          {% endif %}
+        </td>
+        <td class="q">{{ r.question or '' }}</td>
+        <td class="a">
+          {% set ans = r.answer or '' %}
+          {% if ans|length > 140 %}
+            <details>
+              <summary>開く</summary>
+              <div style="margin-top:6px;">{{ ans }}</div>
+            </details>
+          {% else %}
+            {{ ans }}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 </body>
 </html>
