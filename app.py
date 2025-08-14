@@ -2,6 +2,10 @@ import os
 import json
 import re
 import datetime
+import itertools
+from collections import Counter
+from typing import Any, Dict, List
+
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort
 
 from dotenv import load_dotenv
@@ -20,15 +24,78 @@ import io
 
 from functools import wraps
 
+
+# =========================
+#  正規化ヘルパー
+# =========================
+def _split_lines_commas(val: str) -> List[str]:
+    """改行・カンマ両対応で分割 → 余白除去 → 空要素除去"""
+    if not val:
+        return []
+    parts = re.split(r'[\n,]+', str(val))
+    return [p.strip() for p in parts if p and p.strip()]
+
+def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
+    """保存前/表示前にデータ構造を正規化"""
+    e = dict(e or {})
+
+    # 文字列 -> 配列に寄せる
+    for k in ("tags", "areas", "links", "payment"):
+        v = e.get(k)
+        if v is None:
+            e[k] = []
+        elif isinstance(v, str):
+            e[k] = _split_lines_commas(v)
+        elif isinstance(v, (list, tuple)):
+            e[k] = [str(x).strip() for x in v if str(x).strip()]
+        else:
+            e[k] = [str(v).strip()]
+
+    # extras を dict に寄せる
+    x = e.get("extras")
+    if isinstance(x, dict):
+        e["extras"] = {str(k): ("" if v is None else str(v)) for k, v in x.items()}
+    elif isinstance(x, list):
+        tmp: Dict[str, str] = {}
+        for it in x:
+            if isinstance(it, dict):
+                for k, v in it.items():
+                    tmp[str(k)] = "" if v is None else str(v)
+            elif isinstance(it, (list, tuple)) and len(it) >= 2:
+                tmp[str(it[0])] = "" if it[1] is None else str(it[1])
+        e["extras"] = tmp
+    elif isinstance(x, str) and x.strip():
+        e["extras"] = {"備考": x.strip()}
+    else:
+        e["extras"] = {}
+
+    # 型の下駄（無ければ空文字）
+    for k in ("category", "title", "desc", "address", "map", "tel", "holiday", "open_hours", "parking", "parking_num", "remark"):
+        if e.get(k) is None:
+            e[k] = ""
+
+    # category の既定
+    if not e["category"]:
+        e["category"] = "観光"
+
+    return e
+
+
+# =========================
+#  Flask / 設定
+# =========================
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False  # 日本語をJSONでそのまま返す
+
+# 本番では必ず環境変数で設定
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
 
-# セッションの基本セキュリティ（任意強化）
+# セッション設定
+SECURE_COOKIE = os.environ.get("SESSION_COOKIE_SECURE", "1").lower() in {"1", "true", "on", "yes"}
 app.config.update(
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SECURE=SECURE_COOKIE,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_HTTPONLY=True,  # ← これを追加
+    SESSION_COOKIE_HTTPONLY=True,
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
 )
 
@@ -42,35 +109,35 @@ def login_required(fn):
     return wrapper
 
 
-# === 環境変数 / 設定 ===
+# =========================
+#  環境変数 / モデル
+# =========================
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or ""  # 未設定でも起動OK
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or ""              # 未設定でも起動OK
 
-# ★ モデル切替用（.envで上書き可）
 OPENAI_MODEL_PRIMARY = os.environ.get("OPENAI_MODEL_PRIMARY", "gpt-4o-mini")
 OPENAI_MODEL_HIGH    = os.environ.get("OPENAI_MODEL_HIGH", "gpt-5-mini")
-# 未ヒット時の挙動フラグ
+
 REASK_UNHIT   = os.environ.get("REASK_UNHIT", "1").lower() in {"1", "true", "on", "yes"}
 SUGGEST_UNHIT = os.environ.get("SUGGEST_UNHIT", "1").lower() in {"1", "true", "on", "yes"}
-# 外国語対応フラグ
 ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1", "true", "on", "yes"}
 
-# === OpenAI v1 クライアント（環境変数から自動でAPIキー読込） ===
+# OpenAI v1 クライアント
 client = OpenAI()
 
-# === LINE Bot ===
+# LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# === データ格納先（Renderの永続ディスクを使うなら DATA_BASE_DIR を設定） ===
-BASE_DIR     = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/data
-ENTRIES_FILE = os.path.join(BASE_DIR, "entries.json")
-DATA_DIR     = os.path.join(BASE_DIR, "data")
-LOG_DIR      = os.path.join(BASE_DIR, "logs")
-LOG_FILE     = os.path.join(LOG_DIR, "questions_log.jsonl")
-SYNONYM_FILE = os.path.join(BASE_DIR, "synonyms.json")
-USERS_FILE   = os.path.join(BASE_DIR, "users.json")
+# データ格納先
+BASE_DIR       = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/data
+ENTRIES_FILE   = os.path.join(BASE_DIR, "entries.json")
+DATA_DIR       = os.path.join(BASE_DIR, "data")
+LOG_DIR        = os.path.join(BASE_DIR, "logs")
+LOG_FILE       = os.path.join(LOG_DIR, "questions_log.jsonl")
+SYNONYM_FILE   = os.path.join(BASE_DIR, "synonyms.json")
+USERS_FILE     = os.path.join(BASE_DIR, "users.json")
 NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
 SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 
@@ -78,9 +145,16 @@ SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# === 初回ブートストラップ（データファイル生成＆管理者ユーザー作成） ===
+# 便利関数: JSONをアトミックに保存
+def _atomic_json_dump(path, obj):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+# 初回ブートストラップ
 ADMIN_INIT_USER = os.environ.get("ADMIN_INIT_USER", "admin")
-ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")  # 初回だけ使う。作成後は環境変数を消すの推奨
+ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")  # 初回のみ使用推奨
 
 def _ensure_json(path, default_obj):
     if not os.path.exists(path):
@@ -91,13 +165,11 @@ def _bootstrap_files_and_admin():
     app.logger.info(f"[boot] BASE_DIR={BASE_DIR}")
     app.logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
 
-    # 必須JSONを空で用意（無ければ作成）
     _ensure_json(ENTRIES_FILE, [])
     _ensure_json(SYNONYM_FILE, {})
     _ensure_json(NOTICES_FILE, [])
     _ensure_json(SHOP_INFO_FILE, {})
 
-    # users.json が無い or 空なら作成。ADMIN_INIT_PASSWORD があれば管理者も1件作る
     users = []
     users_exists = os.path.exists(USERS_FILE)
     if users_exists:
@@ -106,8 +178,6 @@ def _bootstrap_files_and_admin():
                 users = json.load(f)
         except Exception:
             users = []
-
-    has_admin = any(u.get("role") == "admin" for u in users)
 
     if not users_exists or not users:
         if ADMIN_INIT_PASSWORD:
@@ -130,7 +200,6 @@ def _bootstrap_files_and_admin():
                 "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
             )
 
-# 実行
 _bootstrap_files_and_admin()
 
 # 必須キーが未設定なら警告（起動は継続）
@@ -140,13 +209,15 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     app.logger.warning("LINE_CHANNEL_* が未設定です。/callback は正常動作しません。")
 
 
+# =========================
+#  基本I/O
+# =========================
 def load_users():
     if not os.path.exists(USERS_FILE):
         return []
     with open(USERS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-# === ログ保存用 ===
 def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
     os.makedirs(LOG_DIR, exist_ok=True)
     log = {
@@ -160,18 +231,18 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(log, ensure_ascii=False) + "\n")
 
-# === OpenAIラッパ（モデル切替を一元管理） ===
+# OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
     params = dict(kwargs)
     mt  = params.pop("max_tokens", None)
     mct = params.pop("max_completion_tokens", None)
     mot = mct if mct is not None else mt  # 統一上限
 
-    # ❶ Chat Completions（ここにも上限を適用）
+    # ❶ Chat Completions
     try:
         chat_params = dict(params)
         if mot is not None:
-            chat_params["max_completion_tokens"] = mot
+            chat_params["max_tokens"] = mot  # ← 修正
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -181,7 +252,7 @@ def openai_chat(model, messages, **kwargs):
     except Exception as e1:
         print("[OpenAI error - chat.completions]", e1)
 
-    # ❷ Responses API（max_output_tokens を使う）
+    # ❷ Responses API（保険）
     try:
         joined = "\n".join(f"{m.get('role','user')}: {m.get('content','')}" for m in messages)
         rparams = {"model": model, "input": joined, "temperature": params.get("temperature", 0.3)}
@@ -193,11 +264,10 @@ def openai_chat(model, messages, **kwargs):
         print("[OpenAI error - responses]", e2)
         return ""
 
-# === 言語検出＆翻訳 ===
+# 言語検出＆翻訳
 OPENAI_MODEL_TRANSLATE = os.environ.get("OPENAI_MODEL_TRANSLATE", OPENAI_MODEL_HIGH)
 
 def detect_lang_simple(text: str) -> str:
-    """ja を既定。zh は明確な中国語マーカーがあるときのみ。en は英字のみっぽいとき。"""
     if not text:
         return "ja"
     t = text.strip()
@@ -238,7 +308,10 @@ def translate_text(text: str, target_lang: str) -> str:
         )
     return out or text
 
-# === お知らせ・イベント・特売掲示板用 ===
+
+# =========================
+#  お知らせ・データI/O
+# =========================
 def load_notices():
     if not os.path.exists(NOTICES_FILE):
         return []
@@ -246,10 +319,8 @@ def load_notices():
         return json.load(f)
 
 def save_notices(notices):
-    with open(NOTICES_FILE, "w", encoding="utf-8") as f:
-        json.dump(notices, f, ensure_ascii=False, indent=2)
+    _atomic_json_dump(NOTICES_FILE, notices)
 
-# === 管理画面: 観光データ登録・編集 ===
 def load_entries():
     if not os.path.exists(ENTRIES_FILE):
         return []
@@ -257,9 +328,36 @@ def load_entries():
         return json.load(f)
 
 def save_entries(entries):
-    with open(ENTRIES_FILE, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2)
+    _atomic_json_dump(ENTRIES_FILE, entries)
 
+def load_synonyms():
+    if not os.path.exists(SYNONYM_FILE):
+        return {}
+    with open(SYNONYM_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+def save_synonyms(synonyms):
+    _atomic_json_dump(SYNONYM_FILE, synonyms)
+
+def load_shop_info(user_id):
+    if not os.path.exists(SHOP_INFO_FILE):
+        return {}
+    with open(SHOP_INFO_FILE, "r", encoding="utf-8") as f:
+        infos = json.load(f)
+    return infos.get(user_id, {})
+
+def save_shop_info(user_id, info):
+    infos = {}
+    if os.path.exists(SHOP_INFO_FILE):
+        with open(SHOP_INFO_FILE, "r", encoding="utf-8") as f:
+            infos = json.load(f)
+    infos[user_id] = info
+    _atomic_json_dump(SHOP_INFO_FILE, infos)
+
+
+# =========================
+#  タグ・サジェスト
+# =========================
 def suggest_tags_and_title(question, answer, model=None):
     model = model or OPENAI_MODEL_PRIMARY
     prompt = (
@@ -313,7 +411,6 @@ def ai_suggest_faq(question, model=None):
 def generate_unhit_report(n=7):
     """直近n日分の未ヒット・誤答ログ集計"""
     import datetime as dt
-    from collections import Counter
 
     logs = []
     try:
@@ -340,16 +437,9 @@ def generate_unhit_report(n=7):
     counter = Counter(questions)
     return counter.most_common()
 
-# === 類義語（シノニム）辞書 ===
-def load_synonyms():
-    if not os.path.exists(SYNONYM_FILE):
-        return {}
-    with open(SYNONYM_FILE, encoding="utf-8") as f:
-        return json.load(f)
-
+# 類義語
 def save_synonyms(synonyms):
-    with open(SYNONYM_FILE, "w", encoding="utf-8") as f:
-        json.dump(synonyms, f, ensure_ascii=False, indent=2)
+    _atomic_json_dump(SYNONYM_FILE, synonyms)
 
 def find_tags_by_synonym(question, synonyms):
     tags = set()
@@ -359,28 +449,10 @@ def find_tags_by_synonym(question, synonyms):
                 tags.add(tag)
     return list(tags)
 
-# === AIによるタグ・類義語案サジェスト ===
-def ai_suggest_synonyms(question, all_tags, model=None):
-    model = model or OPENAI_MODEL_PRIMARY
-    prompt = (
-        f"以下の質問について、適切な既存タグ（{', '.join(all_tags)}）や新しいタグに対して、日本語の類義語・言い換え案を5つずつタグごとに挙げてください。\n"
-        f"質問: {question}\n"
-        f"出力例:\nタグ: ビーチ\n類義語: 海水浴場, 砂浜, 泳げる場所, 水遊び, サンビーチ\n---\n"
-    )
-    try:
-        return openai_chat(
-            model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=600,
-        )
-    except Exception as e:
-        print("[類義語サジェストエラー]", e)
-        return ""
 
-# === 未ヒット時の絞り込み候補 ===
-from collections import Counter
-
+# =========================
+#  未ヒット時の絞り込み候補
+# =========================
 def get_top_tags(k=8):
     entries = load_entries()
     counter = Counter()
@@ -477,56 +549,65 @@ def build_refine_suggestions(question):
     msg = "\n".join(lines)
     return msg, {"areas": areas, "tags": top_tags, "filters": filters}
 
+
+# =========================
+#  管理画面: 観光データ登録・編集
+# =========================
 @app.route("/admin/entry", methods=["GET", "POST"])
 @login_required
 def admin_entry():
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
-    entries = load_entries()
-    edit_id = request.args.get("edit")
-    entry_edit = None
 
-    if edit_id is not None and edit_id != "":
+    entries = [_norm_entry(x) for x in load_entries()]  # 表示前にも正規化
+
+    edit_id = request.values.get("edit")
+    entry_edit = None
+    if edit_id not in (None, "", "None"):
         try:
-            entry_edit = entries[int(edit_id)]
+            idx = int(edit_id)
+            if 0 <= idx < len(entries):
+                entry_edit = entries[idx]
         except Exception:
             entry_edit = None
 
     if request.method == "POST":
         # 共通
-        category = request.form.get("category", "")
-        title = request.form.get("title", "")
-        desc = request.form.get("desc", "")
-        address = request.form.get("address", "")
-        map_url = request.form.get("map", "")
-        tags_raw = request.form.get("tags", "")
-        tags = [tag.strip() for tag in tags_raw.split(",") if tag.strip()]
-        areas = request.form.getlist("areas")
+        category = (request.form.get("category") or "").strip() or "観光"
+        title    = (request.form.get("title") or "").strip()
+        desc     = (request.form.get("desc") or "").strip()
+        address  = (request.form.get("address") or "").strip()
+        map_url  = (request.form.get("map") or "").strip()
 
-        # ★追加: リンク（複数）
-        links_raw = request.form.get("links", "")
-        links = [u.strip() for u in re.split(r"[\n,]", links_raw) if u.strip()]
+        # リスト系（改行/カンマ両対応）
+        tags   = _split_lines_commas(request.form.get("tags", ""))
+        areas  = request.form.getlist("areas") or _split_lines_commas(request.form.get("areas",""))
+        links  = _split_lines_commas(request.form.get("links", ""))
+        pay_in = request.form.getlist("payment") or _split_lines_commas(request.form.get("payment",""))
 
-        # ★追加: 自由項目（キー＝値）
+        # 店舗系
+        tel         = (request.form.get("tel") or "").strip()
+        holiday     = (request.form.get("holiday") or "").strip()
+        open_hours  = (request.form.get("open_hours") or "").strip()
+        parking     = (request.form.get("parking") or "").strip()
+        parking_num = (request.form.get("parking_num") or "").strip()
+        remark      = (request.form.get("remark") or "").strip()
+
+        # 追加情報
         extras_keys = request.form.getlist("extras_key[]")
         extras_vals = request.form.getlist("extras_val[]")
-        extras = {k.strip(): v.strip() for k, v in zip(extras_keys, extras_vals) if k.strip()}
+        extras = {}
+        for k, v in zip(extras_keys, extras_vals):
+            k = (k or "").strip()
+            v = (v or "").strip()
+            if k:
+                extras[k] = v
 
-        # 店舗系専用
-        tel = request.form.get("tel", "")
-        holiday = request.form.get("holiday", "")
-        open_hours = request.form.get("open_hours", "")
-        parking = request.form.get("parking", "")
-        parking_num = request.form.get("parking_num", "")
-        payment = request.form.getlist("payment")
-        remark = request.form.get("remark", "")
-
-        # ★エリア必須
         if not areas:
             flash("エリアは1つ以上選択してください")
             return redirect(url_for("admin_entry"))
 
-        data = {
+        new_entry = {
             "category": category,
             "title": title,
             "desc": desc,
@@ -534,29 +615,31 @@ def admin_entry():
             "map": map_url,
             "tags": tags,
             "areas": areas,
-            # ★全カテゴリで使える汎用フィールド
             "links": links,
-            "extras": extras
+            "payment": pay_in,
+            "tel": tel,
+            "holiday": holiday,
+            "open_hours": open_hours,
+            "parking": parking,
+            "parking_num": parking_num,
+            "remark": remark,
+            "extras": extras,
         }
-        # 既存の「観光以外は店舗系フィールドあり」はそのまま維持
-        if category != "観光":
-            data.update({
-                "tel": tel,
-                "holiday": holiday,
-                "open_hours": open_hours,
-                "parking": parking,
-                "parking_num": parking_num,
-                "payment": payment,
-                "remark": remark
-            })
+        new_entry = _norm_entry(new_entry)  # 保存前にも正規化
 
-        if request.form.get("edit_id"):
-            idx = int(request.form["edit_id"])
-            entries[idx] = data
-            flash("編集しました")
+        edit_hidden = request.form.get("edit_id")
+        if edit_hidden not in (None, "", "None"):
+            try:
+                idx = int(edit_hidden)
+                entries[idx] = new_entry
+                flash("編集しました")
+            except Exception:
+                entries.append(new_entry)
+                flash("編集ID不正のため新規で追加しました")
         else:
-            entries.append(data)
+            entries.append(new_entry)
             flash("登録しました")
+
         save_entries(entries)
         return redirect(url_for("admin_entry"))
 
@@ -564,7 +647,7 @@ def admin_entry():
         "admin_entry.html",
         entries=entries,
         entry_edit=entry_edit,
-        edit_id=edit_id,
+        edit_id=edit_id if edit_id not in (None, "", "None") else None,
         role=session.get("role", "")
     )
 
@@ -575,7 +658,6 @@ def delete_entry(idx):
     if session.get("role") != "admin":
         abort(403)
 
-    # フォームに隠し項目で idx が来るパターンも許可
     if idx is None:
         form_idx = request.form.get("idx")
         if form_idx is not None and str(form_idx).isdigit():
@@ -594,7 +676,6 @@ def delete_entry(idx):
         flash("指定された項目が見つかりません")
     return redirect(url_for("admin_entry"))
 
-import itertools
 
 @app.route("/shop/entry", methods=["GET", "POST"])
 @login_required
@@ -616,16 +697,12 @@ def shop_entry():
         payment = request.form.getlist("payment")
         map_url = request.form.get("map", "")
 
-        tags_raw = request.form.get("tags", "")
-        tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+        tags = _split_lines_commas(request.form.get("tags", ""))
         areas = request.form.getlist("areas")
         remark = request.form.get("remark", "")
 
-        # ★追加: リンク（複数）
-        links_raw = request.form.get("links", "")
-        links = [u.strip() for u in re.split(r"[\n,]", links_raw) if u.strip()]
+        links = _split_lines_commas(request.form.get("links", ""))
 
-        # ★追加: 自由項目（キー＝値）
         extras_keys = request.form.getlist("extras_key[]")
         extras_vals = request.form.getlist("extras_val[]")
         extras = {k.strip(): v.strip() for k, v in zip(extras_keys, extras_vals) if k.strip()}
@@ -650,10 +727,10 @@ def shop_entry():
             "tags": tags,
             "areas": areas,
             "map": map_url,
-            # ★全カテゴリ共通の汎用フィールド
             "links": links,
             "extras": extras
         }
+        entry_data = _norm_entry(entry_data)
 
         entries = load_entries()
         entry_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
@@ -668,6 +745,7 @@ def shop_entry():
 
     user_entries = [e for e in load_entries() if e.get("user_id") == user_id]
     shop_entry_data = user_entries[-1] if user_entries else None
+    shop_entry_data = _norm_entry(shop_entry_data) if shop_entry_data else None
     return render_template("shop_entry.html", role="shop", shop_edit=shop_entry_data)
 
 @app.route("/admin/entries_edit", methods=["GET", "POST"])
@@ -682,6 +760,7 @@ def admin_entries_edit():
             data = json.loads(raw_json)
             if not isinstance(data, list):
                 raise ValueError("ルート要素は配列(list)にしてください")
+            data = [_norm_entry(e) for e in data]   # 正規化して保存
             save_entries(data)
             flash("entries.jsonを上書きしました")
             return redirect(url_for("admin_entries_edit"))
@@ -699,7 +778,9 @@ def admin_entries_edit():
     return render_template("admin_entries_edit.html", entries_raw=entries_raw)
 
 
-# === CSV取り込み（既存に追加） ===
+# =========================
+#  CSV取り込み（既存に追加）
+# =========================
 @app.route("/admin/entries_import_csv", methods=["POST"])
 @login_required
 def admin_entries_import_csv():
@@ -711,20 +792,10 @@ def admin_entries_import_csv():
         flash("CSVファイルが選択されていません")
         return redirect(url_for("admin_entries_edit"))
 
-    import csv, io, json as _json
+    import csv, io as _io, json as _json
 
-    # UTF-8 (BOMあり) もOK
-    buf = io.TextIOWrapper(file.stream, encoding="utf-8-sig", newline="")
+    buf = _io.TextIOWrapper(file.stream, encoding="utf-8-sig", newline="")
     reader = csv.DictReader(buf)
-
-    def split_list(s):
-        if not s: return []
-        parts = []
-        for chunk in str(s).replace("\r\n","\n").split("\n"):
-            for p in chunk.split(","):
-                p = p.strip()
-                if p: parts.append(p)
-        return parts
 
     new_entries = []
     for row in reader:
@@ -733,33 +804,33 @@ def admin_entries_import_csv():
         desc     = (row.get("desc") or "").strip()
         address  = (row.get("address") or "").strip()
         map_url  = (row.get("map") or "").strip()
-        tags     = split_list(row.get("tags"))
-        areas    = split_list(row.get("areas"))
-        links    = split_list(row.get("links"))
+        tags     = _split_lines_commas(row.get("tags"))
+        areas    = _split_lines_commas(row.get("areas"))
+        links    = _split_lines_commas(row.get("links"))
 
-        # extras は ①"extras"列にJSON ②extra_○○/extra:○○列 を集約
+        # 必須チェック
+        if not title or not desc or not areas:
+            continue  # エリア必須
+
+        # extras: "extras"列(JSON) + extra_*/extra:* 列
         extras = {}
         extras_raw = row.get("extras")
         if extras_raw:
             try:
                 obj = _json.loads(extras_raw)
                 if isinstance(obj, dict):
-                    extras.update({str(k): str(v) for k,v in obj.items()})
+                    extras.update({str(k): str(v) for k, v in obj.items()})
             except Exception:
                 pass
         for k, v in row.items():
-            if k is None: 
+            if k is None:
                 continue
             ks = str(k)
             if ks.startswith("extra_") or ks.startswith("extra:"):
-                name = ks.split("_",1)[1] if ks.startswith("extra_") else ks.split(":",1)[1]
+                name = ks.split("_", 1)[1] if ks.startswith("extra_") else ks.split(":", 1)[1]
                 name = name.strip()
                 if name:
                     extras[name] = str(v or "").strip()
-
-        if not title or not desc:
-            # 必須不足はスキップ（厳格にしたければ flash で弾いてOK）
-            continue
 
         e = {
             "category": category,
@@ -770,13 +841,16 @@ def admin_entries_import_csv():
             "tags": tags,
             "areas": areas,
         }
-        if links:  e["links"] = links
-        if extras: e["extras"] = extras
+        if links:
+            e["links"] = links
+        if extras:
+            e["extras"] = extras
 
+        e = _norm_entry(e)
         new_entries.append(e)
 
     if not new_entries:
-        flash("CSVから有効な行が見つかりませんでした（title/desc 必須）")
+        flash("CSVから有効な行が見つかりませんでした（title/desc/areas 必須）")
         return redirect(url_for("admin_entries_edit"))
 
     entries = load_entries()
@@ -787,15 +861,17 @@ def admin_entries_import_csv():
     return redirect(url_for("admin_entries_edit"))
 
 
+# =========================
+#  ログ・未ヒット確認
+# =========================
 @app.route("/admin/logs")
 @login_required
 def admin_logs():
     if session.get("role") != "admin":
         abort(403)
-    log_path = LOG_FILE
     logs = []
-    if os.path.exists(log_path):
-        with open(log_path, encoding="utf-8") as f:
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, encoding="utf-8") as f:
             for line in f:
                 try:
                     logs.append(json.loads(line.strip()))
@@ -809,10 +885,9 @@ def admin_logs():
 def admin_unhit_questions():
     if session.get("role") != "admin":
         abort(403)
-    log_path = LOG_FILE
     unhit_logs = []
-    if os.path.exists(log_path):
-        with open(log_path, encoding="utf-8") as f:
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, encoding="utf-8") as f:
             for line in f:
                 try:
                     log = json.loads(line.strip())
@@ -828,11 +903,9 @@ def admin_unhit_questions():
 def api_faq_suggest():
     if session.get("role") != "admin":
         abort(403)
-    # フォーム or JSON どちらでも受ける
     q = (request.form.get("q") or (request.get_json(silent=True) or {}).get("q") or "").strip()
     if not q:
         return jsonify({"ok": False, "error": "q is required"}), 400
-    # OpenAIキー未設定なら明示エラー
     if not OPENAI_API_KEY:
         return jsonify({"ok": False, "error": "OPENAI_API_KEY not set"}), 500
     text = ai_suggest_faq(q, model=OPENAI_MODEL_PRIMARY) or ""
@@ -847,8 +920,8 @@ def admin_add_entry():
     entries = load_entries()
     title = request.form.get("title", "")
     desc = request.form.get("desc", "")
-    tags = [t.strip() for t in request.form.get("tags", "").split(",") if t.strip()]
-    areas = [a.strip() for a in request.form.get("areas", "").split(",") if a.strip()]
+    tags = _split_lines_commas(request.form.get("tags", ""))
+    areas = _split_lines_commas(request.form.get("areas", ""))
     if not title or not desc:
         flash("タイトルと説明は必須です")
         return redirect(url_for("admin_unhit_questions"))
@@ -860,12 +933,16 @@ def admin_add_entry():
         "tags": tags,
         "areas": areas
     }
+    entry = _norm_entry(entry)
     entries.append(entry)
     save_entries(entries)
     flash("DBに追加しました")
     return redirect(url_for("admin_entry"))
 
-# === バックアップ（手動 & 共通関数） ===
+
+# =========================
+#  バックアップ/復元
+# =========================
 def write_full_backup_zip(out_dir: str) -> str:
     """アプリ内バックアップを out_dir に保存し、ファイルパスを返す"""
     os.makedirs(out_dir, exist_ok=True)
@@ -906,10 +983,8 @@ def admin_backup():
     out_dir = os.path.join(BASE_DIR, "manual_backups")
     path = write_full_backup_zip(out_dir)
     app.logger.info(f"[backup] manual saved: {path}")
-    # 生成済みファイルをそのまま送る（履歴もディスクに残る）
     return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="application/zip")
 
-# === 復元機能 ===
 def _safe_extractall(zf: zipfile.ZipFile, dst):
     base = os.path.abspath(dst)
     for member in zf.namelist():
@@ -933,7 +1008,6 @@ def admin_restore():
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
 
-# === 自動バックアップ用 内部API（Cron Jobから叩く） ===
 @app.route("/internal/backup", methods=["POST"])
 def internal_backup():
     token = request.headers.get("X-Backup-Token", "")
@@ -943,7 +1017,7 @@ def internal_backup():
     out_dir = os.path.join(BASE_DIR, "auto_backups")
     path = write_full_backup_zip(out_dir)
 
-    # 任意：古いファイルをローテーション (最新10個だけ残す)
+    # ローテーション（最新10個だけ残す）
     try:
         files = sorted(
             [os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".zip")],
@@ -958,7 +1032,10 @@ def internal_backup():
     app.logger.info(f"[backup] saved: {path}")
     return jsonify({"ok": True, "saved": path})
 
-# === 認証 ===
+
+# =========================
+#  認証
+# =========================
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -967,6 +1044,7 @@ def login():
         users = load_users()
         user = next((u for u in users if u["user_id"] == user_id), None)
         if user and check_password_hash(user["password_hash"], pw):
+            session.permanent = True  # ← 追加: 有効期限を効かせる
             session["user_id"] = user_id
             session["role"] = user["role"]
             flash("ログインしました")
@@ -978,8 +1056,10 @@ def login():
             flash("ユーザーIDまたはパスワードが違います")
     return render_template("login.html")
 
-# ======= ここから：復活&強化した 2 ルート =======
 
+# =========================
+#  マスター管理（復活＆強化）
+# =========================
 @app.route("/admin/synonyms", methods=["GET", "POST"])
 @login_required
 def admin_synonyms():
@@ -987,17 +1067,14 @@ def admin_synonyms():
         abort(403)
 
     if request.method == "POST":
-        # DOM順の tag リスト
         tags_in_dom_order = [t.strip() for t in request.form.getlist("tag")]
 
-        # synonyms_* のインデックス（欠番対応）
         syn_keys = [k for k in request.form.keys() if k.startswith("synonyms_")]
         syn_indices = sorted(
             [int(k.split("_", 1)[1]) for k in syn_keys if k.split("_", 1)[1].isdigit()]
         )
 
         new_synonyms = {}
-        # DOM順に並んだ tag と、インデックス昇順の synonyms_* を対応づける
         for tag, idx in zip(tags_in_dom_order, syn_indices):
             if not tag:
                 continue
@@ -1005,7 +1082,6 @@ def admin_synonyms():
             syn_list = [s.strip() for s in syn_str.split(",") if s.strip()]
             new_synonyms[tag] = syn_list
 
-        # 追加行
         add_tag = (request.form.get("add_tag") or "").strip()
         add_syns_str = request.form.get("add_synonyms", "") or ""
         if add_tag:
@@ -1016,7 +1092,6 @@ def admin_synonyms():
         flash("類義語辞書を保存しました")
         return redirect(url_for("admin_synonyms"))
 
-    # GET
     synonyms = load_synonyms()
     return render_template("admin_synonyms.html", synonyms=synonyms)
 
@@ -1027,15 +1102,22 @@ def admin_manual():
         abort(403)
     return render_template("admin_manual.html")
 
-# ======= ここまで：復活&強化した 2 ルート =======
 
-@app.route("/logout")
-def logout():
-    session.clear()
-    flash("ログアウトしました")
-    return redirect(url_for("login"))
+# =========================
+#  トップ/ヘルスチェック
+# =========================
+@app.route("/")
+def home():
+    return "<a href='/admin/entry'>[観光データ管理]</a>"
 
-# === 天気・フェリー情報 ===
+@app.route("/healthz")
+def healthz():
+    return "ok", 200
+
+
+# =========================
+#  天気・フェリー情報
+# =========================
 WEATHER_LINKS = [
     {"area": "五島市", "url": "https://weathernews.jp/onebox/tenki/nagasaki/42211/"},
     {"area": "新上五島町", "url": "https://weathernews.jp/onebox/tenki/nagasaki/42411/"},
@@ -1089,7 +1171,10 @@ def get_weather_reply(question):
         reply += f"{e['area']}: {e['url']}\n"
     return reply.strip(), True
 
-# === 観光データ横断検索 ===
+
+# =========================
+#  観光データ横断検索
+# =========================
 def clean_query_for_search(question):
     ignore_patterns = [
         r"(について)?教えて.*$", r"の情報.*$", r"の場所.*$", r"どこ.*$", r"案内.*$", r"を教えて.*$", r"を知りたい.*$", r"アクセス.*$", r"詳細.*$"
@@ -1105,7 +1190,6 @@ def find_entry_info(question):
     areas_master = ["五島市", "新上五島町", "宇久町", "小値賀町"]
     target_areas = [area for area in areas_master if area in question]
     tags_from_syn = find_tags_by_synonym(question, synonyms)
-    words = set(re.split(r'\s+|　|,|、|。', question))
 
     cleaned_query = clean_query_for_search(question)
     # 1. タイトル完全一致
@@ -1114,7 +1198,7 @@ def find_entry_info(question):
     if hits:
         return hits
 
-    # 2. 各カラム部分一致（★ここに links/extras を追加）
+    # 2. 各カラム部分一致（links/extras を含む）
     hits = []
     for e in entries:
         haystacks = [
@@ -1167,6 +1251,34 @@ def ai_summarize(snippets, question, model=None):
         max_tokens=512,
     )
 
+def search_text_files(question, data_dir=DATA_DIR, max_snippets=5, window=80):
+    snippets = []
+    words = set(re.split(r'\s+|　|,|、|。', question))
+    pattern = '|'.join([re.escape(w) for w in words if w])
+    if not pattern:
+        return None
+    for root, dirs, files in os.walk(data_dir):
+        for fname in files:
+            if fname.endswith('.txt'):
+                try:
+                    fpath = os.path.join(root, fname)
+                    with open(fpath, encoding='utf-8') as f:
+                        text = f.read()
+                    for m in re.finditer(pattern, text, re.IGNORECASE):
+                        start = max(m.start()-window, 0)
+                        end = min(m.end()+window, len(text))
+                        snippet = text[start:end].replace('\n', ' ').strip()
+                        if snippet not in snippets:
+                            snippets.append(snippet)
+                            if len(snippets) >= max_snippets:
+                                return snippets
+                except Exception as e:
+                    print(f"[全文検索エラー] {fname}: {e}")
+    return snippets if snippets else None
+
+def fetch_and_search_web(question):
+    return None
+
 def smart_search_answer_with_hitflag(question):
     meta = {"model_primary": OPENAI_MODEL_PRIMARY, "fallback": None}
 
@@ -1188,21 +1300,21 @@ def smart_search_answer_with_hitflag(question):
     entries = find_entry_info(question)
     if entries:
         if len(entries) == 1:
-            entry = entries[0]
-            areas = ', '.join(entry.get('areas', []))
-            title = entry.get('title', '')
-            msg = f"\n" if title or areas else ""
-            msg += f"説明: {entry.get('desc','')}\n"
-            msg += f"住所: {entry.get('address','')}\n"
-            if entry.get('map'):
-                msg += f"地図: {entry.get('map')}\n"
-            msg += f"タグ: {', '.join(entry.get('tags', []))}\n"
-            return msg, True, meta
+            e = entries[0]
+            lines = []
+            if e.get("title"):   lines.append(f"◼︎ {e['title']}")
+            if e.get("areas"):   lines.append(f"エリア: {', '.join(e['areas'])}")
+            if e.get("desc"):    lines.append(f"説明: {e['desc']}")
+            if e.get("address"): lines.append(f"住所: {e['address']}")
+            if e.get("map"):     lines.append(f"地図: {e['map']}")
+            if e.get("tags"):    lines.append(f"タグ: {', '.join(e['tags'])}")
+            if e.get("links"):   lines.append("リンク: " + " / ".join(e['links']))
+            return "\n".join(lines), True, meta
         else:
             try:
-                snippets = [f"タイトル: {e['title']}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n" for e in entries]
+                snippets = [f"タイトル: {e.get('title','')}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n" for e in entries]
                 ai_ans = ai_summarize(snippets, question, model=OPENAI_MODEL_PRIMARY)
-                return ai_ans, True, meta
+                return ai_ans or "複数スポットが見つかりましたが要約に失敗しました。", True, meta
             except Exception as e:
                 return "複数スポットが見つかりましたが要約に失敗しました。", False, meta
 
@@ -1244,37 +1356,10 @@ def smart_search_answer_with_hitflag(question):
 
     return ("申し訳ありません。現在この質問には確実な情報を持っていません。", False, meta)
 
-# === data/配下パンフ全文検索 ===
-def search_text_files(question, data_dir=DATA_DIR, max_snippets=5, window=80):
-    snippets = []
-    words = set(re.split(r'\s+|　|,|、|。', question))
-    pattern = '|'.join([re.escape(w) for w in words if w])
-    if not pattern:
-        return None
-    for root, dirs, files in os.walk(data_dir):
-        for fname in files:
-            if fname.endswith('.txt'):
-                try:
-                    fpath = os.path.join(root, fname)
-                    with open(fpath, encoding='utf-8') as f:
-                        text = f.read()
-                    for m in re.finditer(pattern, text, re.IGNORECASE):
-                        start = max(m.start()-window, 0)
-                        end = min(m.end()+window, len(text))
-                        snippet = text[start:end].replace('\n', ' ').strip()
-                        if snippet not in snippets:
-                            snippets.append(snippet)
-                            if len(snippets) >= max_snippets:
-                                return snippets
-                except Exception as e:
-                    print(f"[全文検索エラー] {fname}: {e}")
-    return snippets if snippets else None
 
-# === Webクロール（拡張用フック。初期はダミー返答） ===
-def fetch_and_search_web(question):
-    return None
-
-# === APIエンドポイント（/ask） ===
+# =========================
+#  API: /ask
+# =========================
 @app.route("/ask", methods=["POST"])
 def ask():
     data = request.get_json(silent=True) or {}
@@ -1305,6 +1390,7 @@ def ask():
     save_qa_log(question, answer, source="web", hit_db=hit_db, extra=meta)
     return jsonify({"answer": answer, "hit_db": hit_db, "meta": meta})
 
+
 @app.route("/admin/unhit_report")
 @login_required
 def admin_unhit_report():
@@ -1313,9 +1399,15 @@ def admin_unhit_report():
     report = generate_unhit_report(7)
     return render_template("admin_unhit_report.html", unhit_report=report)
 
-# === LINE Webhook ===
+
+# =========================
+#  LINE Webhook
+# =========================
 @app.route("/callback", methods=["POST"])
 def callback():
+    # 設定未投入なら即200で返す（ログ汚染回避）
+    if not (LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET):
+        return ("OK", 200)
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
@@ -1365,31 +1457,10 @@ def handle_message(event):
     except Exception:
         app.logger.exception("LineBotApi reply error")
 
-# === トップ ===
-@app.route("/")
-def home():
-    return "<a href='/admin/entry'>[観光データ管理]</a>"
 
-def load_shop_info(user_id):
-    if not os.path.exists(SHOP_INFO_FILE):
-        return {}
-    with open(SHOP_INFO_FILE, "r", encoding="utf-8") as f:
-        infos = json.load(f)
-    return infos.get(user_id, {})
-
-def save_shop_info(user_id, info):
-    infos = {}
-    if os.path.exists(SHOP_INFO_FILE):
-        with open(SHOP_INFO_FILE, "r", encoding="utf-8") as f:
-            infos = json.load(f)
-    infos[user_id] = info
-    with open(SHOP_INFO_FILE, "w", encoding="utf-8") as f:
-        json.dump(infos, f, ensure_ascii=False, indent=2)
-
-@app.route("/healthz")
-def healthz():
-    return "ok", 200
-
+# =========================
+#  お知らせ管理
+# =========================
 @app.route("/admin/notices", methods=["GET", "POST"])
 @login_required
 def admin_notices():
@@ -1472,6 +1543,10 @@ def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
 
+
+# =========================
+#  エントリーポイント
+# =========================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
