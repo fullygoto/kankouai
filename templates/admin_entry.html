@@ -198,6 +198,18 @@
 </head>
 <body>
 <div class="container">
+
+    {# --- セーフティ: 渡し忘れ/古いデータ形式でも落ちないように --- #}
+    {% if cat_list is not defined %}
+      {% set cat_list = ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
+    {% endif %}
+    {% if area_opts is not defined %}
+      {% set area_opts = ["五島市","新上五島町","宇久町","小値賀町"] %}
+    {% endif %}
+    {% if entries is not defined %}
+      {% set entries = [] %}
+    {% endif %}
+
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
         <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
@@ -229,6 +241,10 @@
       {% endif %}
     {% endwith %}
 
+    {# entry_edit 用の安全な下準備 #}
+    {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is defined and entry_edit.areas is not string
+                          else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
+
     <!-- ===== 登録フォーム ===== -->
     <form method="post" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
         {% if edit_id %}
@@ -237,7 +253,6 @@
 
         <label>カテゴリー</label><br>
         <select name="category" id="category_select" onchange="onCategoryChange()">
-            {% set cat_list = ["観光", "飲食", "宿泊", "診療所", "役所", "交通", "バス", "イベント", "特売"] %}
             {% for c in cat_list %}
             <option value="{{ c }}" {% if entry_edit and entry_edit.category == c %}selected{% endif %}>{{ c }}</option>
             {% endfor %}
@@ -255,14 +270,13 @@
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
             <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
-            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}"><br>
+            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
-            {% set area_opts = ["五島市", "新上五島町", "宇久町", "小値賀町"] %}
             <div class="row">
             {% for area in area_opts %}
               <label style="min-width:unset;">
               <input type="checkbox" name="areas" value="{{ area }}"
-              {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
+              {% if _areas_edit and area in _areas_edit %}checked{% endif %}>
               {{ area }}
               </label>
             {% endfor %}
@@ -270,24 +284,26 @@
             <!-- ▼ 追加: リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
             <textarea name="links" rows="3" placeholder="https://example.com
-https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and entry_edit.links else '' }}</textarea><br>
+https://instagram.com/xxx">
+{% if entry_edit and entry_edit.links %}
+{{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
+{% endif %}</textarea><br>
 
             <!-- ▼ 追加: 追加情報（項目＝内容） -->
             <label>追加情報（項目＝内容）</label>
             <div id="extras-list-tourism">
               {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
-              {% for k, v in _extras.items() %}
+              {% if _extras.items is defined %}
+                {% for k, v in _extras.items() %}
+                  <div class="extra-row">
+                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                  </div>
+                {% endfor %}
+              {% else %}
                 <div class="extra-row">
-                  <input name="extras_key[]" value="{{ k }}" placeholder="項目">
-                  ＝
-                  <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                  <button type="button" onclick="this.parentNode.remove()">－</button>
-                </div>
-              {% endfor %}
-              {% if not _extras %}
-                <div class="extra-row">
-                  <input name="extras_key[]" placeholder="項目">
-                  ＝
+                  <input name="extras_key[]" placeholder="項目"> ＝
                   <input name="extras_val[]" placeholder="内容">
                   <button type="button" onclick="this.parentNode.remove()">－</button>
                 </div>
@@ -317,19 +333,21 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
             </select>
             台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
             <label>支払方法</label><br>
-            <input type="checkbox" name="payment" value="現金" {% if entry_edit and entry_edit.payment and '現金' in entry_edit.payment %}checked{% endif %}>現金
-            <input type="checkbox" name="payment" value="カード" {% if entry_edit and entry_edit.payment and 'カード' in entry_edit.payment %}checked{% endif %}>カード
-            <input type="checkbox" name="payment" value="その他" {% if entry_edit and entry_edit.payment and 'その他' in entry_edit.payment %}checked{% endif %}>その他<br>
+            {% set _pay_edit = (entry_edit.payment if entry_edit and entry_edit.payment is defined and entry_edit.payment is not string
+                                 else (entry_edit.payment.split(',') if entry_edit and entry_edit.payment else [])) %}
+            <input type="checkbox" name="payment" value="現金" {% if '現金' in _pay_edit %}checked{% endif %}>現金
+            <input type="checkbox" name="payment" value="カード" {% if 'カード' in _pay_edit %}checked{% endif %}>カード
+            <input type="checkbox" name="payment" value="その他" {% if 'その他' in _pay_edit %}checked{% endif %}>その他<br>
             <label>備考（自由記述）</label><br>
             <textarea name="remark" rows="2">{{ entry_edit.remark if entry_edit else '' }}</textarea><br>
             <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
-            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}"><br>
+            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
             <div class="row">
             {% for area in area_opts %}
               <label style="min-width:unset;">
                 <input type="checkbox" name="areas" value="{{ area }}"
-                {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
+                {% if _areas_edit and area in _areas_edit %}checked{% endif %}>
                 {{ area }}
               </label>
             {% endfor %}
@@ -340,24 +358,26 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
             <!-- ▼ 追加: リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
             <textarea name="links" rows="3" placeholder="https://example.com
-https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and entry_edit.links else '' }}</textarea><br>
+https://instagram.com/xxx">
+{% if entry_edit and entry_edit.links %}
+{{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
+{% endif %}</textarea><br>
 
             <!-- ▼ 追加: 追加情報（項目＝内容） -->
             <label>追加情報（項目＝内容）</label>
             <div id="extras-list-shop">
               {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
-              {% for k, v in _extras2.items() %}
+              {% if _extras2.items is defined %}
+                {% for k, v in _extras2.items() %}
+                  <div class="extra-row">
+                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                  </div>
+                {% endfor %}
+              {% else %}
                 <div class="extra-row">
-                  <input name="extras_key[]" value="{{ k }}" placeholder="項目">
-                  ＝
-                  <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                  <button type="button" onclick="this.parentNode.remove()">－</button>
-                </div>
-              {% endfor %}
-              {% if not _extras2 %}
-                <div class="extra-row">
-                  <input name="extras_key[]" placeholder="項目">
-                  ＝
+                  <input name="extras_key[]" placeholder="項目"> ＝
                   <input name="extras_val[]" placeholder="内容">
                   <button type="button" onclick="this.parentNode.remove()">－</button>
                 </div>
@@ -418,49 +438,68 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
 
     <div id="cards">
     {% for e in entries %}
-        {% set tags_str = (', '.join(e.tags) if e.tags else '') %}
-        {% set areas_str = (', '.join(e.areas) if e.areas else '') %}
-        {% set links_str = (', '.join(e.links) if e.links else '') %}
-        {% set extras_text = (', '.join([k ~ ':' ~ v for k,v in e.extras.items()]) if e.extras else '') %}
-        {% set all_text = ( (e.title or '') ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ tags_str ~ ' ' ~ links_str ~ ' ' ~ extras_text )|lower %}
+        {# 型ゆれに強い正規化 #}
+        {% set _tags = e.tags if e.tags is defined and e.tags is not string
+                 else (e.tags | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _areas = e.areas if e.areas is defined and e.areas is not string else (e.areas.split(',') if e.areas else []) %}
+        {% set _links = e.links if e.links is defined and e.links is not string
+                  else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _pay   = e.payment if e.payment is defined and e.payment is not string else (e.payment.split(',') if e.payment else []) %}
+
+        {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ ((e.links or []) | join(' ')) ~ ' ' ~ (e.extras | tojson)) | lower %}
         <div class="entry-card"
              data-title="{{ e.title or '' }}"
              data-category="{{ e.category or '' }}"
-             data-areas="{{ areas_str }}"
-             data-tags="{{ (e.tags|map('lower')|join(',')) if e.tags else '' }}"
+             data-areas="{{ _areas|join(', ') }}"
+             data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
              data-text="{{ all_text }}">
             <span class="card-label">タイトル：</span>{{ e.title }}<br>
             <span class="card-label">説明：</span>{{ e.desc }}<br>
             <span class="card-label">住所：</span>{{ e.address }}<br>
             <span class="card-label">地図：</span>
             {% if e.map %}<a href="{{ e.map }}" target="_blank">MAP</a>{% endif %}<br>
-            <span class="card-label">タグ：</span>{% if e.tags %}{{ ', '.join(e.tags) }}{% endif %}<br>
-            <span class="card-label">エリア：</span>{% if e.areas %}{{ ', '.join(e.areas) }}{% endif %}<br>
+            <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
+            <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
 
             {% if e.category and e.category != "観光" %}
                 <span class="card-label">電話：</span>{{ e.tel or "" }}<br>
                 <span class="card-label">休み：</span>{{ e.holiday or "" }}<br>
                 <span class="card-label">営業時間：</span>{{ e.open_hours or "" }}<br>
                 <span class="card-label">駐車場：</span>{{ e.parking or "" }}（{{ e.parking_num or "" }}台）<br>
-                <span class="card-label">支払方法：</span>{% if e.payment %}{{ ', '.join(e.payment) }}{% endif %}<br>
+                <span class="card-label">支払方法：</span>{{ _pay|join(', ') }}<br>
                 <span class="card-label">備考：</span>{{ e.remark or "" }}<br>
             {% endif %}
 
-            {% if e.links %}
+            {% if _links %}
               <span class="card-label">リンク：</span>
               <ul class="compact">
-                {% for u in e.links %}
-                  <li><a href="{{ u }}" target="_blank">{{ u }}</a></li>
+                {% for u in _links %}
+                  {% set u2 = (u ~ '') | trim %}
+                  {% if u2 %}<li><a href="{{ u2 }}" target="_blank">{{ u2 }}</a></li>{% endif %}
                 {% endfor %}
               </ul>
             {% endif %}
 
-            {% if e.extras %}
+            {% if e.extras is defined and e.extras %}
               <span class="card-label">追加情報：</span>
               <table class="kv">
-                {% for k, v in e.extras.items() %}
-                  <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
-                {% endfor %}
+                {% if e.extras.items is defined %}
+                  {% for k, v in e.extras.items() %}
+                    <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                  {% endfor %}
+                {% elif e.extras is iterable and e.extras is not string %}
+                  {% for it in e.extras %}
+                    {% if it.items is defined %}
+                      {% for k,v in it.items() %}
+                        <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                      {% endfor %}
+                    {% else %}
+                      <tr><td class="k">{{ it[0] if it|length>0 else '' }}</td><td>{{ it[1] if it|length>1 else '' }}</td></tr>
+                    {% endif %}
+                  {% endfor %}
+                {% else %}
+                  <tr><td class="k">備考</td><td>{{ e.extras }}</td></tr>
+                {% endif %}
               </table>
             {% endif %}
 
