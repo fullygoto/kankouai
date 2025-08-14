@@ -10,6 +10,7 @@
   .btn{padding:8px 14px;border:0;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
   .btn.secondary{background:#6b7280}
   .btn.danger{background:#e11d48}
+  .btn.ghost{background:#fff;border:1px solid #cbd5e1;color:#2a8ed8}
   table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px #c6d4e71a}
   th,td{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;font-size:13px}
   th{background:#f1f5f9;text-align:left;white-space:nowrap}
@@ -19,6 +20,8 @@
   .row-actions{display:flex;gap:6px}
   .note{font-size:12px;color:#64748b;margin-left:8px}
   .savebar{position:sticky;bottom:0;background:#f6faf9;padding:10px 0;margin-top:10px}
+  .csvbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 16px}
+  .flash{background:#ecfeff;border:1px solid #bae6fd;color:#075985;padding:8px 10px;border-radius:8px;margin:8px 0}
 </style>
 <script>
 function addRow(){
@@ -52,6 +55,24 @@ window.addEventListener('DOMContentLoaded', ()=>{
     <a class="btn secondary" href="{{ url_for('admin_entry') }}">← 登録フォームへ戻る</a>
   </div>
 
+  <!-- ▼ フラッシュ表示（成功/エラー） -->
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for m in messages %}
+        <div class="flash">{{ m }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <!-- ▼ CSV 取り込み（既存に追加） -->
+  <form class="csvbar" method="post" action="{{ url_for('admin_entries_import_csv') }}" enctype="multipart/form-data">
+    <input type="file" name="csv_file" accept=".csv">
+    <button class="btn" type="submit">CSVを取り込む（既存に追加）</button>
+    <span class="note">列：category,title,desc,address,map,tags,areas,links,extras,extra_○○…（title/desc必須）</span>
+    <a class="btn ghost" href="{{ url_for('admin_entries_edit') }}">最新の内容を再読込</a>
+  </form>
+
+  <!-- ▼ 既存データの編集フォーム（このページの「保存」は従来どおり /admin/entries_edit にPOSTされる想定） -->
   <form method="post">
     <table>
       <thead>

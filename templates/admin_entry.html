@@ -5,12 +5,12 @@
     <title>観光データ管理</title>
     <style>
         body {font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #f6faf9;}
-        .container {background:#fff; padding:30px 32px; margin:40px auto; max-width:820px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d;}
+        .container {background:#fff; padding:30px 32px; margin:40px auto; max-width:980px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d;}
         label {display:inline-block; min-width:70px; font-weight: 500;}
-        input[type=text], textarea {margin-bottom:12px; width:98%; padding: 6px 10px; font-size:1em; border-radius:7px; border: 1px solid #b0c4d7;}
+        input[type=text], textarea, select {margin-bottom:12px; width:98%; padding: 6px 10px; font-size:1em; border-radius:7px; border: 1px solid #b0c4d7; background:#fff;}
         textarea {resize:vertical;}
-        .entry-card {background:#f7faf7; margin:12px 0; border-radius:11px; padding:16px 16px 11px 16px; box-shadow: 0 2px 6px #e0e6ed30;}
-        .entry-actions {margin-top:10px;}
+        .entry-card {background:#f7faf7; margin:12px 0; border-radius:12px; padding:14px 16px; box-shadow: 0 2px 6px #e0e6ed30;}
+        .entry-actions {margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;}
         .card-label {color:#2a8ed8; font-size:0.98em;}
         .nav {margin-bottom:20px;}
         .nav a {margin-right:16px; font-size:1em; color:#2a8ed8; text-decoration:none; font-weight:500;}
@@ -18,20 +18,32 @@
         .add-btn {padding: 7px 24px; font-size:1em; border-radius:7px; background: #2a8ed8; color:#fff; border:none; margin-top: 8px;}
         .del-btn {background: #fff; color: #d76; border: 1px solid #eaa; border-radius: 7px; padding:7px 18px;}
         .del-btn:hover {background:#fee;}
-        .info {font-size:0.97em; color:#196; margin-top:12px;}
         .row {margin-bottom:10px;}
         .extra-row {margin:6px 0;}
         .mini-note {font-size:0.92em; color:#888;}
         hr {border: 1px solid #e7eef5;}
-        @media (max-width: 700px) {
-            .container {padding:10px;}
-            input[type=text], textarea {width:96%;}
-        }
+
+        /* --- フィルター & ページネーション UI --- */
+        .filterbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 14px}
+        .filterbar input[type=text], .filterbar select{width:auto;min-width:160px}
+        .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef6ff;color:#2a8ed8;font-size:.9em}
+        .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+        .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+        .pager{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 10px}
+        .pager .btn{padding:6px 10px}
+        .pager .info{color:#456;font-size:.92em}
         ul.compact {margin:4px 0 10px 18px; padding:0;}
         ul.compact li {margin:2px 0;}
         table.kv {border-collapse: collapse; margin:4px 0 8px 0;}
-        table.kv td {border:1px solid #e3e9ee; padding:4px 6px;}
-        table.kv td.k {background:#f6f9fb; min-width:120px; font-weight:500;}
+        table.kv td {border:1px solid #e3e9ee; padding:4px 6px; font-size:0.92em}
+        table.kv td.k {background:#f6f9fb; min-width:120px; font-weight:500; color:#345;}
+        .muted{color:#789;font-size:.92em}
+
+        @media (max-width: 700px) {
+            .container {padding:10px;}
+            input[type=text], textarea {width:96%;}
+            .filterbar input[type=text], .filterbar select {min-width:130px}
+        }
     </style>
     <script>
     function onCategoryChange() {
@@ -44,9 +56,9 @@
         const div = document.createElement('div');
         div.className = 'extra-row';
         div.innerHTML = `
-          <input name="extras_key[]" placeholder="キー">
+          <input name="extras_key[]" placeholder="項目">
           ＝
-          <input name="extras_val[]" placeholder="値">
+          <input name="extras_val[]" placeholder="内容">
           <button type="button" onclick="this.parentNode.remove()">－</button>
         `;
         wrap.appendChild(div);
@@ -60,7 +72,128 @@
         }
         return true;
     }
-    window.onload = function() { onCategoryChange(); }
+
+    // ====== フィルタ & ソート & ページネーション ======
+    let PAGING = {page:1, size:20, totalFiltered:0, totalAll:0};
+
+    function _norm(s){ return (s||'').toString().toLowerCase(); }
+
+    function filterCards(resetPage=true){
+      const q = _norm(document.getElementById('f_q').value);
+      const cat = document.getElementById('f_cat').value;
+      const area = document.getElementById('f_area').value;
+      const tagsRaw = document.getElementById('f_tag').value.trim();
+      const sort = document.getElementById('f_sort').value;
+      const requireTags = tagsRaw ? tagsRaw.split(',').map(s=>s.trim()).filter(Boolean).map(_norm) : [];
+
+      const list = Array.from(document.querySelectorAll('.entry-card'));
+      let filtered = [];
+
+      // 絞り込み
+      list.forEach(card=>{
+        const txt = card.dataset.text;      // title/desc/address/tags/links/extras
+        const dcat = card.dataset.category; // カテゴリ
+        const dtags = (card.dataset.tags||'').split(',').map(_norm);
+        const dareas = (card.dataset.areas||'').split(',').map(s=>s.trim());
+        let ok = true;
+
+        if(q && !txt.includes(q)) ok = false;
+        if(cat && dcat !== cat) ok = false;
+        if(area && !dareas.includes(area)) ok = false;
+        if(requireTags.length){
+          for(const t of requireTags){
+            if(!dtags.includes(t)){ ok = false; break; }
+          }
+        }
+        // いったん全て非表示、OKなものは配列へ（表示制御は後段のページネーションで）
+        card.style.display = 'none';
+        if(ok) filtered.push(card);
+      });
+
+      // 並び替え（フィルタ適用後）
+      filtered.sort((a,b)=>{
+        if(sort==='title_asc')  return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+        if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
+        if(sort==='cat_asc'){
+          const c = a.dataset.category.localeCompare(b.dataset.category, 'ja'); 
+          if(c!==0) return c;
+          return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+        }
+        if(sort==='cat_desc'){
+          const c = b.dataset.category.localeCompare(a.dataset.category, 'ja'); 
+          if(c!==0) return c;
+          return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+        }
+        return 0;
+      });
+
+      // 件数更新
+      PAGING.totalFiltered = filtered.length;
+      PAGING.totalAll = list.length;
+
+      if(resetPage) PAGING.page = 1;
+
+      // ページネーション適用
+      applyPagination(filtered);
+    }
+
+    function applyPagination(filtered){
+      const size = PAGING.size;
+      const totalPages = Math.max(1, Math.ceil((filtered.length || 0) / size));
+      if(PAGING.page > totalPages) PAGING.page = totalPages;
+      if(PAGING.page < 1) PAGING.page = 1;
+      const start = (PAGING.page - 1) * size;
+      const end = Math.min(start + size, filtered.length);
+
+      // 表示制御
+      for(let i=0;i<filtered.length;i++){
+        filtered[i].style.display = (i>=start && i<end) ? '' : 'none';
+      }
+
+      // カウンタ/ページ情報
+      document.getElementById('f_count').textContent = PAGING.totalFiltered;
+      document.getElementById('f_total').textContent = PAGING.totalAll;
+      const info = `ページ ${PAGING.page} / ${totalPages}（1ページ ${size}件）`;
+      document.querySelectorAll('.pager .info').forEach(el=>el.textContent = info);
+
+      // ページャーボタンの活性/非活性
+      document.querySelectorAll('.pager').forEach(pg=>{
+        pg.querySelector('.prev').disabled = (PAGING.page<=1);
+        pg.querySelector('.next').disabled = (PAGING.page>=totalPages);
+        pg.querySelector('.first').disabled = (PAGING.page<=1);
+        pg.querySelector('.last').disabled = (PAGING.page>=totalPages);
+      });
+    }
+
+    function resetFilters(){
+      document.getElementById('f_q').value='';
+      document.getElementById('f_cat').value='';
+      document.getElementById('f_area').value='';
+      document.getElementById('f_tag').value='';
+      document.getElementById('f_sort').value='title_asc';
+      PAGING.page = 1;
+      filterCards(false);
+    }
+
+    function onChangePageSize(sel){
+      PAGING.size = parseInt(sel.value || '20', 10);
+      PAGING.page = 1;
+      filterCards(false);
+    }
+
+    function gotoPage(which){
+      if(which==='first') PAGING.page = 1;
+      else if(which==='prev') PAGING.page -= 1;
+      else if(which==='next') PAGING.page += 1;
+      else if(which==='last'){
+        const size = PAGING.size;
+        const totalPages = Math.max(1, Math.ceil(PAGING.totalFiltered / size));
+        PAGING.page = totalPages;
+      }
+      filterCards(false);
+    }
+
+    window.onload = function(){ onCategoryChange(); filterCards(); };
     </script>
 </head>
 <body>
@@ -96,6 +229,7 @@
       {% endif %}
     {% endwith %}
 
+    <!-- ===== 登録フォーム ===== -->
     <form method="post" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
         {% if edit_id %}
         <input type="hidden" name="edit_id" value="{{ edit_id }}">
@@ -114,53 +248,47 @@
         <div id="form_tourism" style="display:none;">
             <label>タイトル</label><br>
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
-
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
-
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
-
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
-
             <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
             <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}"><br>
-
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
             {% set area_opts = ["五島市", "新上五島町", "宇久町", "小値賀町"] %}
             <div class="row">
             {% for area in area_opts %}
               <label style="min-width:unset;">
-                <input type="checkbox" name="areas" value="{{ area }}"
-                {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
-                {{ area }}
+              <input type="checkbox" name="areas" value="{{ area }}"
+              {% if entry_edit and entry_edit.areas and area in entry_edit.areas %}checked{% endif %}>
+              {{ area }}
               </label>
             {% endfor %}
             </div>
-
             <!-- ▼ 追加: リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
             <textarea name="links" rows="3" placeholder="https://example.com
 https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and entry_edit.links else '' }}</textarea><br>
 
-            <!-- ▼ 追加: 自由項目（キー＝値） -->
-            <label>自由項目（キー＝値）</label>
+            <!-- ▼ 追加: 追加情報（項目＝内容） -->
+            <label>追加情報（項目＝内容）</label>
             <div id="extras-list-tourism">
               {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
               {% for k, v in _extras.items() %}
                 <div class="extra-row">
-                  <input name="extras_key[]" value="{{ k }}" placeholder="例）問い合わせ窓口">
+                  <input name="extras_key[]" value="{{ k }}" placeholder="項目">
                   ＝
-                  <input name="extras_val[]" value="{{ v }}" placeholder="例）info@example.com">
+                  <input name="extras_val[]" value="{{ v }}" placeholder="内容">
                   <button type="button" onclick="this.parentNode.remove()">－</button>
                 </div>
               {% endfor %}
               {% if not _extras %}
                 <div class="extra-row">
-                  <input name="extras_key[]" placeholder="例）問い合わせ窓口">
+                  <input name="extras_key[]" placeholder="項目">
                   ＝
-                  <input name="extras_val[]" placeholder="例）info@example.com">
+                  <input name="extras_val[]" placeholder="内容">
                   <button type="button" onclick="this.parentNode.remove()">－</button>
                 </div>
               {% endif %}
@@ -172,40 +300,30 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
         <div id="form_shop" style="display:none;">
             <label>タイトル</label><br>
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
-
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
-
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
-
             <label>電話番号</label><br>
             <input type="text" name="tel" value="{{ entry_edit.tel if entry_edit else '' }}"><br>
-
             <label>休み</label><br>
             <input type="text" name="holiday" value="{{ entry_edit.holiday if entry_edit else '' }}"><br>
-
             <label>営業時間</label><br>
             <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
-
             <label>駐車場</label>
             <select name="parking">
                 <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
                 <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
             </select>
             台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
-
             <label>支払方法</label><br>
             <input type="checkbox" name="payment" value="現金" {% if entry_edit and entry_edit.payment and '現金' in entry_edit.payment %}checked{% endif %}>現金
             <input type="checkbox" name="payment" value="カード" {% if entry_edit and entry_edit.payment and 'カード' in entry_edit.payment %}checked{% endif %}>カード
             <input type="checkbox" name="payment" value="その他" {% if entry_edit and entry_edit.payment and 'その他' in entry_edit.payment %}checked{% endif %}>その他<br>
-
             <label>備考（自由記述）</label><br>
             <textarea name="remark" rows="2">{{ entry_edit.remark if entry_edit else '' }}</textarea><br>
-
             <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
             <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ ','.join(entry_edit.tags) }}{% endif %}"><br>
-
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
             <div class="row">
             {% for area in area_opts %}
@@ -216,7 +334,6 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
               </label>
             {% endfor %}
             </div>
-
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
 
@@ -225,23 +342,23 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
             <textarea name="links" rows="3" placeholder="https://example.com
 https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and entry_edit.links else '' }}</textarea><br>
 
-            <!-- ▼ 追加: 自由項目（キー＝値） -->
-            <label>自由項目（キー＝値）</label>
+            <!-- ▼ 追加: 追加情報（項目＝内容） -->
+            <label>追加情報（項目＝内容）</label>
             <div id="extras-list-shop">
               {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
               {% for k, v in _extras2.items() %}
                 <div class="extra-row">
-                  <input name="extras_key[]" value="{{ k }}" placeholder="例）問い合わせ窓口">
+                  <input name="extras_key[]" value="{{ k }}" placeholder="項目">
                   ＝
-                  <input name="extras_val[]" value="{{ v }}" placeholder="例）info@example.com">
+                  <input name="extras_val[]" value="{{ v }}" placeholder="内容">
                   <button type="button" onclick="this.parentNode.remove()">－</button>
                 </div>
               {% endfor %}
               {% if not _extras2 %}
                 <div class="extra-row">
-                  <input name="extras_key[]" placeholder="例）問い合わせ窓口">
+                  <input name="extras_key[]" placeholder="項目">
                   ＝
-                  <input name="extras_val[]" placeholder="例）info@example.com">
+                  <input name="extras_val[]" placeholder="内容">
                   <button type="button" onclick="this.parentNode.remove()">－</button>
                 </div>
               {% endif %}
@@ -252,10 +369,66 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
         <button class="add-btn" type="submit">{{ '編集' if edit_id else '登録' }}</button>
     </form>
 
+    <!-- ===== 登録済みデータ（検索・絞り込み・並び替え・ページネーション対応） ===== -->
     <hr>
-    <h2 style="margin-bottom:12px;">登録済みデータ</h2>
+    <h2 style="margin-bottom:8px;">登録済みデータ</h2>
+
+    <div class="filterbar">
+      <input type="text" id="f_q" placeholder="キーワード（タイトル/説明/住所/タグ/追加情報/リンク）" oninput="filterCards()">
+      <select id="f_cat" onchange="filterCards()">
+        <option value="">カテゴリー：すべて</option>
+        {% for c in cat_list %}
+          <option value="{{ c }}">{{ c }}</option>
+        {% endfor %}
+      </select>
+      <select id="f_area" onchange="filterCards()">
+        <option value="">エリア：すべて</option>
+        {% for area in area_opts %}
+          <option value="{{ area }}">{{ area }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" id="f_tag" placeholder="タグ（カンマ区切り・AND）" oninput="filterCards()">
+      <select id="f_sort" onchange="filterCards()">
+        <option value="title_asc">並び替え：タイトル↑</option>
+        <option value="title_desc">並び替え：タイトル↓</option>
+        <option value="cat_asc">並び替え：カテゴリ↑</option>
+        <option value="cat_desc">並び替え：カテゴリ↓</option>
+      </select>
+
+      <!-- 件数とページサイズ -->
+      <span class="badge">表示：<span id="f_count">0</span> / <span id="f_total">0</span></span>
+      <select id="f_page_size" onchange="onChangePageSize(this)">
+        <option value="10">1ページ 10件</option>
+        <option value="20" selected>1ページ 20件</option>
+        <option value="30">1ページ 30件</option>
+        <option value="50">1ページ 50件</option>
+      </select>
+
+      <button class="btn ghost" type="button" onclick="resetFilters()">リセット</button>
+    </div>
+
+    <!-- ページャー（上） -->
+    <div class="pager">
+      <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
+      <button type="button" class="btn prev"  onclick="gotoPage('prev')">‹ 前へ</button>
+      <span class="info">ページ 1 / 1（1ページ 20件）</span>
+      <button type="button" class="btn next"  onclick="gotoPage('next')">次へ ›</button>
+      <button type="button" class="btn last"  onclick="gotoPage('last')">最後 ≫</button>
+    </div>
+
+    <div id="cards">
     {% for e in entries %}
-        <div class="entry-card">
+        {% set tags_str = (', '.join(e.tags) if e.tags else '') %}
+        {% set areas_str = (', '.join(e.areas) if e.areas else '') %}
+        {% set links_str = (', '.join(e.links) if e.links else '') %}
+        {% set extras_text = (', '.join([k ~ ':' ~ v for k,v in e.extras.items()]) if e.extras else '') %}
+        {% set all_text = ( (e.title or '') ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ tags_str ~ ' ' ~ links_str ~ ' ' ~ extras_text )|lower %}
+        <div class="entry-card"
+             data-title="{{ e.title or '' }}"
+             data-category="{{ e.category or '' }}"
+             data-areas="{{ areas_str }}"
+             data-tags="{{ (e.tags|map('lower')|join(',')) if e.tags else '' }}"
+             data-text="{{ all_text }}">
             <span class="card-label">タイトル：</span>{{ e.title }}<br>
             <span class="card-label">説明：</span>{{ e.desc }}<br>
             <span class="card-label">住所：</span>{{ e.address }}<br>
@@ -273,7 +446,6 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
                 <span class="card-label">備考：</span>{{ e.remark or "" }}<br>
             {% endif %}
 
-            <!-- ▼ 追加表示: リンク -->
             {% if e.links %}
               <span class="card-label">リンク：</span>
               <ul class="compact">
@@ -283,9 +455,8 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
               </ul>
             {% endif %}
 
-            <!-- ▼ 追加表示: 自由項目 -->
             {% if e.extras %}
-              <span class="card-label">自由項目：</span>
+              <span class="card-label">追加情報：</span>
               <table class="kv">
                 {% for k, v in e.extras.items() %}
                   <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
@@ -298,7 +469,7 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
             <div class="entry-actions">
                 <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
                     <input type="hidden" name="edit" value="{{ loop.index0 }}">
-                    <button type="submit" class="add-btn" style="background:#6abf4b;">編集</button>
+                    <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
                 </form>
                 {% if role == "admin" %}
                 <form method="post" action="{{ url_for('delete_entry') }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
@@ -309,6 +480,17 @@ https://instagram.com/xxx">{{ entry_edit.links | join('\n') if entry_edit and en
             </div>
         </div>
     {% endfor %}
+    </div>
+
+    <!-- ページャー（下） -->
+    <div class="pager">
+      <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
+      <button type="button" class="btn prev"  onclick="gotoPage('prev')">‹ 前へ</button>
+      <span class="info">ページ 1 / 1（1ページ 20件）</span>
+      <button type="button" class="btn next"  onclick="gotoPage('next')">次へ ›</button>
+      <button type="button" class="btn last"  onclick="gotoPage('last')">最後 ≫</button>
+    </div>
+
 </div>
 </body>
 </html>
