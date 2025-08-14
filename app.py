@@ -3,6 +3,7 @@ import json
 import re
 import datetime
 import itertools
+import time  # ← 追加
 from collections import Counter
 from typing import Any, Dict, List
 
@@ -152,6 +153,35 @@ def _atomic_json_dump(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def _safe_read_json(path: str, default_obj):
+    """
+    JSONを安全に読み込む。壊れていたら .bad-YYYYmmdd-HHMMSS に退避し、
+    default_obj を書き戻してから default_obj を返す。
+    """
+    try:
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(default_obj, f, ensure_ascii=False, indent=2)
+            return default_obj
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        app.logger.exception(f"[safe_read_json] JSON read failed: {path}: {e}")
+        # 破損ファイルを退避
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            os.replace(path, f"{path}.bad-{ts}")
+        except Exception:
+            pass
+        # 既定値で初期化
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(default_obj, f, ensure_ascii=False, indent=2)
+        except Exception:
+            app.logger.exception(f"[safe_read_json] JSON rewrite failed: {path}")
+        return default_obj
+
+
 # 初回ブートストラップ
 ADMIN_INIT_USER = os.environ.get("ADMIN_INIT_USER", "admin")
 ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")  # 初回のみ使用推奨
@@ -213,10 +243,7 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
 #  基本I/O
 # =========================
 def load_users():
-    if not os.path.exists(USERS_FILE):
-        return []
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return _safe_read_json(USERS_FILE, [])
 
 def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -313,37 +340,25 @@ def translate_text(text: str, target_lang: str) -> str:
 #  お知らせ・データI/O
 # =========================
 def load_notices():
-    if not os.path.exists(NOTICES_FILE):
-        return []
-    with open(NOTICES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return _safe_read_json(NOTICES_FILE, [])
 
 def save_notices(notices):
     _atomic_json_dump(NOTICES_FILE, notices)
 
 def load_entries():
-    if not os.path.exists(ENTRIES_FILE):
-        return []
-    with open(ENTRIES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return _safe_read_json(ENTRIES_FILE, [])
 
 def save_entries(entries):
     _atomic_json_dump(ENTRIES_FILE, entries)
 
 def load_synonyms():
-    if not os.path.exists(SYNONYM_FILE):
-        return {}
-    with open(SYNONYM_FILE, encoding="utf-8") as f:
-        return json.load(f)
+    return _safe_read_json(SYNONYM_FILE, {})
 
 def save_synonyms(synonyms):
     _atomic_json_dump(SYNONYM_FILE, synonyms)
 
 def load_shop_info(user_id):
-    if not os.path.exists(SHOP_INFO_FILE):
-        return {}
-    with open(SHOP_INFO_FILE, "r", encoding="utf-8") as f:
-        infos = json.load(f)
+    infos = _safe_read_json(SHOP_INFO_FILE, {})
     return infos.get(user_id, {})
 
 def save_shop_info(user_id, info):
@@ -437,9 +452,6 @@ def generate_unhit_report(n=7):
     counter = Counter(questions)
     return counter.most_common()
 
-# 類義語
-def save_synonyms(synonyms):
-    _atomic_json_dump(SYNONYM_FILE, synonyms)
 
 def find_tags_by_synonym(question, synonyms):
     tags = set()
