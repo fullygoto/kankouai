@@ -767,27 +767,77 @@ def admin_entries_edit():
         abort(403)
 
     if request.method == "POST":
-        raw_json = request.form.get("entries_raw", "")
-        try:
-            data = json.loads(raw_json)
-            if not isinstance(data, list):
-                raise ValueError("ルート要素は配列(list)にしてください")
-            data = [_norm_entry(e) for e in data]   # 正規化して保存
-            save_entries(data)
-            flash("entries.jsonを上書きしました")
+        # ① 生JSONでの上書き（従来互換）
+        raw_json = request.form.get("entries_raw")
+        if raw_json:
+            try:
+                data = json.loads(raw_json)
+                if not isinstance(data, list):
+                    raise ValueError("ルート要素は配列(list)にしてください")
+                data = [_norm_entry(e) for e in data]
+                save_entries(data)
+                flash("entries.jsonを上書きしました")
+                return redirect(url_for("admin_entries_edit"))
+            except Exception as e:
+                flash("JSONエラー: " + str(e))
+        else:
+            # ② UIフォームからの保存（テンプレートに合わせる）
+            cats        = request.form.getlist("category[]")
+            titles      = request.form.getlist("title[]")
+            descs       = request.form.getlist("desc[]")
+            addresses   = request.form.getlist("address[]")
+            maps        = request.form.getlist("map[]")
+            tags_list   = request.form.getlist("tags[]")
+            areas_list  = request.form.getlist("areas[]")
+            tels        = request.form.getlist("tel[]")
+            holidays    = request.form.getlist("holiday[]")
+            opens       = request.form.getlist("open_hours[]")
+            parkings    = request.form.getlist("parking[]")
+            parking_nums= request.form.getlist("parking_num[]")
+            payments    = request.form.getlist("payment[]")
+            remarks     = request.form.getlist("remark[]")
+            links_list  = request.form.getlist("links[]")
+
+            new_entries = []
+            n = max(len(titles), len(descs))
+            for i in range(n):
+                title = (titles[i] if i < len(titles) else "").strip()
+                desc  = (descs[i]  if i < len(descs)  else "").strip()
+                # 完全空行はスキップ
+                if not title and not desc:
+                    continue
+
+                e = {
+                    "category":   (cats[i] if i < len(cats) else "観光").strip() or "観光",
+                    "title":      title,
+                    "desc":       desc,
+                    "address":    (addresses[i]  if i < len(addresses)  else "").strip(),
+                    "map":        (maps[i]       if i < len(maps)       else "").strip(),
+                    "tags":       _split_lines_commas(tags_list[i]  if i < len(tags_list)  else ""),
+                    "areas":      _split_lines_commas(areas_list[i] if i < len(areas_list) else ""),
+                    "links":      _split_lines_commas(links_list[i]  if i < len(links_list)  else ""),
+                    "payment":    _split_lines_commas(payments[i]    if i < len(payments)    else ""),
+                    "tel":        (tels[i]        if i < len(tels)        else "").strip(),
+                    "holiday":    (holidays[i]    if i < len(holidays)    else "").strip(),
+                    "open_hours": (opens[i]       if i < len(opens)       else "").strip(),
+                    "parking":    (parkings[i]    if i < len(parkings)    else "").strip(),
+                    "parking_num":(parking_nums[i]if i < len(parking_nums)else "").strip(),
+                    "remark":     (remarks[i]     if i < len(remarks)     else "").strip(),
+                    "extras": {},
+                }
+                e = _norm_entry(e)
+                if not e["areas"]:
+                    # エリア必須（空なら行ごと無視）
+                    continue
+                new_entries.append(e)
+
+            save_entries(new_entries)
+            flash(f"{len(new_entries)} 件保存しました")
             return redirect(url_for("admin_entries_edit"))
-        except Exception as e:
-            flash("JSONエラー: " + str(e))
-            return render_template("admin_entries_edit.html", entries_raw=raw_json), 400
 
-    try:
-        entries = load_entries()
-        entries_raw = json.dumps(entries, ensure_ascii=False, indent=2)
-    except Exception as e:
-        entries_raw = "[]"
-        flash("entries.jsonの読み込みに失敗しました: " + str(e))
-
-    return render_template("admin_entries_edit.html", entries_raw=entries_raw)
+    # GET（またはPOSTエラー後の再表示）
+    entries = [_norm_entry(x) for x in load_entries()]
+    return render_template("admin_entries_edit.html", entries=entries)
 
 
 # =========================
@@ -992,19 +1042,23 @@ def write_full_backup_zip(out_dir: str) -> str:
 def admin_backup():
     if session.get("role") != "admin":
         abort(403)
-    out_dir = os.path.join(BASE_DIR, "manual_backups")
-    path = write_full_backup_zip(out_dir)
-    app.logger.info(f"[backup] manual saved: {path}")
-    return send_file(path, as_attachment=True, download_name=os.path.basename(path), mimetype="application/zip")
 
-def _safe_extractall(zf: zipfile.ZipFile, dst):
-    base = os.path.abspath(dst)
-    for member in zf.namelist():
-        target = os.path.abspath(os.path.join(dst, member))
-        if not target.startswith(base + os.sep) and target != base:
-            raise Exception("Unsafe path found in ZIP (zip slip)")
-    os.makedirs(dst, exist_ok=True)
-    zf.extractall(dst)
+    if request.args.get("download"):
+        out_dir = os.path.join(BASE_DIR, "manual_backups")
+        path = write_full_backup_zip(out_dir)
+        app.logger.info(f"[backup] manual saved: {path}")
+        return send_file(path, as_attachment=True,
+                         download_name=os.path.basename(path),
+                         mimetype="application/zip")
+
+    # 画面表示（統計を出すと親切）
+    stats = {
+        "entries_count": len(load_entries()),
+        "synonyms_count": len(load_synonyms()),
+        "notices_count": len(load_notices()),
+        "logs_count": sum(1 for _ in open(LOG_FILE, encoding="utf-8")) if os.path.exists(LOG_FILE) else 0,
+    }
+    return render_template("admin_backup.html", stats=stats)
 
 @app.route("/admin/restore", methods=["POST"])
 @login_required
