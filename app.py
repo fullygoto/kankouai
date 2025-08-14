@@ -734,6 +734,22 @@ def admin_unhit_questions():
     unhit_logs = unhit_logs[-100:]
     return render_template("admin_unhit.html", unhit_logs=unhit_logs)
 
+@app.route("/api/faq_suggest", methods=["POST"])
+@login_required
+def api_faq_suggest():
+    if session.get("role") != "admin":
+        abort(403)
+    # フォーム or JSON どちらでも受ける
+    q = (request.form.get("q") or (request.get_json(silent=True) or {}).get("q") or "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "q is required"}), 400
+    # OpenAIキー未設定なら明示エラー
+    if not OPENAI_API_KEY:
+        return jsonify({"ok": False, "error": "OPENAI_API_KEY not set"}), 500
+    text = ai_suggest_faq(q, model=OPENAI_MODEL_PRIMARY) or ""
+    return jsonify({"ok": True, "text": text})
+
+
 @app.route("/admin/add_entry", methods=["POST"])
 @login_required
 def admin_add_entry():
