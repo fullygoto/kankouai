@@ -42,16 +42,16 @@
         <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
         <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
 
-        {# ↓ ここは未定義エンドポイント。消す or コメントアウト #}
-        {# <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a> #}
+        <!-- 復活させたリンク -->
+        <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
 
         <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
         <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
         <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
 
-        {# ↓ ここも未定義。消す or コメントアウト #}
-        {# <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a> #}
+        <!-- 復活させたリンク -->
+        <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
         <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
             <input type="file" name="backup_zip" accept=".zip" style="display:inline;">
@@ -181,6 +181,7 @@
                     <button type="submit" class="add-btn" style="background:#6abf4b;">編集</button>
                 </form>
                 {% if role == "admin" %}
+                <!-- idx を hidden で送る安全版 -->
                 <form method="post" action="{{ url_for('delete_entry') }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
                     <input type="hidden" name="idx" value="{{ loop.index0 }}">
                     <button type="submit" class="del-btn">削除</button>
