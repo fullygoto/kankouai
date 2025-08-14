@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>全体バックアップ / 復元</title>
+<style>
+  body{font-family:'Segoe UI','メイリオ',sans-serif;background:#f6faf9;margin:0}
+  .container{background:#fff;padding:26px 28px;margin:38px auto;max-width:980px;border-radius:17px;box-shadow:0 4px 20px #b7d3e04d;}
+  .nav{margin-bottom:18px;}
+  .nav a{margin-right:16px;font-size:1em;color:#2a8ed8;text-decoration:none;font-weight:500;}
+  .nav a:hover{text-decoration:underline;}
+  h1{margin:0 0 10px}
+  .muted{color:#789;font-size:.92em}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .card{background:#fbfefe;border:1px solid #e6edf3;border-radius:12px;padding:16px}
+  .btn{padding:9px 16px;border:none;border-radius:9px;background:#2a8ed8;color:#fff;cursor:pointer}
+  .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #cfe1ef}
+  .btn.danger{background:#e11d48}
+  .flash{background:#ecfeff;border:1px solid #bae6fd;color:#075985;padding:8px 10px;border-radius:8px;margin:8px 0}
+  input[type=file]{padding:8px;border:1px solid #cfe1ef;border-radius:8px;background:#fff;width:100%}
+  ul{margin:8px 0 0 18px}
+  li{margin:4px 0}
+  .kv{border-collapse:collapse;margin-top:8px}
+  .kv td{border:1px solid #e6edf3;padding:6px 8px}
+  .kv td.k{background:#f6f9fb;font-weight:600;color:#345;min-width:140px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr}}
+</style>
+<script>
+function confirmRestore(){
+  return confirm('現在のデータが上書きされます。本当に復元しますか？');
+}
+</script>
+</head>
+<body>
+  {% include '_back_to_data.html' %}
+  <div class="container">
+    <div class="nav" style="float:right;">
+      <a href="{{ url_for('admin_logs') }}">[質問・回答ログ]</a>
+      <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+      <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+      <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
+      <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
+      <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
+      <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
+      <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
+      <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+    </div>
+
+    <h1>全体バックアップ / 復元</h1>
+    <div class="muted">データをZIPでまとめてエクスポート／インポートできます。</div>
+
+    <!-- フラッシュ表示 -->
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="grid" style="margin-top:10px">
+      <!-- バックアップ作成 -->
+      <div class="card">
+        <h2 style="margin:0 0 8px">バックアップの作成（ZIPダウンロード）</h2>
+        <p class="muted">現在の保存内容をZIPに固めてダウンロードします。</p>
+        <!-- GET でダウンロードさせる想定。必要に応じて href のクエリは外してください。 -->
+        <a class="btn" href="{{ url_for('admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
+        <button class="btn ghost" style="margin-left:8px" onclick="location.reload()">再読込</button>
+
+        {% if stats %}
+          <table class="kv">
+            <tr><td class="k">観光データ（entries）</td><td>{{ stats.entries_count }} 件</td></tr>
+            <tr><td class="k">類義語（synonyms）</td><td>{{ stats.synonyms_count }} 語</td></tr>
+            <tr><td class="k">お知らせ（notices）</td><td>{{ stats.notices_count }} 件</td></tr>
+            <tr><td class="k">ログ（logs）</td><td>{{ stats.logs_count }} 件</td></tr>
+          </table>
+        {% endif %}
+      </div>
+
+      <!-- 復元（上書き） -->
+      <div class="card">
+        <h2 style="margin:0 0 8px">全体復元（ZIPアップロード）</h2>
+        <p class="muted">
+          ZIPの内容で現在のデータを<strong>上書き</strong>します。<br>
+          事前に「バックアップの作成」で退避しておくことを推奨します。
+        </p>
+        <form method="post" action="{{ url_for('admin_restore') }}" enctype="multipart/form-data" onsubmit="return confirmRestore()">
+          <input type="file" name="backup_zip" accept=".zip">
+          <div style="margin-top:10px">
+            <button class="btn danger" type="submit">ZIPをアップロードして復元</button>
+          </div>
+        </form>
+        <ul class="muted">
+          <li>ZIP直下に <code>entries.json</code>, <code>synonyms.json</code>, <code>notices.json</code> 等が入っている構成を想定</li>
+          <li>パスがサブフォルダになっていると復元に失敗します（例：<code>data/entries.json</code> は不可）</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- 参考：バックアップに含まれる想定ファイル -->
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin:0 0 8px">バックアップの中身（想定）</h2>
+      <ul>
+        <li><code>entries.json</code> … 観光データ本体</li>
+        <li><code>synonyms.json</code> … 類義語辞書</li>
+        <li><code>notices.json</code> … お知らせ一覧</li>
+        <li>（任意）<code>logs.json</code> や関連ファイル</li>
+      </ul>
+      <p class="muted">構成はアプリ実装に依存します。異なる場合はこの説明だけ調整してください。</p>
+    </div>
+
+    <div style="margin-top:8px">
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← データ管理に戻る</a>
+    </div>
+  </div>
+</body>
+</html>
