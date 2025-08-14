@@ -489,8 +489,9 @@ def admin_entry():
     if edit_id is not None and edit_id != "":
         try:
             entry_edit = entries[int(edit_id)]
-        except:
+        except Exception:
             entry_edit = None
+
     if request.method == "POST":
         # 共通
         category = request.form.get("category", "")
@@ -502,6 +503,15 @@ def admin_entry():
         tags = [tag.strip() for tag in tags_raw.split(",") if tag.strip()]
         areas = request.form.getlist("areas")
 
+        # ★追加: リンク（複数）
+        links_raw = request.form.get("links", "")
+        links = [u.strip() for u in re.split(r"[\n,]", links_raw) if u.strip()]
+
+        # ★追加: 自由項目（キー＝値）
+        extras_keys = request.form.getlist("extras_key[]")
+        extras_vals = request.form.getlist("extras_val[]")
+        extras = {k.strip(): v.strip() for k, v in zip(extras_keys, extras_vals) if k.strip()}
+
         # 店舗系専用
         tel = request.form.get("tel", "")
         holiday = request.form.get("holiday", "")
@@ -511,6 +521,11 @@ def admin_entry():
         payment = request.form.getlist("payment")
         remark = request.form.get("remark", "")
 
+        # ★エリア必須
+        if not areas:
+            flash("エリアは1つ以上選択してください")
+            return redirect(url_for("admin_entry"))
+
         data = {
             "category": category,
             "title": title,
@@ -518,8 +533,12 @@ def admin_entry():
             "address": address,
             "map": map_url,
             "tags": tags,
-            "areas": areas
+            "areas": areas,
+            # ★全カテゴリで使える汎用フィールド
+            "links": links,
+            "extras": extras
         }
+        # 既存の「観光以外は店舗系フィールドあり」はそのまま維持
         if category != "観光":
             data.update({
                 "tel": tel,
@@ -595,11 +614,25 @@ def shop_entry():
         parking = request.form.get("parking", "")
         parking_num = request.form.get("parking_num", "")
         payment = request.form.getlist("payment")
-        remark = request.form.get("remark", "")
-        tags_raw = request.form.get("tags", "")
-        tags = [tag.strip() for tag in tags_raw.split(",") if tag.strip()]
-        areas = request.form.getlist("areas")
         map_url = request.form.get("map", "")
+
+        tags_raw = request.form.get("tags", "")
+        tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
+        areas = request.form.getlist("areas")
+        remark = request.form.get("remark", "")
+
+        # ★追加: リンク（複数）
+        links_raw = request.form.get("links", "")
+        links = [u.strip() for u in re.split(r"[\n,]", links_raw) if u.strip()]
+
+        # ★追加: 自由項目（キー＝値）
+        extras_keys = request.form.getlist("extras_key[]")
+        extras_vals = request.form.getlist("extras_val[]")
+        extras = {k.strip(): v.strip() for k, v in zip(extras_keys, extras_vals) if k.strip()}
+
+        if not areas:
+            flash("エリアは1つ以上選択してください")
+            return redirect(url_for("shop_entry"))
 
         entry_data = {
             "user_id": user_id,
@@ -616,7 +649,10 @@ def shop_entry():
             "remark": remark,
             "tags": tags,
             "areas": areas,
-            "map": map_url
+            "map": map_url,
+            # ★全カテゴリ共通の汎用フィールド
+            "links": links,
+            "extras": extras
         }
 
         entries = load_entries()
@@ -968,23 +1004,34 @@ def find_entry_info(question):
 
     cleaned_query = clean_query_for_search(question)
     # 1. タイトル完全一致
-    hits = [e for e in entries if cleaned_query and e.get("title", "") == cleaned_query and (not target_areas or any(area in e.get("areas", []) for area in target_areas))]
+    hits = [e for e in entries if cleaned_query and e.get("title", "") == cleaned_query
+            and (not target_areas or any(area in e.get("areas", []) for area in target_areas))]
     if hits:
         return hits
-    # 2. 各カラム部分一致
+
+    # 2. 各カラム部分一致（★ここに links/extras を追加）
     hits = []
     for e in entries:
-        haystacks = [e.get("title", ""), " ".join(e.get("tags", [])), e.get("desc", ""), e.get("address", "")]
+        haystacks = [
+            e.get("title", ""),
+            " ".join(e.get("tags", [])),
+            e.get("desc", ""),
+            e.get("address", ""),
+            " ".join(e.get("links", []) or []),
+            " ".join((e.get("extras") or {}).values())
+        ]
         target_str = " ".join(haystacks)
         if cleaned_query and cleaned_query in target_str:
             if not target_areas or any(area in e.get("areas", []) for area in target_areas):
                 hits.append(e)
     if hits:
         return hits
+
     # 3. 元のtitle, desc部分一致
     hits = [e for e in entries if question in e.get("title", "") or question in e.get("desc", "")]
     if hits:
         return hits
+
     # 4. タグ一致・類義語一致
     hits = []
     for e in entries:
