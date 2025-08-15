@@ -1,188 +1,263 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<title>観光データ一括編集（UI）</title>
-<style>
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","メイリオ",sans-serif;background:#f6faf9;margin:0}
-  .wrap{max-width:1200px;margin:28px auto;padding:0 16px}
-  .top{display:flex;gap:10px;align-items:center;margin-bottom:14px}
-  .btn{padding:8px 14px;border:0;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
-  .btn.secondary{background:#6b7280}
-  .btn.danger{background:#e11d48}
-  .btn.ghost{background:#fff;border:1px solid #cbd5e1;color:#2a8ed8}
-  table{width:100%;border-collapse:collapse;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 16px #c6d4e71a}
-  th,td{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;font-size:13px}
-  th{background:#f1f5f9;text-align:left;white-space:nowrap}
-  input[type=text], textarea, select{width:100%;box-sizing:border-box;font-size:13px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
-  textarea{min-height:42px;resize:vertical}
-  .muted{opacity:.45}
-  .row-actions{display:flex;gap:6px}
-  .note{font-size:12px;color:#64748b;margin-left:8px}
-  .savebar{position:sticky;bottom:0;background:#f6faf9;padding:10px 0;margin-top:10px}
-  .csvbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 16px}
-  .flash{background:#ecfeff;border:1px solid #bae6fd;color:#075985;padding:8px 10px;border-radius:8px;margin:8px 0}
-</style>
-<script>
-function addRow(){
-  const tpl = document.getElementById('row-template');
-  const tbody = document.getElementById('tbody');
-  const clone = tpl.content.cloneNode(true);
-  tbody.appendChild(clone);
-}
-function removeRow(btn){
-  const tr = btn.closest('tr');
-  tr.parentNode.removeChild(tr);
-}
-function onCategoryChange(sel){
-  const tr = sel.closest('tr');
-  const isTourism = (sel.value === '観光');
-  tr.querySelectorAll('[data-shop]').forEach(el=>{
-    el.disabled = isTourism;
-    el.classList.toggle('muted', isTourism);
-  });
-}
-window.addEventListener('DOMContentLoaded', ()=>{
-  document.querySelectorAll('select[name="category[]"]').forEach(onCategoryChange);
-});
-</script>
+  <meta charset="utf-8" />
+  <title>観光データ一括編集</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --border:#e5e7eb;
+      --border-dark:#d1d5db;
+      --bg:#ffffff;
+      --bg-soft:#fafafa;
+      --text:#111827;
+      --muted:#6b7280;
+    }
+    body{
+      margin:0; padding:16px; color:var(--text); background:var(--bg);
+      font:14px/1.6 system-ui, -apple-system, "Segoe UI", Roboto,
+            "Hiragino Sans", "Noto Sans JP", "Helvetica Neue", Arial,
+            "Yu Gothic", Meiryo, sans-serif;
+    }
+    h1{ font-size:20px; margin:0 0 12px; }
+    .toolbar{
+      display:flex; flex-wrap:wrap; gap:12px; align-items:center;
+      margin:0 0 12px;
+    }
+    .toolbar .right{ margin-left:auto; display:flex; gap:8px; align-items:center; }
+    .btn{
+      display:inline-flex; align-items:center; justify-content:center;
+      padding:8px 12px; border:1px solid var(--border-dark); border-radius:8px;
+      background:#fff; cursor:pointer; text-decoration:none; color:var(--text);
+    }
+    .btn.primary{ background:#111827; color:#fff; border-color:#111827; }
+    .btn.ghost{ background:transparent; }
+    .btn.small{ padding:6px 10px; font-size:12px; }
+
+    .hint{ color:var(--muted); font-size:12px; }
+
+    .table-scroll{
+      overflow-x:auto; -webkit-overflow-scrolling:touch;
+      border:1px solid var(--border); border-radius:8px; background:#fff;
+    }
+    table.entries-table{
+      border-collapse:collapse; width:100%;
+      /* 横幅を広げて横スクロールを有効化 */
+      min-width: 1680px;
+    }
+    .entries-table th, .entries-table td{
+      padding:8px 10px; border-bottom:1px solid var(--border);
+      vertical-align:top; background:#fff;
+    }
+    .entries-table thead th{
+      position:sticky; top:0; z-index:2; background:var(--bg-soft);
+    }
+    /* 先頭列（タイトル）を固定したい場合 */
+    .fixed-col{ position:sticky; left:0; z-index:3; background:#fff; box-shadow: 1px 0 0 0 var(--border); }
+
+    input[type="text"], input[type="tel"]{
+      width:100%; box-sizing:border-box; padding:7px 9px;
+      border:1px solid var(--border-dark); border-radius:6px; background:#fff;
+      font:inherit;
+      min-width: 220px; /* 狭くなり過ぎないよう下駄 */
+    }
+
+    /* 長文欄は横スクロールで読みやすく（折り返しOFFデフォルト） */
+    .wide-textarea{
+      width:100%; box-sizing:border-box; padding:8px 10px;
+      border:1px solid var(--border-dark); border-radius:6px; background:#fff;
+      font:14px/1.6 system-ui, -apple-system, "Segoe UI", Roboto,
+           "Hiragino Sans", "Noto Sans JP", "Helvetica Neue", Arial,
+           "Yu Gothic", Meiryo, sans-serif;
+      min-width:520px; min-height:9rem;
+      white-space: pre;     /* 折り返さず、横スクロール */
+      overflow:auto;
+    }
+    .wide-textarea.tall{ min-height:14rem; }
+
+    .mini{ font-size:12px; color:var(--muted); }
+
+    details.jsonbox{
+      margin:14px 0 18px; border:1px solid var(--border); border-radius:8px; background:#fff;
+      padding:10px 12px;
+    }
+    details.jsonbox summary{ cursor:pointer; font-weight:600; }
+
+    .wrap-toggle{ display:flex; gap:10px; align-items:center; }
+
+    /* モバイル調整 */
+    @media (max-width: 960px){
+      table.entries-table{ min-width:1200px; }
+      .wide-textarea{ min-width:420px; }
+    }
+  </style>
 </head>
 <body>
-{% include '_back_to_data.html' %}
-<div class="wrap">
-  <div class="top">
-    <h1 style="margin:0;font-size:20px;">観光データ一括編集（UI）</h1>
-    <span class="note">※タグ/エリア/支払方法はカンマ区切りで入力</span>
-    <a class="btn secondary" href="{{ url_for('admin_entry') }}">← 登録フォームへ戻る</a>
-  </div>
+  <h1>観光データ一括編集</h1>
 
-  <!-- ▼ フラッシュ表示（成功/エラー） -->
-  {% with messages = get_flashed_messages() %}
-    {% if messages %}
-      {% for m in messages %}
-        <div class="flash">{{ m }}</div>
-      {% endfor %}
-    {% endif %}
-  {% endwith %}
+  <!-- 旧来互換：JSONそのまま貼り付け上書き -->
+  <details class="jsonbox">
+    <summary>JSON 直接編集（上書き）</summary>
+    <form method="post" action="{{ url_for('admin_entries_edit') }}" style="margin-top:10px;">
+      <div class="mini" style="margin:4px 0 8px;">
+        ここに <code>[...]</code> 形式の <b>entries.json</b> を貼り付けて保存すると、<b>丸ごと上書き</b>されます。
+      </div>
+      <textarea name="entries_raw" class="wide-textarea tall" wrap="off" placeholder='[ { "category":"観光", "title":"…", … } ]'></textarea>
+      <div style="margin-top:10px; display:flex; gap:8px;">
+        <button class="btn primary" type="submit">JSONで保存（上書き）</button>
+        <div class="hint">※ 従来の動作そのまま維持</div>
+      </div>
+    </form>
+  </details>
 
-  <!-- ▼ CSV 取り込み（既存に追加） -->
-  <form class="csvbar" method="post" action="{{ url_for('admin_entries_import_csv') }}" enctype="multipart/form-data">
-    <input type="file" name="csv_file" accept=".csv">
-    <button class="btn" type="submit">CSVを取り込む（既存に追加）</button>
-    <span class="note">列：category,title,desc,address,map,tags,areas,links,extras,extra_○○…（title/desc必須）</span>
-    <a class="btn ghost" href="{{ url_for('admin_entries_edit') }}">最新の内容を再読込</a>
-  </form>
-
-  <!-- ▼ 既存データの編集フォーム（このページの「保存」は従来どおり /admin/entries_edit にPOSTされる想定） -->
-  <form method="post">
-    <table>
-      <thead>
-        <tr>
-          <th style="width:110px;">カテゴリー</th>
-          <th style="width:180px;">タイトル</th>
-          <th>説明</th>
-          <th style="width:180px;">住所</th>
-          <th style="width:180px;">地図URL</th>
-          <th style="width:160px;">タグ</th>
-          <th style="width:160px;">エリア</th>
-          <th style="width:110px;">電話</th>
-          <th style="width:120px;">休み</th>
-          <th style="width:140px;">営業時間</th>
-          <th style="width:90px;">駐車</th>
-          <th style="width:70px;">台数</th>
-          <th style="width:150px;">支払方法</th>
-          <th style="width:160px;">備考</th>
-          <th style="width:80px;">操作</th>
-        </tr>
-      </thead>
-      <tbody id="tbody">
-        {% for e in entries %}
-        <tr>
-          <td>
-            <select name="category[]" onchange="onCategoryChange(this)">
-              {% set cats = ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
-              {% for c in cats %}
-                <option value="{{ c }}" {% if e.category==c %}selected{% endif %}>{{ c }}</option>
-              {% endfor %}
-            </select>
-          </td>
-          <td><input type="text" name="title[]" value="{{ e.title or '' }}"></td>
-          <td><textarea name="desc[]">{{ e.desc or '' }}</textarea></td>
-          <td><input type="text" name="address[]" value="{{ e.address or '' }}"></td>
-          <td><input type="text" name="map[]" value="{{ e.map or '' }}"></td>
-          <td><input type="text" name="tags[]" value="{% if e.tags %}{{ ','.join(e.tags) }}{% endif %}"></td>
-          <td><input type="text" name="areas[]" value="{% if e.areas %}{{ ','.join(e.areas) }}{% endif %}"></td>
-
-          <td><input data-shop type="text" name="tel[]" value="{{ e.tel or '' }}"></td>
-          <td><input data-shop type="text" name="holiday[]" value="{{ e.holiday or '' }}"></td>
-          <td><input data-shop type="text" name="open_hours[]" value="{{ e.open_hours or '' }}"></td>
-          <td>
-            <select data-shop name="parking[]">
-              <option value="" {% if not e.parking %}selected{% endif %}>-</option>
-              <option value="あり" {% if e.parking=='あり' %}selected{% endif %}>あり</option>
-              <option value="なし" {% if e.parking=='なし' %}selected{% endif %}>なし</option>
-            </select>
-          </td>
-          <td><input data-shop type="text" name="parking_num[]" value="{{ e.parking_num or '' }}"></td>
-          <td><input data-shop type="text" name="payment[]" value="{% if e.payment %}{{ ','.join(e.payment) }}{% endif %}"></td>
-          <td><input data-shop type="text" name="remark[]" value="{{ e.remark or '' }}"></td>
-
-          <td class="row-actions">
-            <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-
-    <div class="savebar">
-      <button class="btn" type="button" onclick="addRow()">＋ 行を追加</button>
-      <button class="btn" type="submit">💾 保存する</button>
+  <!-- テーブル編集 -->
+  <form method="post" action="{{ url_for('admin_entries_edit') }}">
+    <div class="toolbar">
+      <div class="wrap-toggle">
+        <label><input type="checkbox" id="wrapToggle"> 長文を折り返して表示</label>
+        <span class="hint">（OFFで横スクロール／ONで折り返し）</span>
+      </div>
+      <div class="right">
+        <button type="button" class="btn small ghost" id="addRowBtn">+ 行を追加</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
     </div>
 
-    <!-- 追加用テンプレート -->
-    <template id="row-template">
-      <tr>
-        <td>
-          <select name="category[]" onchange="onCategoryChange(this)">
-            <option value="観光" selected>観光</option>
-            <option value="飲食">飲食</option>
-            <option value="宿泊">宿泊</option>
-            <option value="診療所">診療所</option>
-            <option value="役所">役所</option>
-            <option value="交通">交通</option>
-            <option value="バス">バス</option>
-            <option value="イベント">イベント</option>
-            <option value="特売">特売</option>
-          </select>
-        </td>
-        <td><input type="text" name="title[]" value=""></td>
-        <td><textarea name="desc[]"></textarea></td>
-        <td><input type="text" name="address[]" value=""></td>
-        <td><input type="text" name="map[]" value=""></td>
-        <td><input type="text" name="tags[]" value=""></td>
-        <td><input type="text" name="areas[]" value=""></td>
+    <div class="table-scroll">
+      <table class="entries-table">
+        <thead>
+          <tr>
+            <th class="fixed-col">タイトル<br><span class="mini">title[]</span></th>
+            <th>カテゴリ<br><span class="mini">category[]</span></th>
+            <th>説明（長文）<br><span class="mini">desc[]</span></th>
+            <th>エリア（カンマ区切り）<br><span class="mini">areas[]</span></th>
+            <th>タグ（カンマ区切り）<br><span class="mini">tags[]</span></th>
+            <th>住所<br><span class="mini">address[]</span></th>
+            <th>地図URL<br><span class="mini">map[]</span></th>
+            <th>リンク（カンマ区切り）<br><span class="mini">links[]</span></th>
+            <th>TEL<br><span class="mini">tel[]</span></th>
+            <th>営業時間<br><span class="mini">open_hours[]</span></th>
+            <th>定休日<br><span class="mini">holiday[]</span></th>
+            <th>駐車場<br><span class="mini">parking[]</span></th>
+            <th>台数<br><span class="mini">parking_num[]</span></th>
+            <th>支払い（カンマ区切り）<br><span class="mini">payment[]</span></th>
+            <th>備考<br><span class="mini">remark[]</span></th>
+          </tr>
+        </thead>
+        <tbody id="entriesBody">
+          {% for e in entries %}
+          <tr>
+            <td class="fixed-col">
+              <input type="text" name="title[]" value="{{ e.get('title','') }}" placeholder="例）頭ヶ島天主堂">
+            </td>
+            <td>
+              <input type="text" name="category[]" value="{{ e.get('category','観光') }}" placeholder="観光">
+            </td>
+            <td>
+              <textarea name="desc[]" class="wide-textarea" wrap="off" placeholder="スポットの魅力や概要">{{ e.get('desc','') }}</textarea>
+            </td>
+            <td>
+              {% set areas = e.get('areas', []) %}
+              <input type="text" name="areas[]" value="{{ (areas|join(', ')) if areas else '' }}" placeholder="五島市, 新上五島町 …">
+            </td>
+            <td>
+              {% set tags = e.get('tags', []) %}
+              <input type="text" name="tags[]" value="{{ (tags|join(', ')) if tags else '' }}" placeholder="教会, 海水浴, 展望台 …">
+            </td>
+            <td>
+              <input type="text" name="address[]" value="{{ e.get('address','') }}" placeholder="住所">
+            </td>
+            <td>
+              <input type="text" name="map[]" value="{{ e.get('map','') }}" placeholder="https://…（Googleマップ等）">
+            </td>
+            <td>
+              {% set links = e.get('links', []) %}
+              <input type="text" name="links[]" value="{{ (links|join(', ')) if links else '' }}" placeholder="公式, 観光協会, SNS …">
+            </td>
+            <td>
+              <input type="tel" name="tel[]" value="{{ e.get('tel','') }}" placeholder="0959-xx-xxxx">
+            </td>
+            <td>
+              <input type="text" name="open_hours[]" value="{{ e.get('open_hours','') }}" placeholder="例）9:00-17:00">
+            </td>
+            <td>
+              <input type="text" name="holiday[]" value="{{ e.get('holiday','') }}" placeholder="例）水曜">
+            </td>
+            <td>
+              <input type="text" name="parking[]" value="{{ e.get('parking','') }}" placeholder="有/無・場所など">
+            </td>
+            <td>
+              <input type="text" name="parking_num[]" value="{{ e.get('parking_num','') }}" placeholder="台数">
+            </td>
+            <td>
+              {% set payment = e.get('payment', []) %}
+              <input type="text" name="payment[]" value="{{ (payment|join(', ')) if payment else '' }}" placeholder="現金, クレカ, 交通系IC …">
+            </td>
+            <td>
+              <textarea name="remark[]" class="wide-textarea" wrap="off" placeholder="補足">{{ e.get('remark','') }}</textarea>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
 
-        <td><input data-shop type="text" name="tel[]" value=""></td>
-        <td><input data-shop type="text" name="holiday[]" value=""></td>
-        <td><input data-shop type="text" name="open_hours[]" value=""></td>
-        <td>
-          <select data-shop name="parking[]">
-            <option value="" selected>-</option>
-            <option value="あり">あり</option>
-            <option value="なし">なし</option>
-          </select>
-        </td>
-        <td><input data-shop type="text" name="parking_num[]" value=""></td>
-        <td><input data-shop type="text" name="payment[]" value=""></td>
-        <td><input data-shop type="text" name="remark[]" value=""></td>
-
-        <td class="row-actions">
-          <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
-        </td>
-      </tr>
-    </template>
+    <div class="toolbar" style="margin-top:12px;">
+      <div class="hint">※ 入力名や保存先は既存ロジックのまま（昨日の動作を維持）</div>
+      <div class="right">
+        <button type="button" class="btn small ghost" id="addRowBtn2">+ 行を追加</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </div>
   </form>
-</div>
+
+  <!-- 追加行テンプレート -->
+  <template id="rowTpl">
+    <tr>
+      <td class="fixed-col"><input type="text" name="title[]" placeholder="タイトル"></td>
+      <td><input type="text" name="category[]" value="観光" placeholder="観光"></td>
+      <td><textarea name="desc[]" class="wide-textarea" wrap="off" placeholder="説明"></textarea></td>
+      <td><input type="text" name="areas[]" placeholder="エリア（カンマ区切り）"></td>
+      <td><input type="text" name="tags[]" placeholder="タグ（カンマ区切り）"></td>
+      <td><input type="text" name="address[]" placeholder="住所"></td>
+      <td><input type="text" name="map[]" placeholder="地図URL"></td>
+      <td><input type="text" name="links[]" placeholder="リンク（カンマ区切り）"></td>
+      <td><input type="tel" name="tel[]" placeholder="TEL"></td>
+      <td><input type="text" name="open_hours[]" placeholder="営業時間"></td>
+      <td><input type="text" name="holiday[]" placeholder="定休日"></td>
+      <td><input type="text" name="parking[]" placeholder="駐車場"></td>
+      <td><input type="text" name="parking_num[]" placeholder="台数"></td>
+      <td><input type="text" name="payment[]" placeholder="支払い（カンマ区切り）"></td>
+      <td><textarea name="remark[]" class="wide-textarea" wrap="off" placeholder="備考"></textarea></td>
+    </tr>
+  </template>
+
+  <script>
+    // 折り返しトグル：横スクロール <-> 折り返し
+    const wrapToggle = document.getElementById('wrapToggle');
+    const applyWrap = () => {
+      document.querySelectorAll('.wide-textarea').forEach(ta => {
+        if (wrapToggle.checked) {
+          ta.style.whiteSpace = 'pre-wrap';
+          ta.setAttribute('wrap', 'soft');
+        } else {
+          ta.style.whiteSpace = 'pre';
+          ta.setAttribute('wrap', 'off');
+        }
+      });
+    };
+    wrapToggle.addEventListener('change', applyWrap);
+    applyWrap();
+
+    // 行追加（下部ボタンどちらでも）
+    function addRow(){
+      const tpl = document.getElementById('rowTpl');
+      const tbody = document.getElementById('entriesBody');
+      tbody.appendChild(tpl.content.cloneNode(true));
+      applyWrap(); // 新規行にも適用
+    }
+    document.getElementById('addRowBtn').addEventListener('click', addRow);
+    document.getElementById('addRowBtn2').addEventListener('click', addRow);
+  </script>
 </body>
 </html>
