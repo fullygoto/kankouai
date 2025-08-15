@@ -7,6 +7,8 @@ import time
 import threading  
 from collections import Counter
 from typing import Any, Dict, List
+from werkzeug.routing import BuildError
+
 
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort
 
@@ -117,6 +119,13 @@ def login_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+def safe_url_for(endpoint, **values):
+    try:
+        return url_for(endpoint, **values)
+    except BuildError:
+        return "#"  # 未実装リンクはダミーへ
+
+app.jinja_env.globals["safe_url_for"] = safe_url_for
 
 # =========================
 #  環境変数 / モデル
@@ -1142,6 +1151,8 @@ def admin_import():
     # GET: 画面表示
     return render_template("admin_import.html")
 
+
+
 # =========================
 #  ログ・未ヒット確認
 # =========================
@@ -1552,6 +1563,282 @@ def admin_manual():
         abort(403)
     return render_template("admin_manual.html")
 
+# ======== ▼▼▼ ここから追記：テキストファイル管理（/admin/data_files） ▼▼▼ ========
+import unicodedata
+from flask import send_from_directory
+
+ALLOWED_TXT_EXTS = {".txt", ".md"}  # 必要なら増やせます
+
+def _safe_txt_name(name: str) -> str:
+    """
+    ディレクトリトラバーサル防止 & 許容文字のみに制限。
+    日本語はNFKCに正規化、先頭ドットでの隠しファイル化を禁止。
+    拡張子が無ければ .txt を付与。
+    """
+    if not name:
+        return ""
+    name = os.path.basename(name)
+    name = unicodedata.normalize("NFKC", name)
+    # 許可文字のみ（日本語・英数・一部記号・全角/半角スペース）
+    name = re.sub(r'[^0-9A-Za-zぁ-んァ-ン一-龥ー_\-\.\(\)\[\] 　]+', '', name)
+    name = name.strip()
+    # 先頭ドットは禁止（隠しファイル回避）
+    name = name.lstrip(".")
+    if not name:
+        return ""
+    root, ext = os.path.splitext(name)
+    if not ext:
+        name = name + ".txt"
+        ext = ".txt"
+    if ext.lower() not in ALLOWED_TXT_EXTS:
+        return ""
+    return (name[:120]).strip()
+
+def _ensure_in_data_dir(path: str) -> bool:
+    """DATA_DIR 配下に収まっているかの安全確認"""
+    base = os.path.abspath(DATA_DIR)
+    target = os.path.abspath(path)
+    return target.startswith(base + os.sep) or target == base
+
+def _read_text_any(path: str):
+    encs = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "utf-16"]  # ← utf-16 を追加
+    with open(path, "rb") as rf:
+        raw = rf.read()
+    for enc in encs:
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    # 最後の手段：置換ありでCP932
+    return raw.decode("cp932", errors="replace"), "cp932(replace)"
+
+def _write_text(path: str, text: str, encoding: str = "utf-8"):
+    """
+    テキストを書き出す。CRLF/CR を LF に正規化。
+    encoding='cp932' を選ぶと日本語Windows互換保存（文字により失敗時はutf-8にフォールバック）
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path + ".tmp", "w", encoding=encoding, newline="\n") as wf:
+            wf.write(text)
+        os.replace(path + ".tmp", path)
+        return encoding, None
+    except UnicodeEncodeError as e:
+        if encoding.lower() == "cp932":
+            # CP932に載らない文字があった → UTF-8で保存して通知
+            with open(path + ".tmp", "w", encoding="utf-8", newline="\n") as wf:
+                wf.write(text)
+            os.replace(path + ".tmp", path)
+            return "utf-8", f"一部の文字がCP932に無いため UTF-8 で保存しました（{e}）"
+        else:
+            raise
+
+def _list_txt_files():
+    """DATA_DIR 直下の .txt/.md を一覧（サブフォルダを許可したい場合は os.walk に変更）"""
+    files = []
+    if not os.path.isdir(DATA_DIR):
+        return files
+    for fn in sorted(os.listdir(DATA_DIR)):
+        if fn.startswith("."):
+            continue
+        root, ext = os.path.splitext(fn)
+        if ext.lower() not in ALLOWED_TXT_EXTS:
+            continue
+        fp = os.path.join(DATA_DIR, fn)
+        if not os.path.isfile(fp):
+            continue
+        st = os.stat(fp)
+        files.append({
+            "name": fn,
+            "size": st.st_size,
+            "mtime": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    # 更新日時の降順
+    files.sort(key=lambda x: x["mtime"], reverse=True)
+    return files
+
+@app.route("/admin/data_files", methods=["GET"])
+@login_required
+def admin_data_files():
+    if session.get("role") != "admin":
+        abort(403)
+    files = _list_txt_files()
+    edit = (request.args.get("edit") or "").strip()
+    content = ""
+    used_enc = ""
+    if edit:
+        safe = _safe_txt_name(edit)
+        if not safe:
+            flash("不正なファイル名です")
+            return redirect(url_for("admin_data_files"))
+        path = os.path.join(DATA_DIR, safe)
+        if not _ensure_in_data_dir(path) or not os.path.exists(path):
+            flash("指定ファイルが見つかりません")
+            return redirect(url_for("admin_data_files"))
+        content, used_enc = _read_text_any(path)
+    return render_template("admin_data_files.html", files=files, edit=edit, content=content, used_enc=used_enc)
+
+@app.route("/admin/data_files/upload", methods=["POST"])
+@login_required
+def admin_data_files_upload():
+    if session.get("role") != "admin":
+        abort(403)
+    ups = request.files.getlist("txt_files")
+    count = 0
+    for f in ups:
+        if not f or not f.filename:
+            continue
+        safe = _safe_txt_name(f.filename)
+        if not safe:
+            flash(f"スキップ: 不正なファイル名 {f.filename}")
+            continue
+        dst = os.path.join(DATA_DIR, safe)
+        if not _ensure_in_data_dir(dst):
+            flash(f"スキップ: 保存先エラー {safe}")
+            continue
+
+        data = f.read()
+        if not data:
+            flash(f"スキップ: 空ファイル {safe}")
+            continue
+
+        # ★ここから追加：同名回避の連番付与
+        base, ext = os.path.splitext(safe)
+        candidate = safe
+        i = 1
+        while os.path.exists(os.path.join(DATA_DIR, candidate)):
+            candidate = f"{base} ({i}){ext}"
+            i += 1
+        dst = os.path.join(DATA_DIR, candidate)
+        # ★ここまで追加
+
+        # 文字コードを自動判定
+        text = None
+        for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "utf-16"):
+            try:
+                text = data.decode(enc)
+                break
+            except UnicodeDecodeError:
+                pass
+        if text is None:
+            text = data.decode("cp932", errors="replace")
+
+        _write_text(dst, text, encoding="utf-8")
+        count += 1
+
+    flash(f"アップロード完了：{count} 件")
+    return redirect(url_for("admin_data_files"))
+
+@app.route("/admin/data_files/new", methods=["POST"])
+@login_required
+def admin_data_files_new():
+    if session.get("role") != "admin":
+        abort(403)
+    name = (request.form.get("new_name") or "").strip()
+    safe = _safe_txt_name(name)
+    if not safe:
+        flash("ファイル名が不正です（拡張子は .txt / .md のみ）")
+        return redirect(url_for("admin_data_files"))
+    path = os.path.join(DATA_DIR, safe)
+    if not _ensure_in_data_dir(path):
+        flash("保存先エラー")
+        return redirect(url_for("admin_data_files"))
+    if os.path.exists(path):
+        flash("同名ファイルが既にあります")
+        return redirect(url_for("admin_data_files", edit=safe))
+    _write_text(path, "", encoding="utf-8")
+    flash("新規作成しました")
+    return redirect(url_for("admin_data_files", edit=safe))
+
+@app.route("/admin/data_files/save", methods=["POST"])
+@login_required
+def admin_data_files_save():
+    if session.get("role") != "admin":
+        abort(403)
+    name = (request.form.get("edit_name") or "").strip()
+    enc  = (request.form.get("save_encoding") or "utf-8").strip().lower()
+    content = request.form.get("content") or ""
+    safe = _safe_txt_name(name)
+    if not safe:
+        flash("ファイル名が不正です")
+        return redirect(url_for("admin_data_files"))
+    path = os.path.join(DATA_DIR, safe)
+    if not _ensure_in_data_dir(path):
+        flash("保存先エラー")
+        return redirect(url_for("admin_data_files"))
+
+    try:
+        used, warn = _write_text(path, content, encoding=("cp932" if enc == "cp932" else "utf-8"))
+        msg = f"保存しました（encoding: {used}）"
+        if warn:
+            msg += " / " + warn
+        flash(msg)
+    except Exception as e:
+        app.logger.exception("save failed")
+        flash("保存に失敗しました: " + str(e))
+    return redirect(url_for("admin_data_files", edit=safe))
+
+@app.route("/admin/data_files/delete", methods=["POST"])
+@login_required
+def admin_data_files_delete():
+    if session.get("role") != "admin":
+        abort(403)
+    name = (request.form.get("del_name") or "").strip()
+    safe = _safe_txt_name(name)
+    if not safe:
+        flash("ファイル名が不正です")
+        return redirect(url_for("admin_data_files"))
+    path = os.path.join(DATA_DIR, safe)
+    if not _ensure_in_data_dir(path) or not os.path.exists(path):
+        flash("ファイルが見つかりません")
+        return redirect(url_for("admin_data_files"))
+    try:
+        os.remove(path)
+        flash("削除しました")
+    except Exception as e:
+        app.logger.exception("delete failed")
+        flash("削除に失敗しました: " + str(e))
+    return redirect(url_for("admin_data_files"))
+
+@app.route("/admin/data_files/download")
+@login_required
+def admin_data_files_download():
+    if session.get("role") != "admin":
+        abort(403)
+    name = (request.args.get("name") or "").strip()
+    safe = _safe_txt_name(name)
+    if not safe:
+        flash("ファイル名が不正です")
+        return redirect(url_for("admin_data_files"))
+    # send_from_directory はパス検証込みで安全
+    return send_from_directory(DATA_DIR, safe, as_attachment=True)
+
+@app.route("/admin/data_files/rename", methods=["POST"])
+@login_required
+def admin_data_files_rename():
+    if session.get("role") != "admin":
+        abort(403)
+    old = (request.form.get("old_name") or "").strip()
+    new = (request.form.get("new_name") or "").strip()
+    old_s = _safe_txt_name(old)
+    new_s = _safe_txt_name(new)
+    if not old_s or not new_s:
+        flash("ファイル名が不正です")
+        return redirect(url_for("admin_data_files", edit=old_s))
+    src = os.path.join(DATA_DIR, old_s)
+    dst = os.path.join(DATA_DIR, new_s)
+    if not (_ensure_in_data_dir(src) and _ensure_in_data_dir(dst)) or not os.path.exists(src):
+        flash("リネーム対象が見つかりません")
+        return redirect(url_for("admin_data_files"))
+    if os.path.exists(dst):
+        flash("指定の新ファイル名は既に存在します")
+        return redirect(url_for("admin_data_files", edit=old_s))
+    os.rename(src, dst)
+    flash("名前を変更しました")
+    return redirect(url_for("admin_data_files", edit=new_s))
+# ======== ▲▲▲ 追記ここまで ▲▲▲
+
 
 # =========================
 #  トップ/ヘルスチェック
@@ -1797,21 +2084,23 @@ def search_text_files(question, data_dir=DATA_DIR, max_snippets=5, window=80):
         return None
     for root, dirs, files in os.walk(data_dir):
         for fname in files:
-            if fname.endswith('.txt'):
-                try:
-                    fpath = os.path.join(root, fname)
-                    with open(fpath, encoding='utf-8') as f:
-                        text = f.read()
-                    for m in re.finditer(pattern, text, re.IGNORECASE):
-                        start = max(m.start()-window, 0)
-                        end = min(m.end()+window, len(text))
-                        snippet = text[start:end].replace('\n', ' ').strip()
-                        if snippet not in snippets:
-                            snippets.append(snippet)
-                            if len(snippets) >= max_snippets:
-                                return snippets
-                except Exception as e:
-                    print(f"[全文検索エラー] {fname}: {e}")
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in {'.txt', '.md'}:
+                continue
+            try:
+                fpath = os.path.join(root, fname)
+                # 文字コード自動判定で読む（アップロード時はUTF-8保存だが保険）
+                text, _ = _read_text_any(fpath)
+                for m in re.finditer(pattern, text, re.IGNORECASE):
+                    start = max(m.start()-window, 0)
+                    end = min(m.end()+window, len(text))
+                    snippet = text[start:end].replace('\n', ' ').strip()
+                    if snippet not in snippets:
+                        snippets.append(snippet)
+                        if len(snippets) >= max_snippets:
+                            return snippets
+            except Exception as e:
+                print(f"[全文検索エラー] {fname}: {e}")
     return snippets if snippets else None
 
 def fetch_and_search_web(question):
