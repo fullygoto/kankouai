@@ -375,7 +375,8 @@ def save_notices(notices):
     _atomic_json_dump(NOTICES_FILE, notices)
 
 def load_entries():
-    return _safe_read_json(ENTRIES_FILE, [])
+    raw = _safe_read_json(ENTRIES_FILE, [])
+    return [_norm_entry(e) for e in raw]
 
 def save_entries(entries):
     _atomic_json_dump(ENTRIES_FILE, entries)
@@ -1592,6 +1593,30 @@ def get_weather_reply(question):
         reply += f"{e['area']}: {e['url']}\n"
     return reply.strip(), True
 
+SMALLTALK_PATTERNS = {
+    "greet": ["おはよう", "こんにちは", "こんばんは", "やあ", "はじめまして"],
+    "howareyou": ["元気", "調子どう", "調子は？"],
+    "thanks": ["ありがとう", "助かった", "サンキュー"],
+    "capability": ["何ができる", "使い方", "ヘルプ", "help"]
+}
+
+def smalltalk_or_help_reply(q_ja: str):
+    t = q_ja.strip()
+    if any(k in t for k in SMALLTALK_PATTERNS["greet"]):
+        return "こんにちは！ご旅行の予定や気分をざっくり教えてくれれば、ぴったりのスポットを探します。"
+    if any(k in t for k in SMALLTALK_PATTERNS["howareyou"]):
+        return "元気ですよ！今日は海・教会・展望・温泉・グルメなど、気分はどれですか？"
+    if any(k in t for k in SMALLTALK_PATTERNS["thanks"]):
+        return "どういたしまして！他にも聞きたいことがあればどうぞ。"
+    if any(k in t for k in SMALLTALK_PATTERNS["capability"]):
+        return (
+            "できること：\n"
+            "・スポット検索（例：『五島市のビーチ』『教会の見学』）\n"
+            "・基本情報の回答（住所／地図／営業時間／駐車場など）\n"
+            "・天気・航路リンク案内、未ヒット時の絞り込み提案\n"
+            "気軽に話しかけてOK。会話から意図を読み取って探します。"
+        )
+    return None
 
 # =========================
 #  観光データ横断検索
@@ -1706,6 +1731,13 @@ def smart_search_answer_with_hitflag(question):
     weather_reply, weather_hit = get_weather_reply(question)
     if weather_hit:
         return weather_reply, True, meta
+    
+        # ★ここから追加：雑談/使い方
+    st = smalltalk_or_help_reply(question)
+    if st:
+        meta["kind"] = "smalltalk"
+        return st, True, meta
+
 
     if any(word in question for word in ["飛行機", "空港", "航空便", "欠航", "到着", "出発"]):
         return (
@@ -1723,14 +1755,22 @@ def smart_search_answer_with_hitflag(question):
         if len(entries) == 1:
             e = entries[0]
             lines = []
-            if e.get("title"):   lines.append(f"◼︎ {e['title']}")
-            if e.get("areas"):   lines.append(f"エリア: {', '.join(e['areas'])}")
-            if e.get("desc"):    lines.append(f"説明: {e['desc']}")
-            if e.get("address"): lines.append(f"住所: {e['address']}")
-            if e.get("map"):     lines.append(f"地図: {e['map']}")
-            # if e.get("tags"):    lines.append(f"タグ: {', '.join(e['tags'])}")
-            if e.get("links"):   lines.append("リンク: " + " / ".join(e['links']))
+            if e.get("title"):      lines.append(f"◼︎ {e['title']}")
+            if e.get("areas"):      lines.append(f"エリア: {', '.join(e['areas'])}")
+            if e.get("desc"):       lines.append(f"説明: {e['desc']}")
+            if e.get("address"):    lines.append(f"住所: {e['address']}")
+            if e.get("tel"):        lines.append(f"TEL: {e['tel']}")
+            if e.get("open_hours"): lines.append(f"営業時間: {e['open_hours']}")
+            if e.get("holiday"):    lines.append(f"定休日: {e['holiday']}")
+            if e.get("parking"):    lines.append(f"駐車場: {e['parking']}（台数: {e.get('parking_num','')}）")
+            if e.get("payment"):    lines.append("支払い: " + " / ".join(e['payment']))
+            if e.get("extras"):
+                for k, v in (e.get("extras") or {}).items():
+                    if v: lines.append(f"{k}: {v}")
+            if e.get("map"):        lines.append(f"地図: {e['map']}")
+            if e.get("links"):      lines.append("リンク: " + " / ".join(e['links']))
             return "\n".join(lines), True, meta
+        
         else:
             try:
                 snippets = [f"タイトル: {e.get('title','')}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n" for e in entries]
