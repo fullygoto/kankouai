@@ -269,13 +269,17 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
 # OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
     """
-    - GPT-5 系: Responses API を使用（temperature は渡さない / max_completion_tokens を使用）
+    - GPT-5 系: Responses API を使用（temperature は渡さない / max_output_tokens を使用）
     - それ以外: Chat Completions を優先（max_tokens / temperature 可）
     - どちらも同じ呼び出し感覚で使えるよう吸収
     """
     params = dict(kwargs)
-    # トークン上限名を統一
-    mot = params.pop("max_completion_tokens", None) or params.pop("max_tokens", None)
+    # 呼び出し側がどれで渡しても拾えるようにする
+    mot = (
+        params.pop("max_output_tokens", None)
+        or params.pop("max_completion_tokens", None)
+        or params.pop("max_tokens", None)
+    )
     temp = params.pop("temperature", None)
 
     # GPT-5 系は Responses API を使う
@@ -286,8 +290,7 @@ def openai_chat(model, messages, **kwargs):
             # Responses API: input は messages をそのまま渡せる
             rparams = {"model": model, "input": messages}
             if mot is not None:
-                rparams["max_completion_tokens"] = mot
-            # GPT-5-mini は temperature 未対応 → 渡さない
+                rparams["max_output_tokens"] = mot
             resp = client.responses.create(**rparams)
             return getattr(resp, "output_text", "") or ""
         except Exception as e:
@@ -313,7 +316,7 @@ def openai_chat(model, messages, **kwargs):
         try:
             rparams = {"model": model, "input": messages}
             if mot is not None:
-                rparams["max_completion_tokens"] = mot
+                rparams["max_output_tokens"] = mot
             resp = client.responses.create(**rparams)
             return getattr(resp, "output_text", "") or ""
         except Exception as e2:
