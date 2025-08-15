@@ -1,65 +1,108 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>類義語（シノニム）辞書 管理</title>
-    <style>
-        body { font-family: sans-serif; background: #f6faf9; }
-        .container { background: #fff; padding: 28px; margin: 30px auto; max-width: 900px; border-radius: 13px; }
-        th, td { padding: 7px; }
-        th { background: #eef3f9; }
-        .savebtn { background: #2a8ed8; color: #fff; border-radius: 6px; border: none; padding: 6px 24px; margin-top: 18px; }
-        .delbtn { color: #c22; background: #fff; border: none; margin-left: 8px; cursor:pointer;}
-        input[type=text] { width: 95%; }
-    </style>
-    <script>
-    function removeRow(i) {
-        document.getElementById("row"+i).remove();
-    }
-    </script>
+<meta charset="utf-8">
+<title>類義語（シノニム）管理</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{font-family:'Segoe UI','メイリオ',sans-serif;background:#f6faf9;margin:0}
+  .topbar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#fff;border-bottom:1px solid #e6edf3;position:sticky;top:0;z-index:10}
+  .topbar h1{font-size:18px;margin:0}
+  .btn{display:inline-block;border:1px solid #cfe1ef;border-radius:10px;padding:7px 12px;text-decoration:none;color:#2a8ed8;background:#fff}
+  .container{max-width:980px;margin:18px auto;padding:0 14px 24px}
+  .card{background:#fff;border:1px solid #e6edf3;border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 3px 14px #b7d3e022}
+  h2{font-size:16px;margin:0 0 10px}
+  label{font-weight:600}
+  textarea,input[type=text]{width:100%;box-sizing:border-box;border:1px solid #bfd2e2;border-radius:8px;padding:8px 10px;font-size:14px}
+  textarea{min-height:120px;resize:vertical}
+  table{width:100%;border-collapse:collapse}
+  th,td{border-bottom:1px solid #eef3f7;padding:8px;text-align:left;vertical-align:top}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:760px){.row{grid-template-columns:1fr}}
+  .hint{font-size:.9em;color:#667}
+</style>
 </head>
 <body>
-{% include '_back_to_data.html' %}
-<div class="container">
-    <a href="{{ url_for('admin_entry') }}" style="float:right;">[データ管理に戻る]</a>
-    <h1>類義語（シノニム）辞書 管理</h1>
+  <div class="topbar">
+    <h1>類義語（シノニム）管理</h1>
+    <a class="btn" href="/admin/entry">データ管理に戻る</a>
+  </div>
+
+  <div class="container">
     {% with messages = get_flashed_messages() %}
       {% if messages %}
-        <ul>
-        {% for message in messages %}
-          <li style="color:green;">{{ message }}</li>
-        {% endfor %}
-        </ul>
+        <div class="card" style="background:#f7fffb;border-color:#bfe9d2">
+          {% for m in messages %}<div>{{ m }}</div>{% endfor %}
+        </div>
       {% endif %}
     {% endwith %}
-    <form method="post">
-        <table style="width:100%;">
-            <tr>
-                <th style="width:25%;">タグ（親語）</th>
-                <th>類義語（カンマ区切り）</th>
-                <th style="width:10%;">削除</th>
-            </tr>
+
+    <div class="card">
+      <h2>インポート / エクスポート</h2>
+      <div class="row">
+        <form method="post" action="{{ url_for('admin_synonyms_import') }}" enctype="multipart/form-data">
+          <label>ファイルから（synonyms.json）</label>
+          <input type="file" name="json_file" accept=".json">
+          <div style="margin-top:8px">
+            <button type="submit" class="btn">インポート</button>
+            <span class="hint">※既存は上書きされます</span>
+          </div>
+        </form>
+        <form method="post" action="{{ url_for('admin_synonyms_import') }}">
+          <label>テキストで貼り付け</label>
+          <textarea name="json_text" placeholder='{"タグ":[ "別名", "同義語" ], ...}'></textarea>
+          <div style="margin-top:8px">
+            <button type="submit" class="btn">インポート</button>
+            <span class="hint">※既存は上書きされます</span>
+          </div>
+        </form>
+      </div>
+      <div style="margin-top:10px">
+        <a class="btn" href="{{ url_for('admin_synonyms_export') }}">エクスポート（ダウンロード）</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>AIで自動生成（登録タグに沿って）</h2>
+      <form method="post" action="{{ url_for('admin_synonyms_autogen') }}">
+        <div class="row">
+          <div>
+            <label>対象</label><br>
+            <label><input type="radio" name="target" value="missing" checked> 辞書に無いタグのみ</label><br>
+            <label><input type="radio" name="target" value="all"> すべての登録タグ</label>
+          </div>
+          <div>
+            <label>更新モード</label><br>
+            <label><input type="radio" name="mode" value="append" checked> 追記（既存に加える）</label><br>
+            <label><input type="radio" name="mode" value="overwrite"> 上書き（置き換え）</label>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <button type="submit" class="btn">AIで生成＆登録</button>
+          <span class="hint">※OpenAI APIキーが必要。大きい辞書は数十秒かかる場合があります。</span>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>現在の辞書（{{ (synonyms|length) if synonyms else 0 }} タグ）</h2>
+      {% if synonyms %}
+        <table>
+          <thead><tr><th>タグ</th><th>シノニム</th></tr></thead>
+          <tbody>
             {% for tag, syns in synonyms.items() %}
-            <tr id="row{{ loop.index0 }}">
-                <td>
-                    <input type="text" name="tag" value="{{ tag }}">
-                </td>
-                <td>
-                    <input type="text" name="synonyms_{{ loop.index0 }}" value="{{ ', '.join(syns) }}">
-                </td>
-                <td>
-                    <button type="button" class="delbtn" onclick="removeRow({{ loop.index0 }});">削除</button>
-                </td>
-            </tr>
+              <tr>
+                <td><b>{{ tag }}</b></td>
+                <td>{{ (", ".join(syns)) if syns else "" }}</td>
+              </tr>
             {% endfor %}
+          </tbody>
         </table>
-        <h3>新規タグ・類義語追加</h3>
-        <input type="text" name="add_tag" placeholder="新しいタグ（親語）">
-        <input type="text" name="add_synonyms" placeholder="新しい類義語（カンマ区切り）">
-        <br>
-        <button class="savebtn" type="submit">保存</button>
-    </form>
-    <p style="margin-top:24px; font-size:0.95em;">※「保存」すると全データが更新されます。不要行は「削除」後に保存してください。</p>
-</div>
+        <div class="hint" style="margin-top:8px">※詳細編集は当面インポートで上書きしてください。</div>
+      {% else %}
+        <div class="hint">辞書が空です。インポートするか、AIで生成してください。</div>
+      {% endif %}
+    </div>
+  </div>
 </body>
 </html>
