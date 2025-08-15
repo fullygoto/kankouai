@@ -16,8 +16,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 # LINE Bot関連
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from linebot.exceptions import LineBotApiError, InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage  
+from linebot.exceptions import LineBotApiError, InvalidSignatureError   
 
 from openai import OpenAI
 import zipfile
@@ -86,6 +86,13 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
 #  Flask / 設定
 # =========================
 app = Flask(__name__)
+# --- Jinja2 互換用: 'string' / 'mapping' テストが無い環境向け ---
+if 'string' not in app.jinja_env.tests:
+    app.jinja_env.tests['string'] = lambda v: isinstance(v, str)
+if 'mapping' not in app.jinja_env.tests:
+    from collections.abc import Mapping
+    app.jinja_env.tests['mapping'] = lambda v: isinstance(v, Mapping)
+
 app.config["JSON_AS_ASCII"] = False  # 日本語をJSONでそのまま返す
 
 # 本番では必ず環境変数で設定
@@ -1005,6 +1012,15 @@ def admin_add_entry():
 # =========================
 #  バックアップ/復元
 # =========================
+def _safe_extractall(zf: zipfile.ZipFile, dst: str):
+    base = os.path.abspath(dst)
+    for member in zf.namelist():
+        target = os.path.abspath(os.path.join(dst, member))
+        if not target.startswith(base + os.sep) and target != base:
+            raise Exception("Unsafe path found in ZIP (zip slip)")
+    os.makedirs(dst, exist_ok=True)
+    zf.extractall(dst)
+
 def write_full_backup_zip(out_dir: str) -> str:
     """アプリ内バックアップを out_dir に保存し、ファイルパスを返す"""
     os.makedirs(out_dir, exist_ok=True)
@@ -1469,6 +1485,33 @@ def admin_unhit_report():
 # =========================
 #  LINE Webhook
 # =========================
+def _reply_or_push(event, text: str):
+    """replyが失敗（Invalid reply token等）したらpushに切替える"""
+    from linebot.models import TextSendMessage
+    from linebot.exceptions import LineBotApiError
+
+    try:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+        return
+    except LineBotApiError as e:
+        app.logger.exception("LineBotApiError on reply: %s", e)
+    except Exception as e:
+        app.logger.exception("Unexpected error on reply: %s", e)
+
+    # replyに失敗 → pushで再送
+    try:
+        target_id = getattr(event.source, "user_id", None) \
+                 or getattr(event.source, "group_id", None) \
+                 or getattr(event.source, "room_id", None)
+        if target_id:
+            line_bot_api.push_message(target_id, TextSendMessage(text=text))
+        else:
+            app.logger.error("No target id found to push message")
+    except LineBotApiError as e:
+        app.logger.exception("LineBotApiError on push: %s", e)
+    except Exception as e:
+        app.logger.exception("Unexpected error on push: %s", e)
+
 @app.route("/callback", methods=["POST"])
 def callback():
     # 設定未投入なら即200で返す（ログ汚染回避）
@@ -1490,21 +1533,16 @@ def callback():
 def handle_message(event):
     user_message = event.message.text
 
+    # ① 天気ヒットは即返信（失敗したらpush）
     weather_reply, weather_hit = get_weather_reply(user_message)
     if weather_hit:
         save_qa_log(user_message, weather_reply, source="line", hit_db=True, extra={"kind": "weather"})
-        try:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=weather_reply))
-        except LineBotApiError:
-            app.logger.exception("LineBotApiError")
-        except Exception:
-            app.logger.exception("LineBotApi reply error")
+        _reply_or_push(event, weather_reply)
         return
 
+    # ② 言語判定 & 質問処理
     orig_lang = detect_lang_simple(user_message)
-    lang = orig_lang
-    if not ENABLE_FOREIGN_LANG:
-        lang = "ja"
+    lang = orig_lang if ENABLE_FOREIGN_LANG else "ja"
 
     q_for_logic = user_message if orig_lang == "ja" else translate_text(user_message, "ja")
     answer_ja, hit_db, meta = smart_search_answer_with_hitflag(q_for_logic)
@@ -1516,12 +1554,9 @@ def handle_message(event):
         answer = translate_text(answer_ja, target)
 
     save_qa_log(user_message, answer, source="line", hit_db=hit_db, extra=meta)
-    try:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=answer))
-    except LineBotApiError:
-        app.logger.exception("LineBotApiError")
-    except Exception:
-        app.logger.exception("LineBotApi reply error")
+
+    # ③ 通常返信（失敗したらpush）
+    _reply_or_push(event, answer)
 
 
 # =========================
