@@ -2,10 +2,13 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>未ヒット質問一覧</title>
 <style>
   body{font-family:'Segoe UI','メイリオ',sans-serif;background:#f6faf9;margin:0}
-  .container{max-width:980px;margin:36px auto;background:#fff;border-radius:16px;box-shadow:0 4px 18px #b7d3e033;padding:26px}
+  .topbar{position:sticky;top:0;z-index:100;background:#fff;border-bottom:1px solid #e6edf3}
+  .topbar .inner{max-width:980px;margin:0 auto;display:flex;justify-content:flex-end;gap:8px;padding:10px 14px}
+  .container{max-width:980px;margin:20px auto 36px;background:#fff;border-radius:16px;box-shadow:0 4px 18px #b7d3e033;padding:26px}
   h1{margin:0 0 18px}
   .hint{color:#196;font-size:.95em;margin-bottom:14px}
   .card{border:1px solid #e6edf3;border-radius:12px;padding:14px 16px;margin:12px 0;background:#fbfefe}
@@ -15,8 +18,8 @@
   textarea,input[type=text]{width:100%;box-sizing:border-box;border:1px solid #bfd2e2;border-radius:8px;padding:8px 10px;font-size:14px}
   textarea{resize:vertical;min-height:84px}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  .btns{display:flex;gap:8px;margin-top:10px}
-  .btn{border:none;border-radius:9px;padding:8px 14px;cursor:pointer}
+  .btns{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .btn{border:none;border-radius:9px;padding:8px 14px;cursor:pointer;font:inherit}
   .primary{background:#2a8ed8;color:#fff}
   .ghost{background:#fff;border:1px solid #cfe1ef;color:#2a8ed8}
   .mini{font-size:.9em;padding:6px 10px}
@@ -25,6 +28,7 @@
   .areas{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}
   .areas label{font-weight:500}
   .empty{color:#999}
+  a.btn{display:inline-block;text-decoration:none}
   @media (max-width:760px){.row{grid-template-columns:1fr}}
 </style>
 <script>
@@ -48,6 +52,14 @@ function clip(str, n){ return (str || '').length>n ? str.slice(0,n) : (str||'');
 </script>
 </head>
 <body>
+
+<!-- 右上の戻るボタン（常に表示） -->
+<div class="topbar">
+  <div class="inner">
+    <a href="{{ url_for('admin_entry') }}" class="btn ghost mini">データ管理に戻る</a>
+  </div>
+</div>
+
 <div class="container">
   <h1>未ヒット質問一覧（直近100件）</h1>
   <div class="hint">「編集して追加」相当の処理を <b>POST</b> に変更済み。長文でもURL制限にかかりません。</div>
@@ -86,13 +98,13 @@ function clip(str, n){ return (str || '').length>n ? str.slice(0,n) : (str||'');
             <button type="button" class="btn ghost mini" onclick="genFAQ(this, {{ loop.index0 }})">AIでFAQ案</button>
           </div>
 
-          <!-- JS側で使う元質問（サーバーへは送らない） -->
+          <!-- JS用の元質問（フォーム送信時はサーバー側で無視されます） -->
           <input type="hidden" name="__q" value="{{ log.question }}">
         </form>
 
         {% if log.answer %}
           <div class="answer-preview">
-            <b>回答ログ（参考）</b>\n{{ log.answer }}
+            <b>回答ログ（参考）</b><br>{{ log.answer }}
           </div>
         {% endif %}
       </div>
