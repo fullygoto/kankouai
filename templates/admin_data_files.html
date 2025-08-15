@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>テキストデータ管理（.txt / data フォルダ）</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","メイリオ",sans-serif;background:#f6faf9;margin:0}
+  .wrap{max-width:1200px;margin:24px auto;padding:0 16px}
+  h1{font-size:20px;margin:0 0 12px}
+  .topbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .btn{padding:8px 14px;border:0;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+  .btn.secondary{background:#6b7280}
+  .btn.ghost{background:#fff;border:1px solid #cbd5e1;color:#2a8ed8}
+  .btn.danger{background:#e11d48}
+  .btn.warn{background:#f59e0b;color:#111}
+  .panel{background:#fff;border-radius:12px;box-shadow:0 4px 16px #c6d4e71a;padding:14px}
+  .grid{display:grid;grid-template-columns:360px 1fr;gap:16px}
+  .list table{width:100%;border-collapse:collapse}
+  .list th,.list td{border-bottom:1px solid #e5e7eb;padding:6px 8px;font-size:13px}
+  .list th{background:#f1f5f9;text-align:left}
+  .note{font-size:12px;color:#64748b}
+  .flash{background:#ecfeff;border:1px solid #bae6fd;color:#075985;padding:8px 10px;border-radius:8px;margin:8px 0}
+  .editor textarea{
+    width:100%; height:62vh; box-sizing:border-box; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size:13px; border:1px solid #cbd5e1; border-radius:8px; padding:10px; background:#fff;
+    white-space:pre; overflow:auto; resize:vertical; /* 折返しOFF＆横スクロール */
+  }
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap; margin:6px 0}
+  input[type=text], input[type=file], select{
+    padding:6px 8px; border:1px solid #cbd5e1; border-radius:8px; background:#fff; font-size:13px;
+  }
+  .right{display:flex;gap:8px;align-items:center;justify-content:flex-end}
+</style>
+</head>
+<body>
+{% include '_back_to_data.html' %}
+<div class="wrap">
+  <div class="topbar">
+    <h1>テキストデータ管理（/data フォルダ直下）</h1>
+    <a class="btn secondary" href="{{ url_for('admin_entry') }}">← 観光データ管理へ</a>
+    <span class="note">※ .txt/.md を対象に、アップロード・編集・ダウンロード・削除・リネームができます</span>
+  </div>
+
+  <!-- フラッシュ -->
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for m in messages %}
+        <div class="flash">{{ m }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <div class="grid">
+
+    <!-- 左：ファイル一覧 / 操作 -->
+    <div class="panel list">
+      <form class="row" method="post" action="{{ url_for('admin_data_files_new') }}">
+        <input type="text" name="new_name" placeholder="新規ファイル名（例：案内テンプレ.txt）" style="flex:1;min-width:220px">
+        <button class="btn" type="submit">＋ 新規作成</button>
+      </form>
+
+      <form class="row" method="post" action="{{ url_for('admin_data_files_upload') }}" enctype="multipart/form-data">
+        <input type="file" name="txt_files" accept=".txt,.md" multiple>
+        <button class="btn" type="submit">↑ アップロード</button>
+      </form>
+
+      <table>
+        <thead><tr><th>名前</th><th style="width:90px;">サイズ</th><th style="width:140px;">更新日時</th><th style="width:210px;">操作</th></tr></thead>
+        <tbody>
+        {% for f in files %}
+          <tr>
+            <td>{{ f.name }}</td>
+            <td>{{ "{:,}".format(f.size) }} B</td>
+            <td>{{ f.mtime }}</td>
+            <td>
+              <a class="btn ghost" href="{{ url_for('admin_data_files', edit=f.name) }}">編集</a>
+              <a class="btn ghost" href="{{ url_for('admin_data_files_download', name=f.name) }}">DL</a>
+              <form style="display:inline" method="post" action="{{ url_for('admin_data_files_delete') }}" onsubmit="return confirm('削除しますか？')">
+                <input type="hidden" name="del_name" value="{{ f.name }}">
+                <button class="btn danger" type="submit">削除</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="note">まだファイルがありません</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 右：エディタ -->
+    <div class="panel editor">
+      {% if edit %}
+        <form method="post" action="{{ url_for('admin_data_files_save') }}">
+          <div class="row">
+            <input type="text" name="edit_name" value="{{ edit }}" style="flex:1;min-width:260px">
+            <select name="save_encoding" title="保存時の文字コード">
+              <option value="utf-8" selected>UTF-8（推奨）</option>
+              <option value="cp932">CP932（Excel/Windows向け）</option>
+            </select>
+            <button class="btn warn" type="submit">💾 上書き保存</button>
+            <a class="btn ghost" href="{{ url_for('admin_data_files') }}">× 閉じる</a>
+          </div>
+          <div class="note">読み込み時の推定: {{ used_enc or '不明' }} ／ エディタは折返し無効・横スクロール可</div>
+          <textarea name="content" spellcheck="false" wrap="off">{{ content }}</textarea>
+        </form>
+
+        <form class="row" method="post" action="{{ url_for('admin_data_files_rename') }}" onsubmit="return confirm('名前を変更しますか？')">
+          <input type="hidden" name="old_name" value="{{ edit }}">
+          <input type="text" name="new_name" placeholder="新しいファイル名（.txt 推奨）" style="flex:1;min-width:260px">
+          <button class="btn" type="submit">↔︎ 名前変更</button>
+        </form>
+      {% else %}
+        <div class="note">左の一覧からファイルを選ぶか、新規作成/アップロードしてください。</div>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
