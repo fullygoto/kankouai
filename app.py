@@ -124,7 +124,8 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or ""  # 未設定でも起動OK
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or ""              # 未設定でも起動OK
 
-OPENAI_MODEL_PRIMARY = os.environ.get("OPENAI_MODEL_PRIMARY", "gpt-4o-mini")
+# ← ここを gpt-5-mini をデフォルトに
+OPENAI_MODEL_PRIMARY = os.environ.get("OPENAI_MODEL_PRIMARY", "gpt-5-mini")
 OPENAI_MODEL_HIGH    = os.environ.get("OPENAI_MODEL_HIGH", "gpt-5-mini")
 
 REASK_UNHIT   = os.environ.get("REASK_UNHIT", "1").lower() in {"1", "true", "on", "yes"}
@@ -267,16 +268,39 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
 
 # OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
+    """
+    - GPT-5 系: Responses API を使用（temperature は渡さない / max_completion_tokens を使用）
+    - それ以外: Chat Completions を優先（max_tokens / temperature 可）
+    - どちらも同じ呼び出し感覚で使えるよう吸収
+    """
     params = dict(kwargs)
-    mt  = params.pop("max_tokens", None)
-    mct = params.pop("max_completion_tokens", None)
-    mot = mct if mct is not None else mt  # 統一上限
+    # トークン上限名を統一
+    mot = params.pop("max_completion_tokens", None) or params.pop("max_tokens", None)
+    temp = params.pop("temperature", None)
 
-    # ❶ Chat Completions
+    # GPT-5 系は Responses API を使う
+    use_responses = model.startswith(("gpt-5",))
+
+    if use_responses:
+        try:
+            # Responses API: input は messages をそのまま渡せる
+            rparams = {"model": model, "input": messages}
+            if mot is not None:
+                rparams["max_completion_tokens"] = mot
+            # GPT-5-mini は temperature 未対応 → 渡さない
+            resp = client.responses.create(**rparams)
+            return getattr(resp, "output_text", "") or ""
+        except Exception as e:
+            print("[OpenAI error - responses]", e)
+            return ""
+
+    # それ以外のモデルは Chat Completions を優先
     try:
-        chat_params = dict(params)
+        chat_params = {}
         if mot is not None:
-            chat_params["max_tokens"] = mot  # ← 修正
+            chat_params["max_tokens"] = mot
+        if temp is not None:
+            chat_params["temperature"] = temp
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -285,18 +309,16 @@ def openai_chat(model, messages, **kwargs):
         return resp.choices[0].message.content
     except Exception as e1:
         print("[OpenAI error - chat.completions]", e1)
-
-    # ❷ Responses API（保険）
-    try:
-        joined = "\n".join(f"{m.get('role','user')}: {m.get('content','')}" for m in messages)
-        rparams = {"model": model, "input": joined, "temperature": params.get("temperature", 0.3)}
-        if mot is not None:
-            rparams["max_output_tokens"] = mot
-        resp = client.responses.create(**rparams)
-        return getattr(resp, "output_text", "") or ""
-    except Exception as e2:
-        print("[OpenAI error - responses]", e2)
-        return ""
+        # 念のため Responses API にもフォールバック（4 系でも通ることがある）
+        try:
+            rparams = {"model": model, "input": messages}
+            if mot is not None:
+                rparams["max_completion_tokens"] = mot
+            resp = client.responses.create(**rparams)
+            return getattr(resp, "output_text", "") or ""
+        except Exception as e2:
+            print("[OpenAI error - responses fallback]", e2)
+            return ""
 
 # 言語検出＆翻訳
 OPENAI_MODEL_TRANSLATE = os.environ.get("OPENAI_MODEL_TRANSLATE", OPENAI_MODEL_HIGH)
