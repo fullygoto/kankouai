@@ -968,6 +968,9 @@ def admin_entries_edit():
 # =========================
 #  CSV取り込み（既存に追加）
 # =========================
+# =========================
+#  CSV取り込み（既存に追加）
+# =========================
 @app.route("/admin/entries_import_csv", methods=["POST"])
 @login_required
 def admin_entries_import_csv():
@@ -981,7 +984,28 @@ def admin_entries_import_csv():
 
     import csv, io as _io, json as _json
 
-    buf = _io.TextIOWrapper(file.stream, encoding="utf-8-sig", newline="")
+    # --- 文字コードを自動判定して読み込む（UTF-8/UTF-8-SIG/CP932対応） ---
+    raw = file.read()  # bytes
+    if not raw:
+        flash("アップロードされたCSVが空です")
+        return redirect(url_for("admin_entries_edit"))
+
+    enc_tried = ["utf-8-sig", "utf-8", "cp932", "shift_jis"]
+    decoded = None
+    used_enc = None
+    for enc in enc_tried:
+        try:
+            decoded = raw.decode(enc)
+            used_enc = enc
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        # 最後の手段：置換ありでCP932として読む（文字化け箇所は□になる）
+        decoded = raw.decode("cp932", errors="replace")
+        used_enc = "cp932(replace)"
+
+    buf = _io.StringIO(decoded, newline="")
     reader = csv.DictReader(buf)
 
     new_entries = []
@@ -995,9 +1019,9 @@ def admin_entries_import_csv():
         areas    = _split_lines_commas(row.get("areas"))
         links    = _split_lines_commas(row.get("links"))
 
-        # 必須チェック
+        # 必須チェック（title/desc/areas）
         if not title or not desc or not areas:
-            continue  # エリア必須
+            continue
 
         # extras: "extras"列(JSON) + extra_*/extra:* 列
         extras = {}
@@ -1037,7 +1061,7 @@ def admin_entries_import_csv():
         new_entries.append(e)
 
     if not new_entries:
-        flash("CSVから有効な行が見つかりませんでした（title/desc/areas 必須）")
+        flash(f"CSVから有効な行が見つかりませんでした（title/desc/areas 必須）［encoding: {used_enc}］")
         return redirect(url_for("admin_entries_edit"))
 
     entries = load_entries()
@@ -1046,9 +1070,9 @@ def admin_entries_import_csv():
 
     try:
         auto_update_synonyms_from_entries(new_entries)
-        flash(f"CSVから {len(new_entries)} 件を追加＋シノニム更新完了")
+        flash(f"CSVから {len(new_entries)} 件を追加＋シノニム更新完了（encoding: {used_enc}）")
     except Exception:
-        flash(f"CSVから {len(new_entries)} 件を追加（シノニム自動更新は失敗）")
+        flash(f"CSVから {len(new_entries)} 件を追加（encoding: {used_enc}／シノニム自動更新は失敗）")
 
     return redirect(url_for("admin_entries_edit"))
 
