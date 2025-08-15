@@ -965,7 +965,7 @@ def admin_unhit_questions():
                 except Exception:
                     pass
     unhit_logs = unhit_logs[-100:]
-    return render_template("admin_unhit.html", unhit_logs=unhit_logs)
+    return render_template("admin_unhit.html", unhit_logs=unhit_logs, role=session.get("role",""))
 
 @app.route("/api/faq_suggest", methods=["POST"])
 @login_required
