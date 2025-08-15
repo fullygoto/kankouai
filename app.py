@@ -376,6 +376,97 @@ def save_shop_info(user_id, info):
     infos[user_id] = info
     _atomic_json_dump(SHOP_INFO_FILE, infos)
 
+# =========================
+#  シノニム ヘルパー & 自動生成
+# =========================
+def merge_synonyms(base: dict, incoming: dict) -> dict:
+    """
+    synonyms.json のマージ:
+      - 既存のキー（タグ）は残しつつ、新規は追加
+      - 値（シノニム配列）はユニーク化・空要素除去
+      - 大文字小文字や前後空白も正規化
+    """
+    base = dict(base or {})
+    for tag, syns in (incoming or {}).items():
+        if not tag:
+            continue
+        tag_norm = str(tag).strip()
+        cur = set([s.strip() for s in base.get(tag_norm, []) if s and str(s).strip()])
+        add = set([s.strip() for s in (syns or []) if s and str(s).strip()])
+        base[tag_norm] = sorted(cur.union(add))
+    return base
+
+def ai_propose_synonyms(tags, context_text="", model=None) -> dict:
+    """
+    OpenAIを使って、複数タグに対するシノニム案をJSONで返す。
+    返り値の例: {"教会": ["カトリック教会","チャーチ","Church"], "五島うどん": ["うどん","GOTO Udon"]}
+    """
+    if not OPENAI_API_KEY:
+        return {}
+    if not tags:
+        return {}
+    model = model or OPENAI_MODEL_HIGH
+    prompt = (
+        "次の観光・生活関連の『タグ』ごとに、検索時の取りこぼしを防ぐための日本語/英語/繁体字の同義語・表記ゆれ・通称を出してください。"
+        "出力は必ず JSON オブジェクトのみ（整形済み）。キー=元タグ、値=文字列配列。"
+        "元タグと完全に同じ語は含めないでください。スラングや不正確な語は避け、1タグあたり1〜6語程度。\n"
+        f"【文脈参考】\n{context_text[:1000]}\n"
+        f"【タグ一覧】\n{', '.join(sorted(set(tags)))}"
+    )
+    try:
+        content = openai_chat(
+            model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=800,
+        )
+        # JSONだけを期待するが、万一先頭/末尾にノイズがあったら抽出
+        import json as _json, re as _re
+        m = _re.search(r"\{.*\}", content, _re.S)
+        j = m.group(0) if m else content
+        data = _json.loads(j)
+        # 値はリストで揃える
+        cleaned = {}
+        for k, v in (data or {}).items():
+            if not k:
+                continue
+            if isinstance(v, str):
+                v = [v]
+            cleaned[k] = [str(x).strip() for x in (v or []) if str(x).strip()]
+        return cleaned
+    except Exception as e:
+        app.logger.warning(f"[ai_propose_synonyms] fail: {e}")
+        return {}
+
+def auto_update_synonyms_from_entries(entries_like):
+    """
+    エントリ群からタグを集めてAIでシノニムを提案→synonyms.json をマージ保存。
+    """
+    try:
+        if not entries_like:
+            return
+        # まとめて提案（API呼び出し1回）
+        all_tags = set()
+        contexts = []
+        for e in entries_like:
+            all_tags.update(e.get("tags", []) or [])
+            # タイトル/説明/住所/備考を少し文脈として
+            contexts.append(" / ".join([
+                e.get("title",""), e.get("desc",""),
+                e.get("address",""), " ".join((e.get("extras") or {}).values())
+            ]))
+        if not all_tags:
+            return
+        proposal = ai_propose_synonyms(sorted(all_tags), "\n".join(contexts))
+        if not proposal:
+            return
+        syn0 = load_synonyms()
+        syn1 = merge_synonyms(syn0, proposal)
+        save_synonyms(syn1)
+        app.logger.info(f"[auto_update_synonyms] updated for tags: {sorted(all_tags)}")
+    except Exception:
+        app.logger.exception("[auto_update_synonyms] error")
+
 
 # =========================
 #  タグ・サジェスト
@@ -926,9 +1017,79 @@ def admin_entries_import_csv():
     entries.extend(new_entries)
     save_entries(entries)
 
-    flash(f"CSVから {len(new_entries)} 件を追加しました（既存に追記）")
+    try:
+        auto_update_synonyms_from_entries(new_entries)
+        flash(f"CSVから {len(new_entries)} 件を追加＋シノニム更新完了")
+    except Exception:
+        flash(f"CSVから {len(new_entries)} 件を追加（シノニム自動更新は失敗）")
+
     return redirect(url_for("admin_entries_edit"))
 
+# =========================
+#  管理: JSONインポート（entries / synonyms）
+# =========================
+@app.route("/admin/import", methods=["GET", "POST"])
+@login_required
+def admin_import():
+    if session.get("role") != "admin":
+        abort(403)
+
+    if request.method == "POST":
+        import json as _json
+        # entries.json の処理
+        if "entries_json" in request.files and request.files["entries_json"].filename:
+            mode = request.form.get("entries_mode", "merge")  # merge|replace
+            file = request.files["entries_json"]
+            try:
+                data = _json.load(file.stream)
+                if not isinstance(data, list):
+                    raise ValueError("entries.json は配列(list)である必要があります")
+                data = [_norm_entry(e) for e in data]
+                if mode == "replace":
+                    save_entries(data)
+                    flash(f"entries.json を {len(data)} 件で上書きしました")
+                    # 上書き時もシノニム自動生成（重いのでタグだけまとめて）
+                    try:
+                        auto_update_synonyms_from_entries(data[:80])  # 安全のため上位80件だけ文脈に
+                        flash("シノニムを自動更新しました")
+                    except Exception:
+                        flash("シノニム自動更新に失敗しました")
+                else:
+                    cur = load_entries()
+                    cur.extend(data)
+                    save_entries(cur)
+                    flash(f"entries.json に {len(data)} 件マージしました（追記）")
+                    try:
+                        auto_update_synonyms_from_entries(data)
+                        flash("シノニムを自動更新しました")
+                    except Exception:
+                        flash("シノニム自動更新に失敗しました")
+            except Exception as e:
+                flash(f"entries.json の読み込みに失敗: {e}")
+
+        # synonyms.json の処理
+        if "synonyms_json" in request.files and request.files["synonyms_json"].filename:
+            mode = request.form.get("synonyms_mode", "merge")  # merge|replace
+            file = request.files["synonyms_json"]
+            try:
+                data = _json.load(file.stream)
+                if not isinstance(data, dict):
+                    raise ValueError("synonyms.json はオブジェクト(dict)である必要があります")
+                if mode == "replace":
+                    save_synonyms(data)
+                    flash("synonyms.json を上書きしました")
+                else:
+                    cur = load_synonyms()
+                    merged = merge_synonyms(cur, data)
+                    save_synonyms(merged)
+                    flash("synonyms.json をマージしました（重複は自動でユニーク化）")
+            except Exception as e:
+                flash(f"synonyms.json の読み込みに失敗: {e}")
+
+        return redirect(url_for("admin_import"))
+
+    # GET: 画面表示
+    return render_template("admin_import.html")
 
 # =========================
 #  ログ・未ヒット確認
@@ -1005,8 +1166,14 @@ def admin_add_entry():
     entry = _norm_entry(entry)
     entries.append(entry)
     save_entries(entries)
-    flash("DBに追加しました")
+    try:
+        auto_update_synonyms_from_entries([entry])
+        flash("DBに追加しました（シノニムも自動更新）")
+    except Exception:
+        flash("DBに追加しました（シノニム自動更新でエラーが出ました。ログを確認してください）")
+
     return redirect(url_for("admin_entry"))
+
 
 
 # =========================
@@ -1176,6 +1343,156 @@ def admin_synonyms():
 
     synonyms = load_synonyms()
     return render_template("admin_synonyms.html", synonyms=synonyms)
+
+# ========== 類義語：インポート（上書き） ==========
+@app.route("/admin/synonyms/import", methods=["POST"])
+@login_required
+def admin_synonyms_import():
+    if session.get("role") != "admin":
+        abort(403)
+
+    # ファイル or テキストのどちらか
+    up = request.files.get("json_file")
+    text = (request.form.get("json_text") or "").strip()
+
+    try:
+        if up and up.filename:
+            raw = up.read().decode("utf-8-sig")
+            new_dict = json.loads(raw)
+        elif text:
+            new_dict = json.loads(text)
+        else:
+            flash("JSONファイルまたはテキストを指定してください")
+            return redirect(url_for("admin_synonyms"))
+
+        if not isinstance(new_dict, dict):
+            raise ValueError('JSONは {"タグ": ["別名", ...]} の形にしてください')
+
+        # 正規化：各値を list[str] 化
+        norm = {}
+        for k, v in new_dict.items():
+            key = str(k).strip()
+            if isinstance(v, str):
+                vals = _split_lines_commas(v)
+            elif isinstance(v, (list, tuple)):
+                vals = [str(x).strip() for x in v if str(x).strip()]
+            elif v:
+                vals = [str(v).strip()]
+            else:
+                vals = []
+            norm[key] = vals
+
+        # 上書き保存
+        save_synonyms(norm)
+        flash(f"類義語辞書を {len(norm)} タグ分で上書きしました")
+    except Exception as e:
+        app.logger.exception("synonyms import failed")
+        flash("インポートに失敗: " + str(e))
+
+    return redirect(url_for("admin_synonyms"))
+
+
+# ========== 類義語：エクスポート（ダウンロード） ==========
+@app.route("/admin/synonyms/export", methods=["GET", "POST"])
+@login_required
+def admin_synonyms_export():
+    if session.get("role") != "admin":
+        abort(403)
+    syn = load_synonyms()
+    buf = io.BytesIO(json.dumps(syn, ensure_ascii=False, indent=2).encode("utf-8"))
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name="synonyms.json", mimetype="application/json")
+
+
+# ========== 類義語：AI自動生成（missing/all × append/overwrite） ==========
+@app.route("/admin/synonyms/autogen", methods=["POST"])
+@login_required
+def admin_synonyms_autogen():
+    if session.get("role") != "admin":
+        abort(403)
+    if not OPENAI_API_KEY:
+        flash("OPENAI_API_KEY が未設定です")
+        return redirect(url_for("admin_synonyms"))
+
+    target = request.form.get("target", "missing")      # "missing" or "all"
+    mode   = request.form.get("mode", "append")         # "append" or "overwrite"
+
+    # 既存エントリからタグ集合を作る
+    entries = load_entries()
+    all_tags = set()
+    for e in entries:
+        for t in (e.get("tags") or []):
+            t = (t or "").strip()
+            if t:
+                all_tags.add(t)
+
+    cur = load_synonyms()
+    if target == "all":
+        target_tags = sorted(all_tags)
+    else:
+        target_tags = sorted([t for t in all_tags if t not in cur or not cur[t]])
+
+    if not target_tags:
+        flash("生成対象のタグがありません")
+        return redirect(url_for("admin_synonyms"))
+
+    # トークン対策：分割して順次生成（40件/回 くらい）
+    CHUNK = 40
+    merged = {}
+    for i in range(0, len(target_tags), CHUNK):
+        chunk = target_tags[i:i+CHUNK]
+        prompt = (
+            "次の観光関連タグごとに、日本語の類義語・言い換え・表記揺れを最大5個ずつ返してください。"
+            "出力は必ず JSON で、キー=タグ、値=文字列配列の形にしてください。"
+            "\nタグ: " + ", ".join(chunk)
+        )
+        try:
+            content = openai_chat(
+                OPENAI_MODEL_HIGH,
+                [{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1000,
+            )
+            data = json.loads(content)
+            if not isinstance(data, dict):
+                raise ValueError("AI出力がJSONオブジェクトではありません")
+        except Exception as e:
+            app.logger.exception("autogen chunk failed: %s", e)
+            flash(f"AI生成に失敗したチャンクがあります: {', '.join(chunk[:3])} …")
+            continue
+
+        for k, v in data.items():
+            if isinstance(v, str):
+                syns = _split_lines_commas(v)
+            elif isinstance(v, (list, tuple)):
+                syns = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                syns = []
+            merged[str(k).strip()] = syns
+
+    # 反映
+    updated = 0
+    for tag, syns in merged.items():
+        if mode == "overwrite":
+            cur[tag] = syns
+        else:
+            cur.setdefault(tag, [])
+            for s in syns:
+                if s and s not in cur[tag]:
+                    cur[tag].append(s)
+        updated += 1
+
+    save_synonyms(cur)
+    flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
+    return redirect(url_for("admin_synonyms"))
+
+
+# （互換用：以前のエンドポイント名を使っていた場合のエイリアス）
+@app.route("/admin/synonyms/auto", methods=["POST"])
+@login_required
+def admin_synonyms_auto():
+    return admin_synonyms_autogen()
+
 
 @app.route("/admin/manual")
 @login_required
