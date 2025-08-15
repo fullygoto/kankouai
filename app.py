@@ -3,7 +3,8 @@ import json
 import re
 import datetime
 import itertools
-import time  # ← 追加
+import time  
+import threading  
 from collections import Counter
 from typing import Any, Dict, List
 
@@ -1911,6 +1912,39 @@ def callback():
         return ("OK", 200)
     return ("OK", 200)
 
+# --- LINE 送信先IDの取得ヘルパー ---
+def _target_id_from_event(event):
+    return (
+        getattr(event.source, "user_id", None)
+        or getattr(event.source, "group_id", None)
+        or getattr(event.source, "room_id", None)
+    )
+
+# --- 最終回答を計算して push する非同期処理 ---
+def _compute_and_push_async(event, user_message: str):
+    from linebot.models import TextSendMessage
+    target_id = _target_id_from_event(event)
+    if not target_id:
+        return
+    try:
+        # 言語判定 → ロジックは既存関数をそのまま利用
+        orig_lang = detect_lang_simple(user_message)
+        lang = orig_lang if ENABLE_FOREIGN_LANG else "ja"
+        q_for_logic = user_message if orig_lang == "ja" else translate_text(user_message, "ja")
+
+        answer_ja, hit_db, meta = smart_search_answer_with_hitflag(q_for_logic)
+        answer = answer_ja if lang == "ja" else translate_text(answer_ja, "zh-Hant" if lang == "zh-Hant" else "en")
+
+        save_qa_log(user_message, answer, source="line", hit_db=hit_db, extra=meta)
+        line_bot_api.push_message(target_id, TextSendMessage(text=answer))
+    except Exception as e:
+        app.logger.exception("compute/push failed: %s", e)
+        try:
+            line_bot_api.push_message(target_id, TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"))
+        except Exception:
+            pass
+
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
@@ -1922,23 +1956,15 @@ def handle_message(event):
         _reply_or_push(event, weather_reply)
         return
 
-    # ② 言語判定 & 質問処理
-    orig_lang = detect_lang_simple(user_message)
-    lang = orig_lang if ENABLE_FOREIGN_LANG else "ja"
+    # ② まず即レス（reply_tokenの期限切れ対策）
+    _reply_or_push(event, "少々お待ちください…探しています。")
 
-    q_for_logic = user_message if orig_lang == "ja" else translate_text(user_message, "ja")
-    answer_ja, hit_db, meta = smart_search_answer_with_hitflag(q_for_logic)
-
-    if lang == "ja":
-        answer = answer_ja
-    else:
-        target = "zh-Hant" if lang == "zh-Hant" else "en"
-        answer = translate_text(answer_ja, target)
-
-    save_qa_log(user_message, answer, source="line", hit_db=hit_db, extra=meta)
-
-    # ③ 通常返信（失敗したらpush）
-    _reply_or_push(event, answer)
+    # ③ 重い処理は別スレッドで実行 → 完成文は push
+    threading.Thread(
+        target=_compute_and_push_async,
+        args=(event, user_message),
+        daemon=True
+    ).start()
 
 
 # =========================
