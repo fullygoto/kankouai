@@ -1728,7 +1728,7 @@ def smart_search_answer_with_hitflag(question):
             if e.get("desc"):    lines.append(f"説明: {e['desc']}")
             if e.get("address"): lines.append(f"住所: {e['address']}")
             if e.get("map"):     lines.append(f"地図: {e['map']}")
-            if e.get("tags"):    lines.append(f"タグ: {', '.join(e['tags'])}")
+            # if e.get("tags"):    lines.append(f"タグ: {', '.join(e['tags'])}")
             if e.get("links"):   lines.append("リンク: " + " / ".join(e['links']))
             return "\n".join(lines), True, meta
         else:
