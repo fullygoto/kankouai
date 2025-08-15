@@ -1597,6 +1597,70 @@ def get_weather_reply(question):
         reply += f"{e['area']}: {e['url']}\n"
     return reply.strip(), True
 
+def get_transport_reply(question: str):
+    """飛行機・船の運行状況を、天気と同様に即答＆多言語で返す。"""
+    if not question:
+        return None, False
+
+    # 言語判定（多言語を有効にしていない場合は日本語で固定）
+    lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
+
+    # キーワード
+    ferry_kw_ja = ["フェリー", "船", "運航", "ジェットフォイル", "太古", "欠航", "ダイヤ"]
+    ferry_kw_zh = ["渡輪", "船", "航線", "噴射船", "停航", "班次"]
+    ferry_kw_en = ["ferry", "jetfoil", "ship", "sailing", "service", "cancel", "status", "schedule"]
+
+    flight_kw_ja = ["飛行機", "空港", "航空便", "欠航", "到着", "出発", "フライト", "遅延"]
+    flight_kw_zh = ["飛機", "機場", "航班", "延誤", "取消", "起飛", "到達"]
+    flight_kw_en = ["flight", "airport", "delay", "cancel", "arrival", "departure", "status"]
+
+    q = question
+
+    ferry_hit = any(k in q for k in ferry_kw_ja) or any(k in q for k in ferry_kw_zh) or any(k in q.lower() for k in ferry_kw_en)
+    flight_hit = any(k in q for k in flight_kw_ja) or any(k in q for k in flight_kw_zh) or any(k in q.lower() for k in flight_kw_en)
+
+    # まず船（キーワードが被る「欠航」等は船優先）
+    if ferry_hit:
+        if lang == "zh-Hant":
+            text = (
+                "【長崎—五島 航線運行資訊】\n"
+                "・野母商船「太古號」運行資訊\n"
+                "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+                "・九州商船（渡輪／噴射船）運行資訊\n"
+                "https://kyusho.co.jp/status\n"
+                "・五島產業汽船（渡輪）運行資訊\n"
+                "https://www.goto-sangyo.co.jp/\n"
+                "其他航線請見各連結。"
+            )
+        elif lang == "en":
+            text = (
+                "[Nagasaki ⇄ Goto Ferry/Jetfoil Status]\n"
+                "• Nomo Shipping “Ferry Taiko” status:\n"
+                "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+                "• Kyushu Shosen (Ferry / Jetfoil) status:\n"
+                "https://kyusho.co.jp/status\n"
+                "• Goto Sangyo Kisen (Ferry) status:\n"
+                "https://www.goto-sangyo.co.jp/\n"
+                "For other routes, please check the links above."
+            )
+        else:
+            # 既存の日本語定型をそのまま使用
+            text = FERRY_INFO
+        return text, True
+
+    # 次に飛行機
+    if flight_hit:
+        if lang == "zh-Hant":
+            text = "五島椿機場的最新航班資訊請見官方網站：\n▶ https://www.fukuekuko.jp/"
+        elif lang == "en":
+            text = "Latest flight status for Goto Tsubaki Airport (official site):\n▶ https://www.fukuekuko.jp/"
+        else:
+            text = "五島つばき空港の最新の運行状況は、公式Webサイトでご確認ください。\n▶ https://www.fukuekuko.jp/"
+        return text, True
+
+    return None, False
+
+
 SMALLTALK_PATTERNS = {
     "greet": ["おはよう", "こんにちは", "こんばんは", "やあ", "はじめまして"],
     "howareyou": ["元気", "調子どう", "調子は？"],
@@ -1729,6 +1793,25 @@ def search_text_files(question, data_dir=DATA_DIR, max_snippets=5, window=80):
 def fetch_and_search_web(question):
     return None
 
+def format_entry_detail(e: dict) -> str:
+    lines = []
+    if e.get("title"):      lines.append(f"◼︎ {e['title']}")
+    if e.get("areas"):      lines.append(f"エリア: {', '.join(e['areas'])}")
+    if e.get("desc"):       lines.append(f"説明: {e['desc']}")
+    if e.get("address"):    lines.append(f"住所: {e['address']}")
+    if e.get("tel"):        lines.append(f"TEL: {e['tel']}")
+    if e.get("open_hours"): lines.append(f"営業時間: {e['open_hours']}")
+    if e.get("holiday"):    lines.append(f"定休日: {e['holiday']}")
+    if e.get("parking"):    lines.append(f"駐車場: {e['parking']}（台数: {e.get('parking_num','')}）")
+    if e.get("payment"):    lines.append("支払い: " + " / ".join(e['payment']))
+    if e.get("extras"):
+        for k, v in (e.get("extras") or {}).items():
+            if v: lines.append(f"{k}: {v}")
+    if e.get("map"):        lines.append(f"地図: {e['map']}")
+    if e.get("links"):      lines.append("リンク: " + " / ".join(e['links']))
+    return "\n".join(lines)
+
+
 def smart_search_answer_with_hitflag(question):
     meta = {"model_primary": OPENAI_MODEL_PRIMARY, "fallback": None}
 
@@ -1736,7 +1819,7 @@ def smart_search_answer_with_hitflag(question):
     if weather_hit:
         return weather_reply, True, meta
     
-        # ★ここから追加：雑談/使い方
+    # ★ここから追加：雑談/使い方
     st = smalltalk_or_help_reply(question)
     if st:
         meta["kind"] = "smalltalk"
@@ -1835,6 +1918,11 @@ def ask():
         save_qa_log(question, weather_reply, source="web", hit_db=True, extra={"kind": "weather"})
         return jsonify({"answer": weather_reply, "hit_db": True, "meta": {"kind": "weather"}})
 
+    trans_reply, trans_hit = get_transport_reply(question)
+    if trans_hit:
+        save_qa_log(question, trans_reply, source="web", hit_db=True, extra={"kind": "transport"})
+        return jsonify({"answer": trans_reply, "hit_db": True, "meta": {"kind": "transport"}})
+
     if not question:
         return jsonify({"error": "質問が空です"}), 400
 
@@ -1920,6 +2008,22 @@ def _target_id_from_event(event):
         or getattr(event.source, "room_id", None)
     )
 
+
+WAIT_CANDIDATES = [
+    "探してみますね。",
+    "候補を確認しています…",
+    "少々お時間ください、最適な情報を集めています。"
+]
+def pick_wait_message(q: str) -> str:
+    # キーワードで少しだけ言い回しを変える（なくてもOK）
+    if any(w in q for w in ["フェリー", "船", "ジェットフォイル", "太古"]):
+        return "航路の運行状況を確認しています…"
+    if any(w in q for w in ["営業時間", "開店", "閉店", "定休"]):
+        return "営業時間を確認しています…"
+    # 乱数を使わず、内容に応じて安定した揺らぎ
+    return WAIT_CANDIDATES[hash(q) % len(WAIT_CANDIDATES)]
+
+
 # --- 最終回答を計算して push する非同期処理 ---
 def _compute_and_push_async(event, user_message: str):
     from linebot.models import TextSendMessage
@@ -1949,17 +2053,49 @@ def _compute_and_push_async(event, user_message: str):
 def handle_message(event):
     user_message = event.message.text
 
-    # ① 天気ヒットは即返信（失敗したらpush）
+    # 0) 天気は即返信（既存）
     weather_reply, weather_hit = get_weather_reply(user_message)
     if weather_hit:
         save_qa_log(user_message, weather_reply, source="line", hit_db=True, extra={"kind": "weather"})
         _reply_or_push(event, weather_reply)
         return
 
-    # ② まず即レス（reply_tokenの期限切れ対策）
-    _reply_or_push(event, "少々お待ちください…探しています。")
+    # 0.5) ← ここを追加：飛行機／船も即返信（多言語）
+    trans_reply, trans_hit = get_transport_reply(user_message)
+    if trans_hit:
+        save_qa_log(user_message, trans_reply, source="line", hit_db=True, extra={"kind": "transport"})
+        _reply_or_push(event, trans_reply)
+        return
 
-    # ③ 重い処理は別スレッドで実行 → 完成文は push
+    # 言語（日本語以外は重くなりがち＝非同期へ回す）
+    orig_lang = detect_lang_simple(user_message)
+    is_ja = (orig_lang == "ja") or (not ENABLE_FOREIGN_LANG)
+
+    # 1) 雑談/使い方は即返信（同期）。※smalltalkは日本語ルールベース
+    if is_ja:
+        st = smalltalk_or_help_reply(user_message)
+        if st:
+            save_qa_log(user_message, st, source="line", hit_db=True, extra={"kind": "smalltalk"})
+            _reply_or_push(event, st)
+            return
+
+        # 2) DB単一ヒットは即返信（同期）
+        single = None
+        try:
+            hits = find_entry_info(user_message)
+            if hits and len(hits) == 1:
+                single = format_entry_detail(hits[0])
+        except Exception:
+            single = None
+
+        if single:
+            save_qa_log(user_message, single, source="line", hit_db=True, extra={"kind": "single_hit"})
+            _reply_or_push(event, single)
+            return
+
+    # 3) ここからは重め：短い待機メッセージ → 完成文は push
+    _reply_or_push(event, pick_wait_message(user_message))
+
     threading.Thread(
         target=_compute_and_push_async,
         args=(event, user_message),
