@@ -3,4 +3,8 @@ gunicorn>=21.2
 openai>=1.0.0,<2
 python-dotenv>=1.0
 line-bot-sdk>=2.4
-gunicorn
+flask-wtf>=1.2
+flask-limiter>=3.7
+flask-talisman>=1.1
+portalocker>=2.8
+redis>=5.0
