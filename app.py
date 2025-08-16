@@ -11,6 +11,7 @@ import logging
 from collections import Counter
 from typing import Any, Dict, List
 from werkzeug.routing import BuildError
+from flask_limiter.util import get_remote_address  # ← これが必要！
 
 
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort
@@ -126,9 +127,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from flask import request, jsonify
 
 # リバースプロキシ配下で正しい IP/スキームを取る
-TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
-app.wsgi_app = ProxyFix(app.wsgi_app,
-                        x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
+TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "2"))
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
 
 try:
     from flask_limiter import Limiter
@@ -143,6 +143,9 @@ def _client_ip():
 ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
 # 例: RATE_STORAGE_URI="redis://:pass@redis:6379/0"
 RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI", "")
+storage_uri = RATE_STORAGE_URI or "memory://"
+limiter = Limiter(app=app, key_func=get_remote_address, storage_uri=storage_uri)
+
 
 if Limiter:
     limiter = Limiter(
@@ -2550,12 +2553,15 @@ def find_entry_info(question):
     tags_from_syn = find_tags_by_synonym(question, synonyms)
 
     cleaned_query = clean_query_for_search(question)
-    # 1. タイトル完全一致
-    hits = [e for e in entries if cleaned_query and e.get("title", "") == cleaned_query
-            and (not target_areas or any(area in e.get("areas", []) for area in target_areas))]
+    key_q = _title_key(cleaned_query)
+
+    # 1. タイトル“正規化後”の完全一致
+    hits = [e for e in entries
+            if cleaned_query and _title_key(e.get("title","")) == key_q
+            and (not target_areas or any(a in e.get("areas",[]) for a in target_areas))]
     if hits:
         return hits
-
+    
     # 2. 各カラム部分一致（links/extras を含む）
     hits = []
     for e in entries:
@@ -3004,25 +3010,25 @@ def _compute_and_push_async(event, user_message: str):
 def handle_message(event):
     user_message = event.message.text
 
-    # 0) 天気は即返信（既存）
+    # 0) 天気は即返信
     weather_reply, weather_hit = get_weather_reply(user_message)
     if weather_hit:
         save_qa_log(user_message, weather_reply, source="line", hit_db=True, extra={"kind": "weather"})
         _reply_or_push(event, weather_reply)
         return
 
-    # 0.5) ← ここを追加：飛行機／船も即返信（多言語）
+    # 0.5) 船/飛行機も即返信
     trans_reply, trans_hit = get_transport_reply(user_message)
     if trans_hit:
         save_qa_log(user_message, trans_reply, source="line", hit_db=True, extra={"kind": "transport"})
         _reply_or_push(event, trans_reply)
         return
 
-    # 言語（日本語以外は重くなりがち＝非同期へ回す）
+    # 日本語かどうか（多言語は非同期に回す）
     orig_lang = detect_lang_simple(user_message)
     is_ja = (orig_lang == "ja") or (not ENABLE_FOREIGN_LANG)
 
-    # 1) 雑談/使い方は即返信（同期）。※smalltalkは日本語ルールベース
+    # 1) 雑談/使い方は即返信（日本語のみ）
     if is_ja:
         st = smalltalk_or_help_reply(user_message)
         if st:
@@ -3030,28 +3036,59 @@ def handle_message(event):
             _reply_or_push(event, st)
             return
 
-        # 2) DB単一ヒットは即返信（同期）
-        single = None
+        # 2) DBヒットを先に当てる
+        hits = []
         try:
             hits = find_entry_info(user_message)
-            if hits and len(hits) == 1:
-                single = format_entry_detail(hits[0])
         except Exception:
-            single = None
+            hits = []
 
-        if single:
-            save_qa_log(user_message, single, source="line", hit_db=True, extra={"kind": "single_hit"})
-            _reply_or_push_multi(event, _split_for_messaging(single))
-            return
+        if hits:
+            if len(hits) == 1:
+                ans = format_entry_detail(hits[0])
+                save_qa_log(user_message, ans, source="line", hit_db=True, extra={"kind":"db_single"})
+                _reply_or_push(event, ans)
+                return
+            else:
+                # 要約トライ → ダメなら短い候補一覧＋深掘り
+                try:
+                    snippets = [
+                        f"タイトル: {e.get('title','')}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n"
+                        for e in hits[:10]
+                    ]
+                    ai_ans = ai_summarize(snippets, user_message, model=OPENAI_MODEL_PRIMARY) or ""
+                    if len(ai_ans.strip()) >= 30:
+                        save_qa_log(user_message, ai_ans, source="line", hit_db=True, extra={"kind":"db_multi_summarized"})
+                        _reply_or_push(event, ai_ans)
+                        return
+                except Exception:
+                    pass
 
-    # 3) ここからは重め：短い待機メッセージ → 完成文は push
-    _reply_or_push(event, pick_wait_message(user_message))
+                lines = ["候補が複数見つかりました。気になるものはありますか？"]
+                for i, e in enumerate(hits[:8], 1):
+                    name = (e.get("title") or "（無題）").strip()
+                    areas = ", ".join(e.get("areas") or [])
+                    lines.append(f"{i}. {name}" + (f"（{areas}）" if areas else ""))
 
-    threading.Thread(
-        target=_compute_and_push_async,
-        args=(event, user_message),
-        daemon=True
-    ).start()
+                if len(hits) > 8:
+                    lines.append(f"…ほか {len(hits)-8} 件")
+
+                try:
+                    suggest_text, _ = build_refine_suggestions(user_message)
+                    if suggest_text:
+                        lines += ["", suggest_text]
+                except Exception:
+                    pass
+
+                msg = "\n".join(lines)
+                save_qa_log(user_message, msg, source="line", hit_db=False, extra={"kind":"db_multi_list"})
+                _reply_or_push(event, msg)
+                return
+
+    # 3) ここに来たら非同期で重い処理（多言語や未ヒット検索など）
+    wait = pick_wait_message(user_message)
+    _reply_or_push(event, wait)
+    threading.Thread(target=_compute_and_push_async, args=(event, user_message), daemon=True).start()
 
 
 # =========================
