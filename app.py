@@ -143,7 +143,7 @@ SUGGEST_UNHIT = os.environ.get("SUGGEST_UNHIT", "1").lower() in {"1", "true", "o
 ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1", "true", "on", "yes"}
 
 # OpenAI v1 クライアント
-client = OpenAI()
+client = OpenAI(timeout=30)
 
 # LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -1544,31 +1544,75 @@ def admin_synonyms_autogen():
         flash("生成対象のタグがありません")
         return redirect(url_for("admin_synonyms"))
 
-    # トークン対策：分割して順次生成（40件/回 くらい）
-    CHUNK = 40
+    # ---- ここから負荷対策 ----
+    MAX_TAGS_PER_REQUEST = 80      # 1クリックで処理する最大件数
+    CHUNK = 12                     # 1回のAI呼び出しで処理するタグ数（小さくして失敗率/待ち時間を下げる）
+    HARD_DEADLINE_SEC = 85         # Renderの100秒手前で打ち切ってタイムアウトを回避
+    start_time = time.time()
+
+    # 対象を制限（多い場合は複数回押して進められる）
+    target_tags = target_tags[:MAX_TAGS_PER_REQUEST]
+
     merged = {}
-    for i in range(0, len(target_tags), CHUNK):
+    i = 0
+    while i < len(target_tags):
+        # 時間ガード：80〜90秒超えそうなら途中終了して部分結果だけ反映
+        if time.time() - start_time > HARD_DEADLINE_SEC:
+            flash("タイムアウト回避のため途中までで保存しました。もう一度実行すると続きが処理されます。")
+            break
+
         chunk = target_tags[i:i+CHUNK]
         prompt = (
             "次の観光関連タグごとに、日本語の類義語・言い換え・表記揺れを最大5個ずつ返してください。"
             "出力は必ず JSON で、キー=タグ、値=文字列配列の形にしてください。"
             "\nタグ: " + ", ".join(chunk)
         )
+
         try:
+            # まずは高精度モデル（環境変数の設定に従う）
             content = openai_chat(
                 OPENAI_MODEL_HIGH,
                 [{"role": "user", "content": prompt}],
                 temperature=0.2,
-                max_tokens=1000,
+                max_output_tokens=1000,  # Responses/Chat どちらでも吸収
             )
-            data = json.loads(content)
-            if not isinstance(data, dict):
-                raise ValueError("AI出力がJSONオブジェクトではありません")
         except Exception as e:
-            app.logger.exception("autogen chunk failed: %s", e)
-            flash(f"AI生成に失敗したチャンクがあります: {', '.join(chunk[:3])} …")
+            app.logger.exception("autogen openai call failed: %s", e)
+            content = ""
+
+        # モデル・ネットワークが不安定な場合のフォールバック（軽量モデル）
+        if not content:
+            try:
+                content = openai_chat(
+                    OPENAI_MODEL_PRIMARY,
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_output_tokens=1000,
+                )
+            except Exception as e2:
+                app.logger.exception("autogen fallback failed: %s", e2)
+                content = ""
+
+        # JSONとしてパース（ノイズ除去）
+        data = {}
+        if content:
+            try:
+                m = re.search(r"\{.*\}", content, re.S)
+                j = m.group(0) if m else content
+                data = json.loads(j)
+                if not isinstance(data, dict):
+                    raise ValueError("AI出力がJSONオブジェクトではありません")
+            except Exception as e:
+                app.logger.exception("autogen parse failed: %s", e)
+                # このチャンクはスキップして次へ（中断しない）
+                i += CHUNK
+                continue
+        else:
+            # 応答が空 → スキップして次へ
+            i += CHUNK
             continue
 
+        # マージ
         for k, v in data.items():
             if isinstance(v, str):
                 syns = _split_lines_commas(v)
@@ -1578,7 +1622,10 @@ def admin_synonyms_autogen():
                 syns = []
             merged[str(k).strip()] = syns
 
+        i += CHUNK
+
     # 反映
+    cur = load_synonyms()
     updated = 0
     for tag, syns in merged.items():
         if mode == "overwrite":
@@ -1591,7 +1638,16 @@ def admin_synonyms_autogen():
         updated += 1
 
     save_synonyms(cur)
-    flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
+
+    # 進捗メッセージ
+    total = len(target_tags)
+    if updated == 0:
+        flash("AI生成に失敗しました（部分的にタイムアウトした可能性があります）。もう一度お試しください。")
+    elif updated < total:
+        flash(f"AI生成（部分実行）: {updated}/{total} タグを反映しました。再度実行すると続きが処理されます。")
+    else:
+        flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
+
     return redirect(url_for("admin_synonyms"))
 
 
