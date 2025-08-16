@@ -148,18 +148,17 @@ if Limiter:
     limiter = Limiter(
         app=app,
         key_func=_client_ip,
-        storage_uri=(RATE_STORAGE_URI or "memory://"),  # 本番は必ず Redis を
+        storage_uri=(RATE_STORAGE_URI or "memory://"),  # 本番は Redis 推奨
         default_limits=[],           # デフォルト全体には掛けない
-        headers_enabled=True,        # X-RateLimit- 残量ヘッダを返す
-        strategy="fixed-window-elastic-expiry",
+        headers_enabled=True,        # X-RateLimit-* を返す
+        strategy="fixed-window",     # ← ココだけ修正（または行ごと削除でも可）
     )
     limit_deco = limiter.limit
 else:
-    # 依存未導入時は no-op（下の「最小実装」か pip install を）
     def limit_deco(*a, **k):
         def _wrap(f): return f
         return _wrap
-
+    
 @app.errorhandler(429)
 def _ratelimit_handler(e):
     return jsonify({"error": "Too Many Requests", "detail": "Rate limit exceeded."}), 429
