@@ -143,7 +143,7 @@ SUGGEST_UNHIT = os.environ.get("SUGGEST_UNHIT", "1").lower() in {"1", "true", "o
 ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1", "true", "on", "yes"}
 
 # OpenAI v1 クライアント
-client = OpenAI(timeout=30)
+client = OpenAI(timeout=15)
 
 # LINE Bot
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -1513,142 +1513,162 @@ def admin_synonyms_export():
 
 
 # ========== 類義語：AI自動生成（missing/all × append/overwrite） ==========
-@app.route("/admin/synonyms/autogen", methods=["POST"])
+@app.route("/admin/synonyms/autogen", methods=["POST", "GET"])
 @login_required
 def admin_synonyms_autogen():
-    if session.get("role") != "admin":
-        abort(403)
-    if not OPENAI_API_KEY:
-        flash("OPENAI_API_KEY が未設定です")
-        return redirect(url_for("admin_synonyms"))
+    """
+    Render の 100秒制限で落ちないよう、
+    - 1クリックあたりの処理対象: 既定 30タグ（?limit= で変更可）
+    - 1回の OpenAI 呼び出し: 既定 8タグ（?chunk= で変更可）
+    - 全体ハード上限: 40秒（超えそうなら部分保存して終了）
+    - 例外は握って flash のみ返す
+    """
+    try:
+        if session.get("role") != "admin":
+            abort(403)
+        if not OPENAI_API_KEY:
+            flash("OPENAI_API_KEY が未設定です")
+            return redirect(url_for("admin_synonyms"))
 
-    target = request.form.get("target", "missing")      # "missing" or "all"
-    mode   = request.form.get("mode", "append")         # "append" or "overwrite"
+        # GET 直叩きにも応答できるように（フォームからでもOK）
+        target = request.values.get("target", "missing")      # "missing" or "all"
+        mode   = request.values.get("mode", "append")         # "append" or "overwrite"
 
-    # 既存エントリからタグ集合を作る
-    entries = load_entries()
-    all_tags = set()
-    for e in entries:
-        for t in (e.get("tags") or []):
-            t = (t or "").strip()
-            if t:
-                all_tags.add(t)
-
-    cur = load_synonyms()
-    if target == "all":
-        target_tags = sorted(all_tags)
-    else:
-        target_tags = sorted([t for t in all_tags if t not in cur or not cur[t]])
-
-    if not target_tags:
-        flash("生成対象のタグがありません")
-        return redirect(url_for("admin_synonyms"))
-
-    # ---- ここから負荷対策 ----
-    MAX_TAGS_PER_REQUEST = 80      # 1クリックで処理する最大件数
-    CHUNK = 12                     # 1回のAI呼び出しで処理するタグ数（小さくして失敗率/待ち時間を下げる）
-    HARD_DEADLINE_SEC = 85         # Renderの100秒手前で打ち切ってタイムアウトを回避
-    start_time = time.time()
-
-    # 対象を制限（多い場合は複数回押して進められる）
-    target_tags = target_tags[:MAX_TAGS_PER_REQUEST]
-
-    merged = {}
-    i = 0
-    while i < len(target_tags):
-        # 時間ガード：80〜90秒超えそうなら途中終了して部分結果だけ反映
-        if time.time() - start_time > HARD_DEADLINE_SEC:
-            flash("タイムアウト回避のため途中までで保存しました。もう一度実行すると続きが処理されます。")
-            break
-
-        chunk = target_tags[i:i+CHUNK]
-        prompt = (
-            "次の観光関連タグごとに、日本語の類義語・言い換え・表記揺れを最大5個ずつ返してください。"
-            "出力は必ず JSON で、キー=タグ、値=文字列配列の形にしてください。"
-            "\nタグ: " + ", ".join(chunk)
-        )
-
+        # パラメータで微調整できるように
         try:
-            # まずは高精度モデル（環境変数の設定に従う）
-            content = openai_chat(
-                OPENAI_MODEL_HIGH,
-                [{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_output_tokens=1000,  # Responses/Chat どちらでも吸収
-            )
-        except Exception as e:
-            app.logger.exception("autogen openai call failed: %s", e)
-            content = ""
+            MAX_TAGS_PER_REQUEST = max(1, min(100, int(request.values.get("limit", 30))))
+        except Exception:
+            MAX_TAGS_PER_REQUEST = 30
+        try:
+            CHUNK = max(1, min(20, int(request.values.get("chunk", 8))))
+        except Exception:
+            CHUNK = 8
 
-        # モデル・ネットワークが不安定な場合のフォールバック（軽量モデル）
-        if not content:
+        # Render の 100秒を確実に避ける
+        HARD_DEADLINE_SEC = 40
+        start_time = time.time()
+
+        # 既存エントリからタグ集合
+        entries = load_entries()
+        all_tags = set()
+        for e in entries:
+            for t in (e.get("tags") or []):
+                t = (t or "").strip()
+                if t:
+                    all_tags.add(t)
+
+        cur = load_synonyms()
+        if target == "all":
+            target_tags = sorted(all_tags)
+        else:
+            target_tags = sorted([t for t in all_tags if t not in cur or not cur[t]])
+
+        if not target_tags:
+            flash("生成対象のタグがありません（missing対象なし）")
+            return redirect(url_for("admin_synonyms"))
+
+        # 対象をさらに厳しく制限（小刻みに進める）
+        target_tags = target_tags[:MAX_TAGS_PER_REQUEST]
+
+        merged = {}
+        i = 0
+        while i < len(target_tags):
+            # 時間ガード：40秒超えそうなら途中保存して終了
+            if time.time() - start_time > HARD_DEADLINE_SEC:
+                flash("タイムアウト回避のため途中までで保存しました。もう一度実行すると続きが処理されます。")
+                break
+
+            chunk = target_tags[i:i+CHUNK]
+            prompt = (
+                "次の観光関連タグごとに、日本語の類義語・言い換え・表記揺れを最大5個ずつ返してください。"
+                "出力は必ず JSON で、キー=タグ、値=文字列配列の形にしてください。\n"
+                "タグ: " + ", ".join(chunk)
+            )
+
+            # まず高精度
+            content = ""
             try:
                 content = openai_chat(
-                    OPENAI_MODEL_PRIMARY,
+                    OPENAI_MODEL_HIGH,
                     [{"role": "user", "content": prompt}],
                     temperature=0.2,
-                    max_output_tokens=1000,
+                    max_output_tokens=900,
                 )
-            except Exception as e2:
-                app.logger.exception("autogen fallback failed: %s", e2)
-                content = ""
-
-        # JSONとしてパース（ノイズ除去）
-        data = {}
-        if content:
-            try:
-                m = re.search(r"\{.*\}", content, re.S)
-                j = m.group(0) if m else content
-                data = json.loads(j)
-                if not isinstance(data, dict):
-                    raise ValueError("AI出力がJSONオブジェクトではありません")
             except Exception as e:
-                app.logger.exception("autogen parse failed: %s", e)
-                # このチャンクはスキップして次へ（中断しない）
+                app.logger.exception("autogen openai (HIGH) failed: %s", e)
+
+            # フォールバック
+            if not content:
+                try:
+                    content = openai_chat(
+                        OPENAI_MODEL_PRIMARY,
+                        [{"role": "user", "content": prompt}],
+                        temperature=0.2,
+                        max_output_tokens=900,
+                    )
+                except Exception as e2:
+                    app.logger.exception("autogen openai (PRIMARY) failed: %s", e2)
+                    content = ""
+
+            # JSON パース
+            data = {}
+            if content:
+                try:
+                    m = re.search(r"\{.*\}", content, re.S)
+                    j = m.group(0) if m else content
+                    data = json.loads(j)
+                    if not isinstance(data, dict):
+                        raise ValueError("AI出力がJSONオブジェクトではありません")
+                except Exception as e:
+                    app.logger.exception("autogen parse failed: %s", e)
+                    # このチャンクはスキップ
+                    i += CHUNK
+                    continue
+            else:
                 i += CHUNK
                 continue
-        else:
-            # 応答が空 → スキップして次へ
+
+            # マージ
+            for k, v in data.items():
+                if isinstance(v, str):
+                    syns = _split_lines_commas(v)
+                elif isinstance(v, (list, tuple)):
+                    syns = [str(x).strip() for x in v if str(x).strip()]
+                else:
+                    syns = []
+                merged[str(k).strip()] = syns
+
             i += CHUNK
-            continue
 
-        # マージ
-        for k, v in data.items():
-            if isinstance(v, str):
-                syns = _split_lines_commas(v)
-            elif isinstance(v, (list, tuple)):
-                syns = [str(x).strip() for x in v if str(x).strip()]
+        # 反映
+        cur = load_synonyms()
+        updated = 0
+        for tag, syns in merged.items():
+            if mode == "overwrite":
+                cur[tag] = syns
             else:
-                syns = []
-            merged[str(k).strip()] = syns
+                cur.setdefault(tag, [])
+                for s in syns:
+                    if s and s not in cur[tag]:
+                        cur[tag].append(s)
+            updated += 1
 
-        i += CHUNK
+        save_synonyms(cur)
 
-    # 反映
-    cur = load_synonyms()
-    updated = 0
-    for tag, syns in merged.items():
-        if mode == "overwrite":
-            cur[tag] = syns
+        total = len(target_tags)
+        if updated == 0:
+            flash("AI生成に失敗しました（部分タイムアウト/応答空の可能性）。もう一度お試しください。")
+        elif updated < total:
+            flash(f"AI生成（部分実行）: {updated}/{total} タグを反映しました。再度実行で続きが処理されます。")
         else:
-            cur.setdefault(tag, [])
-            for s in syns:
-                if s and s not in cur[tag]:
-                    cur[tag].append(s)
-        updated += 1
+            flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
 
-    save_synonyms(cur)
+        return redirect(url_for("admin_synonyms"))
 
-    # 進捗メッセージ
-    total = len(target_tags)
-    if updated == 0:
-        flash("AI生成に失敗しました（部分的にタイムアウトした可能性があります）。もう一度お試しください。")
-    elif updated < total:
-        flash(f"AI生成（部分実行）: {updated}/{total} タグを反映しました。再度実行すると続きが処理されます。")
-    else:
-        flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
-
-    return redirect(url_for("admin_synonyms"))
+    except Exception as e:
+        app.logger.exception("autogen endpoint fatal error: %s", e)
+        flash("内部エラーが発生しました（ログを確認してください）。")
+        return redirect(url_for("admin_synonyms"))
 
 
 # （互換用：以前のエンドポイント名を使っていた場合のエイリアス）
