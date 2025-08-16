@@ -730,7 +730,7 @@ def build_refine_suggestions(question):
         lines.append(f"- フィルタ: {', '.join(filters)}")
     if examples:
         lines.append("- 例: " + " / ".join(examples))
-        # ★ここから追記：意図深掘りの追質問を合体
+    # ★ここから追記：意図深掘りの追質問を合体
     probe_lines = build_probe_questions(question)
     if probe_lines:
         lines.append("")  # 空行で区切り
@@ -1613,28 +1613,27 @@ def admin_manual():
 import unicodedata
 from flask import send_from_directory
 
-ALLOWED_TXT_EXTS = {".txt", ".md"}  # 必要なら増やせます
+# ① 許可する文字クラスを拡張（全角括弧・句読点・記号などを許可）
+ALLOWED_TXT_EXTS = {".txt", ".md"}
 
 def _safe_txt_name(name: str) -> str:
-    """
-    ディレクトリトラバーサル防止 & 許容文字のみに制限。
-    日本語はNFKCに正規化、先頭ドットでの隠しファイル化を禁止。
-    拡張子が無ければ .txt を付与。
-    """
     if not name:
         return ""
     name = os.path.basename(name)
     name = unicodedata.normalize("NFKC", name)
-    # 許可文字のみ（日本語・英数・一部記号・全角/半角スペース）
-    name = re.sub(r'[^0-9A-Za-zぁ-んァ-ン一-龥ー_\-\.\(\)\[\] 　]+', '', name)
-    name = name.strip()
-    # 先頭ドットは禁止（隠しファイル回避）
-    name = name.lstrip(".")
+    # ← 許可範囲を拡げる（全角カッコ/句読点/スラッシュなど）
+    # 置き換え版（許可を少し広げる）
+    name = re.sub(
+        r'[^0-9A-Za-zぁ-んァ-ヶ一-龠々ー_\-\.\(\)\[\]（）【】「」『』・!！?？&＆:：;；,，.。／/ 　]+',
+        '',
+        name
+    )
+    name = name.strip().lstrip(".")
     if not name:
         return ""
     root, ext = os.path.splitext(name)
     if not ext:
-        name = name + ".txt"
+        name += ".txt"
         ext = ".txt"
     if ext.lower() not in ALLOWED_TXT_EXTS:
         return ""
@@ -1706,6 +1705,7 @@ def _list_txt_files():
         del f["mtime_ts"]
     return files
 
+# ② 例外を握ってログ＋フラッシュにして 500 を防ぐ
 @app.route("/admin/data_files", methods=["GET"])
 @login_required
 def admin_data_files():
@@ -1724,8 +1724,17 @@ def admin_data_files():
         if not _ensure_in_data_dir(path) or not os.path.exists(path):
             flash("指定ファイルが見つかりません")
             return redirect(url_for("admin_data_files"))
-        content, used_enc = _read_text_any(path)
-    return render_template("admin_data_files.html", files=files, edit=edit, content=content, used_enc=used_enc)
+
+        # ★ここを try/except で置き換え
+        try:
+            content, used_enc = _read_text_any(path)
+        except Exception as e:
+            app.logger.exception("[data_files] read failed: %s", path)
+            flash(f"ファイルの読み込みに失敗しました: {e.__class__.__name__}")
+            return redirect(url_for("admin_data_files"))
+
+    return render_template("admin_data_files.html",
+                           files=files, edit=edit, content=content, used_enc=used_enc)
 
 @app.route("/admin/data_files/upload", methods=["POST"])
 @login_required
@@ -2504,7 +2513,8 @@ def _compute_and_push_async(event, user_message: str):
         answer = answer_ja if lang == "ja" else translate_text(answer_ja, "zh-Hant" if lang == "zh-Hant" else "en")
 
         save_qa_log(user_message, answer, source="line", hit_db=hit_db, extra=meta)
-        line_bot_api.push_message(target_id, TextSendMessage(text=answer))
+        texts = _split_for_messaging(answer)
+        _push_multi_by_id(target_id, texts)
     except Exception as e:
         app.logger.exception("compute/push failed: %s", e)
         try:
@@ -2554,7 +2564,7 @@ def handle_message(event):
 
         if single:
             save_qa_log(user_message, single, source="line", hit_db=True, extra={"kind": "single_hit"})
-            _reply_or_push(event, single)
+            _reply_or_push_multi(event, _split_for_messaging(single))
             return
 
     # 3) ここからは重め：短い待機メッセージ → 完成文は push
