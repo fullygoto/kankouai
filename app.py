@@ -1695,11 +1695,11 @@ def _list_txt_files():
         st = os.stat(fp)
         files.append({
             "name": fn,
+            "ext": (ext[1:].upper() if ext else ""),  # ← これをテンプレで使う
             "size": st.st_size,
-            "mtime_ts": st.st_mtime,  # 数値
+            "mtime_ts": st.st_mtime,
         })
     files.sort(key=lambda x: x["mtime_ts"], reverse=True)
-    # 表示用の整形は最後に
     for f in files:
         f["mtime"] = datetime.datetime.fromtimestamp(f["mtime_ts"]).strftime("%Y-%m-%d %H:%M:%S")
         del f["mtime_ts"]
@@ -1716,25 +1716,24 @@ def admin_data_files():
     content = ""
     used_enc = ""
     if edit:
-        safe = _safe_txt_name(edit)
-        if not safe:
-            flash("不正なファイル名です")
-            return redirect(url_for("admin_data_files"))
-        path = os.path.join(DATA_DIR, safe)
-        if not _ensure_in_data_dir(path) or not os.path.exists(path):
-            flash("指定ファイルが見つかりません")
-            return redirect(url_for("admin_data_files"))
-
-        # ★ここを try/except で置き換え
         try:
+            safe = _safe_txt_name(edit)
+            if not safe:
+                flash("不正なファイル名です")
+                return redirect(url_for("admin_data_files"))
+            path = os.path.join(DATA_DIR, safe)
+            if not _ensure_in_data_dir(path) or not os.path.exists(path):
+                flash("指定ファイルが見つかりません")
+                return redirect(url_for("admin_data_files"))
             content, used_enc = _read_text_any(path)
         except Exception as e:
-            app.logger.exception("[data_files] read failed: %s", path)
-            flash(f"ファイルの読み込みに失敗しました: {e.__class__.__name__}")
+            app.logger.exception("[admin_data_files] load failed: %r -> %s", edit, e)
+            flash("ファイル読込でエラーが発生しました。ダウンロードで内容確認か、ファイル名を短くして再試行してください。")
             return redirect(url_for("admin_data_files"))
-
-    return render_template("admin_data_files.html",
-                           files=files, edit=edit, content=content, used_enc=used_enc)
+    return render_template(
+        "admin_data_files.html",
+        files=files, edit=edit, content=content, used_enc=used_enc
+    )
 
 @app.route("/admin/data_files/upload", methods=["POST"])
 @login_required
