@@ -17,6 +17,10 @@ load_dotenv()
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+
 # LINE Bot関連
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage  
@@ -232,7 +236,11 @@ def _bootstrap_files_and_admin():
             users = [{
                 "user_id": ADMIN_INIT_USER,
                 "name": "管理者",
-                "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD, method="scrypt"),
+                "password_hash": generate_password_hash(
+                    ADMIN_INIT_PASSWORD,
+                    method="pbkdf2:sha256",
+                    salt_length=16
+                ),                
                 "role": "admin"
             }]
             with open(USERS_FILE, "w", encoding="utf-8") as f:
@@ -256,6 +264,62 @@ if not OPENAI_API_KEY:
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     app.logger.warning("LINE_CHANNEL_* が未設定です。/callback は正常動作しません。")
 
+# === OpenAIの出力から安全にJSONオブジェクトを取り出すユーティリティ ===
+def _extract_json_object(text: str):
+    """
+    OpenAIが時々つける前置き/後置きや ```json フェンス、全角引用符、末尾カンマなどを掃除し、
+    最初の JSON オブジェクト（{...}）だけを抜き出して dict として返す。
+    失敗したら None を返す。
+    """
+    if not text:
+        return None
+    s = str(text)
+
+    # コードフェンスを優先抽出（```json ... ``` or ``` ... ```）
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.S | re.I)
+    if m:
+        s = m.group(1)
+
+    # よく混ざる説明行を刈り取る
+    # 例: "以下のJSONです:" などの前置き・後置きを雑に除去
+    # JSONらしき最初の { と最後の } をスタックで対応付け
+    start = s.find("{")
+    if start == -1:
+        return None
+
+    # 全角引用符 → 半角に正規化
+    s = s.replace("“", '"').replace("”", '"').replace("‟", '"').replace("＂", '"').replace("’", "'").replace("‘", "'")
+
+    # JSONコメント/余分な制御文字を除去（緩め）
+    s = re.sub(r"^\s*//.*?$", "", s, flags=re.M)         # 行頭コメント //...
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)           # ブロックコメント /* ... */
+    s = re.sub(r"[^\S\r\n]+\n", "\n", s)                  # 余分な空白
+
+    # { ... } の対応をとり、最初の完全なオブジェクトを取り出す
+    depth = 0
+    end = None
+    for i in range(start, len(s)):
+        c = s[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end is None:
+        return None
+    jtxt = s[start:end+1].strip()
+
+    # 末尾カンマの軽微な修正（キー/配列の末尾にあるケース）
+    jtxt = re.sub(r",(\s*[}\]])", r"\1", jtxt)
+
+    try:
+        return json.loads(jtxt)
+    except Exception:
+        # ダブルクォートが欠け気味のケースに軽く対応（キーはダブルクォート必須）
+        # ここでは過度に変換せず諦める
+        return None
 
 # =========================
 #  基本I/O
@@ -434,18 +498,16 @@ def merge_synonyms(base: dict, incoming: dict) -> dict:
 
 def ai_propose_synonyms(tags, context_text="", model=None) -> dict:
     """
-    OpenAIを使って、複数タグに対するシノニム案をJSONで返す。
-    返り値の例: {"教会": ["カトリック教会","チャーチ","Church"], "五島うどん": ["うどん","GOTO Udon"]}
+    OpenAIを使ってタグごとのシノニム案をJSONで返す。
+    出力の前後に説明が混ざっても落ちないよう、_extract_json_object() で回収。
     """
-    if not OPENAI_API_KEY:
-        return {}
-    if not tags:
+    if not OPENAI_API_KEY or not tags:
         return {}
     model = model or OPENAI_MODEL_HIGH
     prompt = (
-        "次の観光・生活関連の『タグ』ごとに、検索時の取りこぼしを防ぐための日本語/英語/繁体字の同義語・表記ゆれ・通称を出してください。"
-        "出力は必ず JSON オブジェクトのみ（整形済み）。キー=元タグ、値=文字列配列。"
-        "元タグと完全に同じ語は含めないでください。スラングや不正確な語は避け、1タグあたり1〜6語程度。\n"
+        "次の観光・生活関連の『タグ』ごとに、日本語の同義語・言い換え・表記ゆれを1〜6語で返してください。"
+        "出力は必ず JSON オブジェクトのみ。キー=元タグ、値=文字列配列。"
+        "元タグと完全一致の語、スラングは含めないでください。\n"
         f"【文脈参考】\n{context_text[:1000]}\n"
         f"【タグ一覧】\n{', '.join(sorted(set(tags)))}"
     )
@@ -453,22 +515,26 @@ def ai_propose_synonyms(tags, context_text="", model=None) -> dict:
         content = openai_chat(
             model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
+            temperature=0.2,
             max_tokens=800,
-        )
-        # JSONだけを期待するが、万一先頭/末尾にノイズがあったら抽出
-        import json as _json, re as _re
-        m = _re.search(r"\{.*\}", content, _re.S)
-        j = m.group(0) if m else content
-        data = _json.loads(j)
-        # 値はリストで揃える
+        ) or ""
+        data = _extract_json_object(content)
+        if not isinstance(data, dict):
+            app.logger.warning("[ai_propose_synonyms] JSON抽出に失敗。content(先頭200): %r", content[:200])
+            return {}
+
+        # 値は list[str] に正規化
         cleaned = {}
-        for k, v in (data or {}).items():
+        for k, v in data.items():
             if not k:
                 continue
             if isinstance(v, str):
-                v = [v]
-            cleaned[k] = [str(x).strip() for x in (v or []) if str(x).strip()]
+                v = _split_lines_commas(v)
+            elif isinstance(v, (list, tuple)):
+                v = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                v = []
+            cleaned[str(k).strip()] = v
         return cleaned
     except Exception as e:
         app.logger.warning(f"[ai_propose_synonyms] fail: {e}")
@@ -1578,6 +1644,7 @@ def admin_synonyms_autogen():
                 flash("タイムアウト回避のため途中までで保存しました。もう一度実行すると続きが処理されます。")
                 break
 
+            # ... while i < len(target_tags):
             chunk = target_tags[i:i+CHUNK]
             prompt = (
                 "次の観光関連タグごとに、日本語の類義語・言い換え・表記揺れを最大5個ずつ返してください。"
@@ -1585,19 +1652,19 @@ def admin_synonyms_autogen():
                 "タグ: " + ", ".join(chunk)
             )
 
-            # まず高精度
+            # まず高精度モデル
             content = ""
             try:
                 content = openai_chat(
                     OPENAI_MODEL_HIGH,
                     [{"role": "user", "content": prompt}],
                     temperature=0.2,
-                    max_output_tokens=900,
-                )
+                    max_tokens=1000,
+                ) or ""
             except Exception as e:
                 app.logger.exception("autogen openai (HIGH) failed: %s", e)
 
-            # フォールバック
+            # フォールバック（応答が空のときだけ）
             if not content:
                 try:
                     content = openai_chat(
@@ -1605,26 +1672,15 @@ def admin_synonyms_autogen():
                         [{"role": "user", "content": prompt}],
                         temperature=0.2,
                         max_output_tokens=900,
-                    )
+                    ) or ""
                 except Exception as e2:
                     app.logger.exception("autogen openai (PRIMARY) failed: %s", e2)
                     content = ""
 
-            # JSON パース
-            data = {}
-            if content:
-                try:
-                    m = re.search(r"\{.*\}", content, re.S)
-                    j = m.group(0) if m else content
-                    data = json.loads(j)
-                    if not isinstance(data, dict):
-                        raise ValueError("AI出力がJSONオブジェクトではありません")
-                except Exception as e:
-                    app.logger.exception("autogen parse failed: %s", e)
-                    # このチャンクはスキップ
-                    i += CHUNK
-                    continue
-            else:
+            # ここが重要：常に安全抽出のみを使う（生loads禁止）
+            data = _extract_json_object(content)
+            if not isinstance(data, dict) or not data:
+                app.logger.warning("autogen parse failed: 先頭200=%r", content[:200])
                 i += CHUNK
                 continue
 
