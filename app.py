@@ -5,6 +5,9 @@ import datetime
 import itertools
 import time  
 import threading  
+import ipaddress
+import logging
+
 from collections import Counter
 from typing import Any, Dict, List
 from werkzeug.routing import BuildError
@@ -89,6 +92,12 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
 #  Flask / 設定
 # =========================
 app = Flask(__name__)
+if not os.environ.get("FLASK_SECRET_KEY"):
+    raise RuntimeError("FLASK_SECRET_KEY must be set in production")
+if not os.environ.get("OPENAI_API_KEY"):
+    raise RuntimeError("OPENAI_API_KEY must be set in production")
+# LINE は使わない環境では callback を閉じる/無効化でもOK
+
 # --- Jinja2 互換用: 'string' / 'mapping' テストが無い環境向け ---
 if 'string' not in app.jinja_env.tests:
     app.jinja_env.tests['string'] = lambda v: isinstance(v, str)
@@ -109,6 +118,142 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
 )
+# ==== Rate limit setup (put right after Flask settings) ====
+import os, sys
+from urllib.parse import urlparse
+CSRF_EXEMPT = {"callback", "internal_backup"}
+from werkzeug.middleware.proxy_fix import ProxyFix
+from flask import request, jsonify
+
+# リバースプロキシ配下で正しい IP/スキームを取る
+TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "1"))
+app.wsgi_app = ProxyFix(app.wsgi_app,
+                        x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
+
+try:
+    from flask_limiter import Limiter
+except Exception:
+    Limiter = None
+
+def _client_ip():
+    # ProxyFix 適用後は remote_addr が実クライアントIPになる
+    return (request.remote_addr or "0.0.0.0").strip()
+
+# 文字列は「;」区切りで複数指定可（例: "20/minute;1000/day"）
+ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
+# 例: RATE_STORAGE_URI="redis://:pass@redis:6379/0"
+RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI", "")
+
+if Limiter:
+    limiter = Limiter(
+        app=app,
+        key_func=_client_ip,
+        storage_uri=(RATE_STORAGE_URI or "memory://"),  # 本番は必ず Redis を
+        default_limits=[],           # デフォルト全体には掛けない
+        headers_enabled=True,        # X-RateLimit- 残量ヘッダを返す
+        strategy="fixed-window-elastic-expiry",
+    )
+    limit_deco = limiter.limit
+else:
+    # 依存未導入時は no-op（下の「最小実装」か pip install を）
+    def limit_deco(*a, **k):
+        def _wrap(f): return f
+        return _wrap
+
+@app.errorhandler(429)
+def _ratelimit_handler(e):
+    return jsonify({"error": "Too Many Requests", "detail": "Rate limit exceeded."}), 429
+# ==== /Rate limit setup ====
+
+
+# ===== ここを Flask 設定の直後に追加 =====
+from urllib.parse import urlparse
+
+# CSRF 保護対象のパス接頭辞（管理／店舗）
+CSRF_PROTECT_PATHS = ("/admin", "/shop")
+
+# 例外にしたいエンドポイント名（関数名が endpoint）
+CSRF_EXEMPT_ENDPOINTS = {"callback", "internal_backup"}
+
+CSRF_STRICT = (os.getenv("CSRF_STRICT", "1").lower() in {"1","true","on","yes"})
+
+
+
+@app.before_request
+def _csrf_referer_origin_guard():
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return
+    if request.endpoint in CSRF_EXEMPT_ENDPOINTS:
+        return
+    path = request.path or ""
+    if not any(path.startswith(p) for p in CSRF_PROTECT_PATHS):
+        return
+
+    origin = request.headers.get("Origin")
+    referer = request.headers.get("Referer")
+    src = origin or referer
+    if not src:
+        if CSRF_STRICT:
+            abort(403)
+        else:
+            return  # 運用フラグで緩和
+
+    host_hdr = request.host  # ProxyFix 適用後は正しい値になる
+    if urlparse(src).netloc != host_hdr:
+        abort(403)
+
+# ===== 追加ここまで =====
+
+# ===== 管理画面IP制限（/admin, /shop） - ProxyFix 適用後に配置 =====
+ADMIN_IP_ALLOWLIST = [
+    s.strip() for s in os.getenv("ADMIN_IP_ALLOWLIST", "").replace("\n", ",").split(",")
+    if s.strip()
+]
+_APP_ENV = os.getenv("APP_ENV", "dev").lower()  # dev/staging/production など
+
+def _load_admin_nets():
+    nets = []
+    for s in ADMIN_IP_ALLOWLIST:
+        try:
+            nets.append(ipaddress.ip_network(s, strict=False))
+        except ValueError:
+            logging.getLogger(__name__).warning("ADMIN_IP_ALLOWLIST: invalid CIDR skipped: %s", s)
+    return nets
+
+_ADMIN_NETS = _load_admin_nets()
+app.logger.info("[admin-ip] allowlist=%s  APP_ENV=%s",
+                ", ".join(map(str, _ADMIN_NETS)) or "(empty)", _APP_ENV)
+
+def _admin_ip_ok(ip: str) -> bool:
+    # 本番は未設定＝拒否、開発系は未設定でも許可
+    if not _ADMIN_NETS:
+        return _APP_ENV not in {"prod", "production"}
+    try:
+        ipobj = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(ipobj in n for n in _ADMIN_NETS)
+
+@app.before_request
+def _restrict_admin_ip():
+    p = request.path or ""
+    # /admin と /shop（末尾スラ有無どちらも対象）
+    if p.startswith("/admin") or p.startswith("/shop"):
+        client_ip = (request.remote_addr or "").strip()  # ProxyFix 適用後はこれが実クライアントIP
+        if not _admin_ip_ok(client_ip):
+            abort(403, description="Forbidden: your IP is not allowed for admin/shop.")
+# ===== ここまで =====
+
+@app.route("/_debug/ip")
+def _debug_ip():
+    if _APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
+        abort(404)
+    return jsonify({
+        "remote_addr": request.remote_addr,
+        "x_forwarded_for": request.headers.get("X-Forwarded-For"),
+        "host": request.host,
+        "scheme": request.scheme,
+    })
 
 def login_required(fn):
     @wraps(fn)
@@ -313,6 +458,192 @@ def _extract_json_object(text: str):
         # ここでは過度に変換せず諦める
         return None
 
+
+
+# =========================
+#  重複統合（タイトル基準）
+# =========================
+import unicodedata
+
+DEDUPE_ON_SAVE = os.environ.get("DEDUPE_ON_SAVE", "1").lower() in {"1","true","on","yes"}
+DEDUPE_USE_AI  = os.environ.get("DEDUPE_USE_AI",  "1").lower() in {"1","true","on","yes"}
+
+def _title_key(s: str) -> str:
+    """タイトルを比較用に正規化（全半角・空白のゆらぎ吸収。過剰には潰さない）"""
+    s = unicodedata.normalize("NFKC", (s or "").strip())
+    # 連続空白を1つに
+    s = re.sub(r"\s+", " ", s)
+    return s.lower()
+
+def _uniq_keep_order(items):
+    def _norm_key(x):
+        s = unicodedata.normalize("NFKC", str(x)).strip().lower()
+        s = re.sub(r"\s+", " ", s)
+        return s
+    seen = set()
+    out = []
+    for x in items or []:
+        if not x:
+            continue
+        k = _norm_key(x)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(x.strip() if isinstance(x, str) else x)
+    return out
+
+def _mode_or_longest(values):
+    """文字列候補から最頻値→同率なら最長→それでも同率なら先勝ち"""
+    vs = [str(v).strip() for v in values if v and str(v).strip()]
+    if not vs:
+        return ""
+    # 正規化して頻度
+    norm = [re.sub(r"\s+", " ", unicodedata.normalize("NFKC", v)) for v in vs]
+    cnt = Counter(norm)
+    best_norm, _ = max(cnt.items(), key=lambda kv: (kv[1], len(kv[0])))
+    # 同じ正規化群の中から最長を返す
+    candidates = [v for v, n in zip(vs, norm) if n == best_norm]
+    return sorted(candidates, key=lambda x: len(x), reverse=True)[0]
+
+def _merge_extras(dicts: List[dict]) -> dict:
+    """extras を統合。キーごとに最頻→最長を採用。"""
+    all_keys = set()
+    for d in dicts or []:
+        all_keys.update((d or {}).keys())
+    out = {}
+    for k in all_keys:
+        vals = []
+        for d in dicts or []:
+            v = (d or {}).get(k, "")
+            if v:
+                vals.append(v)
+        out[k] = _mode_or_longest(vals)
+    return {k: v for k, v in out.items() if v}
+
+def _ai_optimize_description(title: str, descs: List[str], tags: List[str], areas: List[str]) -> str:
+    base = _mode_or_longest(descs)
+    # 追加：実質1件ならAIスキップ
+    norm = {re.sub(r"\s+", " ", unicodedata.normalize("NFKC", d.strip())) for d in descs if d and d.strip()}
+    if len(norm) <= 1:
+        return base
+    if not DEDUPE_USE_AI or not OPENAI_API_KEY:
+        return base    
+    try:
+        prompt = (
+            "以下の複数の説明文を、重複を避けて1本の日本語説明に統合してください。\n"
+            "・事実関係の矛盾があれば最も一般的な説明に寄せる\n"
+            "・観光ガイドとして初見でも分かるように、200〜350字を目安\n"
+            "・誇張・未確認表現は避け、固有名/見どころ/注意点を簡潔に\n"
+            f"【タイトル】{title}\n"
+            f"【タグ】{', '.join(tags)}\n"
+            f"【エリア】{', '.join(areas)}\n"
+            "【説明候補】\n- " + "\n- ".join([d for d in descs if d.strip()][:10])
+        )
+        out = openai_chat(
+            OPENAI_MODEL_HIGH,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=600,
+        )
+        return (out or "").strip() or base
+    except Exception:
+        return base
+
+def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, dry_run: bool = False):
+    """
+    同一タイトル（正規化キー一致）を統合。
+    - 説明: AI（任意）で統合、失敗時は最長
+    - タグ/エリア/リンク/支払い: ユニーク結合
+    - 住所/電話/営業時間/定休/駐車/備考/地図等: 最頻→最長
+    - extras: キー単位で最頻→最長
+    戻り値: (新entries, stats, preview)
+    """
+    groups = {}
+    for e in entries:
+        e0 = _norm_entry(e)  # ★ 追加：先に正規化
+        k = _title_key(e0.get("title", ""))
+        if not k:  # ★ 追加：空タイトルは統合対象にしない
+            # id(e0)で一意キー化（辞書内の一時キーなので可）
+            groups[f"__keep_{id(e0)}"] = [e0]
+            continue
+        
+        groups.setdefault(k, []).append(e0)
+
+    new_list = []
+    removed = 0
+    merged_groups = 0
+    preview = []
+
+    for k, group in groups.items():
+        if len(group) == 1:
+            new_list.append(group[0])
+            continue
+
+        merged_groups += 1
+        titles = [g.get("title","") for g in group]
+        # タイトルは最頻→最長
+        title = _mode_or_longest(titles)
+        # 主要文字列項目
+        address     = _mode_or_longest([g.get("address","")     for g in group])
+        tel         = _mode_or_longest([g.get("tel","")         for g in group])
+        holiday     = _mode_or_longest([g.get("holiday","")     for g in group])
+        open_hours  = _mode_or_longest([g.get("open_hours","")  for g in group])
+        parking     = _mode_or_longest([g.get("parking","")     for g in group])
+        parking_num = _mode_or_longest([g.get("parking_num","") for g in group])
+        remark      = _mode_or_longest([g.get("remark","")      for g in group])
+        map_url     = _mode_or_longest([g.get("map","")         for g in group])
+        category    = _mode_or_longest([g.get("category","")    for g in group]) or "観光"
+
+        # リスト系は結合ユニーク
+        tags   = _uniq_keep_order(itertools.chain.from_iterable([g.get("tags",[])   for g in group]))
+        areas  = _uniq_keep_order(itertools.chain.from_iterable([g.get("areas",[])  for g in group])) or ["五島市"]
+        links  = _uniq_keep_order(itertools.chain.from_iterable([g.get("links",[])  for g in group]))
+        pay    = _uniq_keep_order(itertools.chain.from_iterable([g.get("payment",[])for g in group]))
+
+        # extras
+        extras = _merge_extras([g.get("extras",{}) for g in group])
+
+        # 説明はAI統合（フォールバックあり）
+        desc_candidates = [g.get("desc","") for g in group if (g.get("desc","").strip())]
+        norm_descs = {
+            re.sub(r"\s+", " ", unicodedata.normalize("NFKC", d.strip()))
+            for d in desc_candidates
+        }
+        if len(norm_descs) <= 1:
+            desc = desc_candidates[0] if desc_candidates else ""
+        elif use_ai:
+            desc = _ai_optimize_description(title, desc_candidates, tags, areas)
+        else:
+            desc = _mode_or_longest(desc_candidates)
+
+        merged = _norm_entry({
+            "category": category,
+            "title": title,
+            "desc": desc,
+            "address": address,
+            "map": map_url,
+            "tags": tags,
+            "areas": areas,
+            "links": links,
+            "payment": pay,
+            "tel": tel,
+            "holiday": holiday,
+            "open_hours": open_hours,
+            "parking": parking,
+            "parking_num": parking_num,
+            "remark": remark,
+            "extras": extras,
+        })
+        new_list.append(merged)
+        removed += (len(group) - 1)
+        preview.append({"title": title, "merged_from": len(group)})
+
+    stats = {"merged_groups": merged_groups, "removed": removed, "total_after": len(new_list)}
+    if dry_run:
+        # 乾式の場合は元データを返して外側で表示だけに使う
+        return entries, stats, preview
+    return new_list, stats, preview
+
 # =========================
 #  基本I/O
 # =========================
@@ -351,10 +682,14 @@ def openai_chat(model, messages, **kwargs):
     # GPT-5 系は Responses API を使う
     use_responses = model.startswith(("gpt-5",))
 
+    # openai_chat 内、use_responses 分岐を置き換え
     if use_responses:
         try:
-            # Responses API: input は messages をそのまま渡せる
-            rparams = {"model": model, "input": messages}
+            inp = messages
+            # 念のため、文字列だけ渡されたときも対応
+            if isinstance(messages, str):
+                inp = [{"role": "user", "content": messages}]
+            rparams = {"model": model, "input": inp}
             if mot is not None:
                 rparams["max_output_tokens"] = mot
             resp = client.responses.create(**rparams)
@@ -448,6 +783,14 @@ def load_entries():
     return [_norm_entry(e) for e in raw]
 
 def save_entries(entries):
+    """保存前に正規化＋タイトル重複を統合（DEDUPE_ON_SAVE=1 なら）"""
+    entries = [_norm_entry(e) for e in (entries or [])]
+    if DEDUPE_ON_SAVE:
+        try:
+            entries, stats, _ = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=False)
+            app.logger.info(f"[dedupe] merged_groups={stats['merged_groups']} removed={stats['removed']} total_after={stats['total_after']}")
+        except Exception as e:
+            app.logger.exception(f"[dedupe] failed: {e}")
     _atomic_json_dump(ENTRIES_FILE, entries)
 
 def load_synonyms():
@@ -1078,9 +1421,24 @@ def admin_entries_edit():
     return render_template("admin_entries_edit.html", entries=entries)
 
 
-# =========================
-#  CSV取り込み（既存に追加）
-# =========================
+@app.route("/admin/entries_dedupe", methods=["GET", "POST"])
+@login_required
+def admin_entries_dedupe():
+    if session.get("role") != "admin":
+        abort(403)
+
+    entries = load_entries()
+    if request.method == "GET":
+        _, stats, preview = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=True)
+        # 簡易プレビュー(JSON)
+        return jsonify({"ok": True, "stats": stats, "preview": preview})
+
+    # POST: 実行→保存
+    merged, stats, _ = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=False)
+    _atomic_json_dump(ENTRIES_FILE, merged)   # save_entries()でもOK（重複実行でも冪等）
+    flash(f"統合完了：{stats['merged_groups']} グループ / 重複 {stats['removed']} 件解消")
+    return redirect(url_for("admin_entries_edit"))
+
 # =========================
 #  CSV取り込み（既存に追加）
 # =========================
@@ -1745,10 +2103,9 @@ def _safe_txt_name(name: str) -> str:
         return ""
     name = os.path.basename(name)
     name = unicodedata.normalize("NFKC", name)
-    # ← 許可範囲を拡げる（全角カッコ/句読点/スラッシュなど）
-    # 置き換え版（許可を少し広げる）
+    # スラッシュを禁止（UIはDATA_DIR直下のみを一覧）
     name = re.sub(
-        r'[^0-9A-Za-zぁ-んァ-ヶ一-龠々ー_\-\.\(\)\[\]（）【】「」『』・!！?？&＆:：;；,，.。／/ 　]+',
+        r'[^0-9A-Za-zぁ-んァ-ヶ一-龠々ー_\-\.\(\)\[\]（）【】「」『』・!！?？&＆:：;；,，.。 　]+',
         '',
         name
     )
@@ -1757,9 +2114,8 @@ def _safe_txt_name(name: str) -> str:
         return ""
     root, ext = os.path.splitext(name)
     if not ext:
-        name += ".txt"
-        ext = ".txt"
-    if ext.lower() not in ALLOWED_TXT_EXTS:
+        name += ".txt"; ext = ".txt"
+    if ext.lower() not in {".txt", ".md"}:
         return ""
     return (name[:120]).strip()
 
@@ -2440,6 +2796,7 @@ def smart_search_answer_with_hitflag(question):
 #  API: /ask
 # =========================
 @app.route("/ask", methods=["POST"])
+@limit_deco(ASK_LIMITS) 
 def ask():
     data = request.get_json(silent=True) or {}
     question = data.get("question", "")
