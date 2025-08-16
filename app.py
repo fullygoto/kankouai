@@ -17,10 +17,6 @@ load_dotenv()
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from werkzeug.middleware.proxy_fix import ProxyFix
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
-
-
 # LINE Bot関連
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage  
@@ -236,11 +232,7 @@ def _bootstrap_files_and_admin():
             users = [{
                 "user_id": ADMIN_INIT_USER,
                 "name": "管理者",
-                "password_hash": generate_password_hash(
-                    ADMIN_INIT_PASSWORD,
-                    method="pbkdf2:sha256",
-                    salt_length=16
-                ),                
+                "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD, method="scrypt"),
                 "role": "admin"
             }]
             with open(USERS_FILE, "w", encoding="utf-8") as f:
