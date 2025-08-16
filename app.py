@@ -147,12 +147,10 @@ RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI", "")
 if Limiter:
     limiter = Limiter(
         app=app,
-        key_func=_client_ip,
-        storage_uri=(RATE_STORAGE_URI or "memory://"),  # 本番は Redis 推奨
-        default_limits=[],           # デフォルト全体には掛けない
-        headers_enabled=True,        # X-RateLimit-* を返す
-        strategy="fixed-window",     # ← ココだけ修正（または行ごと削除でも可）
-    )
+        key_func=get_remote_address,
+        storage_uri="memory://",     # Redis等があればそのURI
+        # strategy="fixed-window",    # ← 明示するならこれ。指定しなければ既定で fixed-window
+    )    
     limit_deco = limiter.limit
 else:
     def limit_deco(*a, **k):
