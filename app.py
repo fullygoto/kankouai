@@ -610,6 +610,44 @@ def get_top_tags(k=8):
         return ["教会", "五島うどん", "海水浴", "釣り", "温泉", "レンタカー", "カフェ", "体験"]
     return [t for t, _ in counter.most_common(k)]
 
+# === 追質問（意図深掘り）ビルダー ===
+def build_probe_questions(question: str):
+    """
+    あいまいな問い合わせのときに、追加で確認したいポイントを返す。
+    返り値は「箇条書きに載せる1行文」リスト。
+    """
+    q = (question or "").strip()
+    items = []
+
+    # ドライブ系（モデルコース含む）
+    if any(k in q for k in ["ドライブ", "モデルコース", "コース", "ルート"]):
+        items.append("どんなドライブが良いですか？（海岸線／教会巡り／展望台／灯台／夕日）")
+        items.append("出発エリアはどちらですか？（五島市／新上五島町／小値賀町／宇久町）")
+        items.append("所要時間は？（2〜3時間／半日／1日）")
+        items.append("お車はありますか？（あり／なし）")
+
+    # 教会系
+    if "教会" in q:
+        items.append("内部見学の可否は重視しますか？（はい／いいえ）")
+        items.append("世界遺産関連を優先しますか？（はい／いいえ）")
+
+    # ビーチ／海水浴
+    if any(k in q for k in ["ビーチ", "海水浴"]):
+        items.append("遊泳重視ですか？景観重視ですか？")
+        items.append("シャワー・更衣室の有無は必要ですか？（必要／不要）")
+
+    # 子連れ
+    if any(k in q for k in ["子連れ", "家族", "ファミリー"]):
+        items.append("お子さまの年齢層は？（未就学／小学生／中高生）")
+        items.append("移動時間はどれくらいが良いですか？（短め／こだわらない）")
+
+    # 雨
+    if "雨" in q:
+        items.append("屋内中心で探しますか？（はい／いいえ）")
+
+    return items
+
+
 def build_refine_suggestions(question):
     areas = ["五島市", "新上五島町", "小値賀町", "宇久町"]
     top_tags = get_top_tags()
@@ -634,6 +672,7 @@ def build_refine_suggestions(question):
                         score[t] += (100 - w)
         ranked = sorted(tags, key=lambda t: (-score.get(t, 0), tags.index(t)))
         return ranked
+    
 
     def has_events_this_week():
         try:
@@ -691,10 +730,17 @@ def build_refine_suggestions(question):
         lines.append(f"- フィルタ: {', '.join(filters)}")
     if examples:
         lines.append("- 例: " + " / ".join(examples))
+        # ★ここから追記：意図深掘りの追質問を合体
+    probe_lines = build_probe_questions(question)
+    if probe_lines:
+        lines.append("")  # 空行で区切り
+        lines.append("❓ もう少し教えてください")
+        for p in probe_lines:
+            lines.append(f"- {p}")
 
     msg = "\n".join(lines)
-    return msg, {"areas": areas, "tags": top_tags, "filters": filters}
-
+    # 返り値の meta に probe も載せる（後方互換）
+    return msg, {"areas": areas, "tags": top_tags, "filters": filters, "probe": probe_lines}
 
 # =========================
 #  管理画面: 観光データ登録・編集
@@ -1635,11 +1681,10 @@ def _write_text(path: str, text: str, encoding: str = "utf-8"):
             raise
 
 def _list_txt_files():
-    """DATA_DIR 直下の .txt/.md を一覧（サブフォルダを許可したい場合は os.walk に変更）"""
     files = []
     if not os.path.isdir(DATA_DIR):
         return files
-    for fn in sorted(os.listdir(DATA_DIR)):
+    for fn in os.listdir(DATA_DIR):
         if fn.startswith("."):
             continue
         root, ext = os.path.splitext(fn)
@@ -1652,10 +1697,13 @@ def _list_txt_files():
         files.append({
             "name": fn,
             "size": st.st_size,
-            "mtime": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "mtime_ts": st.st_mtime,  # 数値
         })
-    # 更新日時の降順
-    files.sort(key=lambda x: x["mtime"], reverse=True)
+    files.sort(key=lambda x: x["mtime_ts"], reverse=True)
+    # 表示用の整形は最後に
+    for f in files:
+        f["mtime"] = datetime.datetime.fromtimestamp(f["mtime_ts"]).strftime("%Y-%m-%d %H:%M:%S")
+        del f["mtime_ts"]
     return files
 
 @app.route("/admin/data_files", methods=["GET"])
@@ -2172,12 +2220,50 @@ def smart_search_answer_with_hitflag(question):
             return "\n".join(lines), True, meta
         
         else:
+            # 複数ヒット時：まず要約を試す → 失敗/空なら「短い候補一覧＋深掘り質問」にフォールバック
             try:
-                snippets = [f"タイトル: {e.get('title','')}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n" for e in entries]
+                snippets = [
+                    f"タイトル: {e.get('title','')}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n"
+                    for e in entries
+                ]
                 ai_ans = ai_summarize(snippets, question, model=OPENAI_MODEL_PRIMARY)
-                return ai_ans or "複数スポットが見つかりましたが要約に失敗しました。", True, meta
-            except Exception as e:
-                return "複数スポットが見つかりましたが要約に失敗しました。", False, meta
+                # 生成が空/極端に短い場合は失敗扱いにする
+                if not ai_ans or len(ai_ans.strip()) < 30:
+                    raise RuntimeError("summarize_failed_or_too_short")
+                return ai_ans, True, meta
+            except Exception:
+                # --- フォールバック：短い候補一覧（最大8件）＋意図深掘り ---
+                max_list = 8
+                short = entries[:max_list]
+
+                lines = ["候補が複数見つかりました。気になるものはありますか？"]
+                for i, e in enumerate(short, 1):
+                    name = (e.get("title") or "（無題）").strip()
+                    areas = ", ".join((e.get("areas") or []))
+                    suffix = f"（{areas}）" if areas else ""
+                    lines.append(f"{i}. {name}{suffix}")
+
+                remaining = len(entries) - len(short)
+                if remaining > 0:
+                    lines.append(f"…ほか {remaining} 件")
+
+                # 絞り込み候補＋深掘り質問（build_refine_suggestions は近くで定義済み）
+                try:
+                    suggest_text, suggest_meta = build_refine_suggestions(question)
+                    meta["suggestions"] = suggest_meta
+                    lines.append("")
+                    lines.append(suggest_text)  # ※probe 質問も含めて返る実装にしていればここで出ます
+                except Exception:
+                    # build_refine_suggestions が未改修でも最低限の深掘りだけ添える
+                    lines.append("")
+                    lines.append("❓ もう少し教えてください")
+                    lines.append("- 出発エリアは？（五島市／新上五島町／小値賀町／宇久町）")
+                    lines.append("- どんな雰囲気？（海岸線／教会巡り／展望台／夕日）")
+                    lines.append("- 所要時間は？（2〜3時間／半日／1日）")
+                    lines.append("- お車はありますか？（あり／なし）")
+
+                msg = "\n".join(lines)
+                return msg, False, meta
 
     snippets = search_text_files(question, data_dir=DATA_DIR)
     if snippets:
@@ -2336,6 +2422,71 @@ def pick_wait_message(q: str) -> str:
     # 乱数を使わず、内容に応じて安定した揺らぎ
     return WAIT_CANDIDATES[hash(q) % len(WAIT_CANDIDATES)]
 
+# ===== 送信ユーティリティ（長文分割・複数送信） =====
+from linebot.models import TextSendMessage
+
+LINE_MAX_PER_REQUEST = 5         # LINEは1リクエスト最大5メッセージ
+LINE_SAFE_CHARS = 1200           # 1通あたり安全な文字数目安（改行・句点で分割）
+
+def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[str]:
+    """長文を自然な区切り（段落→句点）で2〜複数通に分割。最低1通は返す。"""
+    if not text:
+        return [""]
+    text = text.strip()
+    if len(text) <= chunk_size:
+        return [text]
+
+    parts: List[str] = []
+    rest = text
+    while len(rest) > chunk_size:
+        cut = rest.rfind("\n\n", 0, chunk_size)
+        if cut < int(chunk_size * 0.5):
+            cut = rest.rfind("。", 0, chunk_size)
+        if cut < int(chunk_size * 0.5):
+            cut = chunk_size
+        parts.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        parts.append(rest)
+    return parts
+
+def _reply_or_push_multi(event, texts: List[str]):
+    """複数メッセージでreply→失敗時pushにフォールバック。"""
+    msgs = [TextSendMessage(text=t) for t in texts if t]
+    if not msgs:
+        msgs = [TextSendMessage(text="（空メッセージ）")]
+
+    try:
+        if len(msgs) <= LINE_MAX_PER_REQUEST:
+            line_bot_api.reply_message(event.reply_token, msgs)
+        else:
+            line_bot_api.reply_message(event.reply_token, msgs[:LINE_MAX_PER_REQUEST])
+            target_id = _target_id_from_event(event)
+            batch = msgs[LINE_MAX_PER_REQUEST:]
+            # 以降はpushで残りを送る（5件ずつ）
+            for i in range(0, len(batch), LINE_MAX_PER_REQUEST):
+                line_bot_api.push_message(target_id, batch[i:i+LINE_MAX_PER_REQUEST])
+        return
+    except Exception as e:
+        app.logger.exception("reply multi failed -> fallback to push: %s", e)
+
+    try:
+        target_id = _target_id_from_event(event)
+        if not target_id:
+            return
+        # push（5件ごと）
+        for i in range(0, len(msgs), LINE_MAX_PER_REQUEST):
+            line_bot_api.push_message(target_id, msgs[i:i+LINE_MAX_PER_REQUEST])
+    except Exception as e:
+        app.logger.exception("push multi failed: %s", e)
+
+def _push_multi_by_id(target_id: str, texts: List[str]):
+    """push専用：複数メッセージを5件ごとに送る。"""
+    msgs = [TextSendMessage(text=t) for t in texts if t]
+    if not msgs:
+        msgs = [TextSendMessage(text="（空メッセージ）")]
+    for i in range(0, len(msgs), LINE_MAX_PER_REQUEST):
+        line_bot_api.push_message(target_id, msgs[i:i+LINE_MAX_PER_REQUEST])
 
 # --- 最終回答を計算して push する非同期処理 ---
 def _compute_and_push_async(event, user_message: str):
