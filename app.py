@@ -11,7 +11,7 @@ import logging
 from collections import Counter
 from typing import Any, Dict, List
 from werkzeug.routing import BuildError
-from flask_limiter.util import get_remote_address  # ← これが必要！
+
 
 
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort
@@ -93,10 +93,6 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
 #  Flask / 設定
 # =========================
 app = Flask(__name__)
-if not os.environ.get("FLASK_SECRET_KEY"):
-    raise RuntimeError("FLASK_SECRET_KEY must be set in production")
-if not os.environ.get("OPENAI_API_KEY"):
-    raise RuntimeError("OPENAI_API_KEY must be set in production")
 # LINE は使わない環境では callback を閉じる/無効化でもOK
 
 # --- Jinja2 互換用: 'string' / 'mapping' テストが無い環境向け ---
@@ -120,9 +116,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
 )
 # ==== Rate limit setup (put right after Flask settings) ====
-import os, sys
-from urllib.parse import urlparse
-CSRF_EXEMPT = {"callback", "internal_backup"}
+import os
 from werkzeug.middleware.proxy_fix import ProxyFix
 from flask import request, jsonify
 
@@ -130,50 +124,58 @@ from flask import request, jsonify
 TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "2"))
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
 
+# flask-limiter が無い環境でも落ちないように（util も含めて try）
 try:
     from flask_limiter import Limiter
+    try:
+        from flask_limiter.util import get_remote_address as _limiter_remote
+    except Exception:
+        _limiter_remote = None
 except Exception:
     Limiter = None
+    _limiter_remote = None
 
-def _client_ip():
-    # ProxyFix 適用後は remote_addr が実クライアントIPになる
+def _remote_ip():
+    # ProxyFix 適用後は remote_addr が実クライアントIP
     return (request.remote_addr or "0.0.0.0").strip()
 
 # 文字列は「;」区切りで複数指定可（例: "20/minute;1000/day"）
 ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
 # 例: RATE_STORAGE_URI="redis://:pass@redis:6379/0"
-RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI", "")
-storage_uri = RATE_STORAGE_URI or "memory://"
-limiter = Limiter(app=app, key_func=get_remote_address, storage_uri=storage_uri)
-
+RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI") or "memory://"
 
 if Limiter:
-    limiter = Limiter(
-        app=app,
-        key_func=get_remote_address,
-        storage_uri="memory://",     # Redis等があればそのURI
-        # strategy="fixed-window",    # ← 明示するならこれ。指定しなければ既定で fixed-window
-    )    
+    # ★一度だけ初期化し、必要なら後からデコレータで利用
+    limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URI)
+    limiter.init_app(app)
     limit_deco = limiter.limit
 else:
+    limiter = None
     def limit_deco(*a, **k):
         def _wrap(f): return f
         return _wrap
-    
+        
+LOGIN_LIMITS = os.getenv("LOGIN_LIMITS", "10/minute;100/day")
+
 @app.errorhandler(429)
 def _ratelimit_handler(e):
     return jsonify({"error": "Too Many Requests", "detail": "Rate limit exceeded."}), 429
 # ==== /Rate limit setup ====
 
+# ==== 追加（Flask設定の近くでOK）====
+ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on","yes"}
+# ====================================
+
 
 # ===== ここを Flask 設定の直後に追加 =====
 from urllib.parse import urlparse
 
+CSRF_EXEMPT_ENDPOINTS = set()
+
 # CSRF 保護対象のパス接頭辞（管理／店舗）
 CSRF_PROTECT_PATHS = ("/admin", "/shop")
 
-# 例外にしたいエンドポイント名（関数名が endpoint）
-CSRF_EXEMPT_ENDPOINTS = {"callback", "internal_backup"}
+
 
 CSRF_STRICT = (os.getenv("CSRF_STRICT", "1").lower() in {"1","true","on","yes"})
 
@@ -209,7 +211,12 @@ ADMIN_IP_ALLOWLIST = [
     s.strip() for s in os.getenv("ADMIN_IP_ALLOWLIST", "").replace("\n", ",").split(",")
     if s.strip()
 ]
-_APP_ENV = os.getenv("APP_ENV", "dev").lower()  # dev/staging/production など
+APP_ENV = os.getenv("APP_ENV", "dev").lower()
+if APP_ENV in {"prod", "production"}:
+    if not os.environ.get("FLASK_SECRET_KEY"):
+        raise RuntimeError("FLASK_SECRET_KEY must be set in production")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY must be set in production")
 
 def _load_admin_nets():
     nets = []
@@ -221,13 +228,14 @@ def _load_admin_nets():
     return nets
 
 _ADMIN_NETS = _load_admin_nets()
+# ログ
 app.logger.info("[admin-ip] allowlist=%s  APP_ENV=%s",
-                ", ".join(map(str, _ADMIN_NETS)) or "(empty)", _APP_ENV)
+                ", ".join(map(str, _ADMIN_NETS)) or "(empty)", APP_ENV)
 
 def _admin_ip_ok(ip: str) -> bool:
     # 本番は未設定＝拒否、開発系は未設定でも許可
     if not _ADMIN_NETS:
-        return _APP_ENV not in {"prod", "production"}
+        return APP_ENV not in {"prod", "production"} 
     try:
         ipobj = ipaddress.ip_address(ip)
     except ValueError:
@@ -236,17 +244,19 @@ def _admin_ip_ok(ip: str) -> bool:
 
 @app.before_request
 def _restrict_admin_ip():
+    if not ADMIN_IP_ENFORCE:
+        return  # ← 開発中はここで早期リターン＝IP制限OFF
+
     p = request.path or ""
-    # /admin と /shop（末尾スラ有無どちらも対象）
     if p.startswith("/admin") or p.startswith("/shop"):
-        client_ip = (request.remote_addr or "").strip()  # ProxyFix 適用後はこれが実クライアントIP
+        client_ip = (request.remote_addr or "").strip()
         if not _admin_ip_ok(client_ip):
             abort(403, description="Forbidden: your IP is not allowed for admin/shop.")
 # ===== ここまで =====
 
 @app.route("/_debug/ip")
 def _debug_ip():
-    if _APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
+    if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
         abort(404)
     return jsonify({
         "remote_addr": request.remote_addr,
@@ -377,8 +387,8 @@ def _bootstrap_files_and_admin():
             users = [{
                 "user_id": ADMIN_INIT_USER,
                 "name": "管理者",
-                "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD, method="scrypt"),
-                "role": "admin"
+                "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD),  # 既定=pbkdf2:sha256
+                "role": "admin",
             }]
             with open(USERS_FILE, "w", encoding="utf-8") as f:
                 json.dump(users, f, ensure_ascii=False, indent=2)
@@ -1719,14 +1729,18 @@ def write_full_backup_zip(out_dir: str) -> str:
     filename = f"gotokanko_{ts}.zip"
     out_path = os.path.join(out_dir, filename)
 
-    with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # 単体ファイル
-        if os.path.exists(ENTRIES_FILE):   zf.write(ENTRIES_FILE,  arcname="entries.json")
-        if os.path.exists(SYNONYM_FILE):   zf.write(SYNONYM_FILE,  arcname="synonyms.json")
-        if os.path.exists(NOTICES_FILE):   zf.write(NOTICES_FILE,  arcname="notices.json")
-        if os.path.exists(SHOP_INFO_FILE): zf.write(SHOP_INFO_FILE,arcname="shop_infos.json")
+    # 追加: アプリコードの場所を特定
+    app_root = os.path.dirname(os.path.abspath(__file__))  # app.py があるディレクトリ
+    app_py   = os.path.abspath(__file__)
+    templates_dir = os.path.join(app_root, "templates")
 
-        # data/
+    with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # ---- 既存: データ類 ----
+        if os.path.exists(ENTRIES_FILE):   zf.write(ENTRIES_FILE,   arcname="entries.json")
+        if os.path.exists(SYNONYM_FILE):   zf.write(SYNONYM_FILE,   arcname="synonyms.json")
+        if os.path.exists(NOTICES_FILE):   zf.write(NOTICES_FILE,   arcname="notices.json")
+        if os.path.exists(SHOP_INFO_FILE): zf.write(SHOP_INFO_FILE, arcname="shop_infos.json")
+
         if os.path.exists(DATA_DIR):
             for root, dirs, files in os.walk(DATA_DIR):
                 for fname in files:
@@ -1734,13 +1748,32 @@ def write_full_backup_zip(out_dir: str) -> str:
                     arcname = os.path.relpath(fpath, BASE_DIR)
                     zf.write(fpath, arcname)
 
-        # logs/
         if os.path.exists(LOG_DIR):
             for root, dirs, files in os.walk(LOG_DIR):
                 for fname in files:
                     fpath   = os.path.join(root, fname)
                     arcname = os.path.relpath(fpath, BASE_DIR)
                     zf.write(fpath, arcname)
+
+        # ---- 追加: コードスナップショット ----
+        # app.py 本体
+        try:
+            if os.path.isfile(app_py):
+                zf.write(app_py, arcname="code/app.py")
+        except Exception as e:
+            app.logger.exception("[backup] add app.py failed: %s", e)
+
+        # templates/ ディレクトリ
+        try:
+            if os.path.isdir(templates_dir):
+                for root, dirs, files in os.walk(templates_dir):
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        # code/templates/... というパスで格納
+                        rel   = os.path.relpath(fpath, app_root)
+                        zf.write(fpath, arcname=os.path.join("code", rel))
+        except Exception as e:
+            app.logger.exception("[backup] add templates/ failed: %s", e)
 
     return out_path
 
@@ -1810,6 +1843,7 @@ def internal_backup():
 #  認証
 # =========================
 @app.route("/login", methods=["GET", "POST"])
+@limit_deco(LOGIN_LIMITS)   # ← これを付けるだけ
 def login():
     if request.method == "POST":
         user_id = request.form.get("username")
@@ -3086,9 +3120,12 @@ def handle_message(event):
                 return
 
     # 3) ここに来たら非同期で重い処理（多言語や未ヒット検索など）
+    # 例: handle_message の中、即時返信の分岐を抜けたあと
     wait = pick_wait_message(user_message)
     _reply_or_push(event, wait)
-    threading.Thread(target=_compute_and_push_async, args=(event, user_message), daemon=True).start()
+    threading.Thread(
+        target=_compute_and_push_async, args=(event, user_message), daemon=True
+    ).start()
 
 
 # =========================
