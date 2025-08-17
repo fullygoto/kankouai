@@ -45,15 +45,19 @@ def _split_lines_commas(val: str) -> List[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 # === これを1つだけ残す（重複は削除） ===
-def _split_for_line(text: str, limit: int = None) -> List[str]:
+# 既存をこの定義で置き換え
+def _split_for_line(text: str, limit: int = None, max_len: int = None) -> List[str]:
     """
     LINEの1通上限を超える長文を安全に分割する。
     - 改行優先で詰め、収まらない行はハードスプリット
     - limit 未指定時は LINE_SAFE_CHARS を採用
+    - max_len は互換用エイリアス（limit と同義）
     - どんな入力でも最低1要素返す（空配列にしない）
     """
     s = "" if text is None else str(text)
-    lim = int(limit or LINE_SAFE_CHARS or 3800)
+    # ← ここで limit / max_len / 既定 の優先順を統一
+    eff_limit = limit if limit is not None else max_len
+    lim = int(eff_limit if eff_limit is not None else (LINE_SAFE_CHARS or 3800))
     if lim <= 0:
         return [s]
 
