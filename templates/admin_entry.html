@@ -46,10 +46,16 @@
         }
     </style>
     <script>
+    function toggleSection(id, enable){
+      const sec = document.getElementById(id);
+      if(!sec) return; // 念のためのnullガード
+      sec.style.display = enable ? 'block' : 'none';
+      sec.querySelectorAll('input,select,textarea').forEach(el => { el.disabled = !enable; });
+    }
     function onCategoryChange() {
-        var cat = document.getElementById('category_select').value;
-        document.getElementById('form_tourism').style.display = (cat === '観光') ? 'block' : 'none';
-        document.getElementById('form_shop').style.display = (cat !== '観光') ? 'block' : 'none';
+      const cat = document.getElementById('category_select').value;
+      toggleSection('form_tourism', cat === '観光');
+      toggleSection('form_shop',   cat !== '観光');
     }
     function addExtraRow(targetId) {
         const wrap = document.getElementById(targetId);
@@ -193,7 +199,10 @@
       filterCards(false);
     }
 
-    window.onload = function(){ onCategoryChange(); filterCards(); };
+    window.onload = function(){
+      onCategoryChange();   // 初期表示時に正しく有効/無効化
+      filterCards();        // 一覧の初期フィルタ
+    };
     </script>
 </head>
 <body>
