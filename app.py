@@ -454,6 +454,11 @@ SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 # --- LINE安全対策（ミュート＆全体一時停止）---
 MUTES_FILE = os.path.join(BASE_DIR, "line_mutes.json")          # 会話単位のミュート管理
 GLOBAL_LINE_PAUSE_FILE = os.path.join(BASE_DIR, "line_paused.flag")  # 全体停止フラグ（存在すれば停止）
+# 全体停止中にユーザーの「再開」で動かすか（既定=OFF）
+ALLOW_RESUME_WHEN_PAUSED = os.getenv("ALLOW_RESUME_WHEN_PAUSED", "0").lower() in {"1","true","on","yes"}
+LINE_RETHROW_ON_SEND_ERROR = os.getenv("LINE_RETHROW_ON_SEND_ERROR", "0").lower() in {"1","true","on","yes"}
+
+
 
 # ミュート/再開コマンド（NFKC正規化＋小文字化で比較）
 STOP_COMMANDS = {
@@ -549,6 +554,23 @@ import unicodedata
 def _norm_cmd(s: str) -> str:
     return unicodedata.normalize("NFKC", (s or "")).strip().lower()
 
+def _is_resume_cmd(tnorm: str) -> bool:
+    # 「再開」「解除」「応答再開」や英語、語尾つき（例：再開です／再開！）も拾う
+    if tnorm in RESUME_COMMANDS:
+        return True
+    if tnorm.startswith("再開") or tnorm.startswith("解除") or tnorm.startswith("応答再開"):
+        return True
+    return bool(re.search(r"\b(resume|unmute|start)\b", tnorm))
+
+def _is_stop_cmd(tnorm: str) -> bool:
+    # 「停止」「中止」「やめて」や英語、語尾つきも拾う
+    if tnorm in STOP_COMMANDS:
+        return True
+    if tnorm.startswith("停止") or tnorm.startswith("中止") or tnorm.startswith("やめて"):
+        return True
+    return bool(re.search(r"\b(stop|mute|silence)\b", tnorm))
+
+
 def _load_mutes() -> dict:
     return _safe_read_json(MUTES_FILE, {})
 
@@ -592,28 +614,43 @@ def _line_mute_gate(event, text: str) -> bool:
     返り値:
       True  -> ここで処理完了（以降の通常応答は行わない）
       False -> 通常の応答処理を継続
+    ルール:
+      - 「再開」「解除」等は、全体一時停止中でも必ず処理して応答する
+      - ユーザーの停止/再開コマンドは先に判定
+      - 全体一時停止中は、それ以外は沈黙
     """
-    # 全体停止中は完全サイレンス
-    if _is_global_paused():
-        return True
-
     tid = _line_target_id(event)
     tnorm = _norm_cmd(text)
 
-    # 再開コマンド
-    if tnorm in RESUME_COMMANDS:
+    # ---- 先にユーザーの再開/停止コマンドを判定（全体停止中でも通す）----
+    if _is_resume_cmd(tnorm):
         _set_muted_target(tid, False, who="user")
-        _reply_or_push(event, "了解です。応答を再開します。")
+        if _is_global_paused():
+            if ALLOW_RESUME_WHEN_PAUSED:
+                # 危険性を理解したうえで有効化する運用向け
+                _set_global_paused(False)
+                _reply_or_push(event, "了解です。応答を再開します。（全体一時停止も解除しました）")
+            else:
+                _reply_or_push(
+                    event,
+                    "了解です。この会話のミュートを解除しました。\n"
+                    "※ 現在は『全体一時停止』中のため、管理者が再開するまで返信は止まります。"
+                )
+        else:
+            _reply_or_push(event, "了解です。応答を再開します。")
         return True
 
-    # 停止コマンド
-    if tnorm in STOP_COMMANDS:
+    if _is_stop_cmd(tnorm):
         _set_muted_target(tid, True, who="user")
-        # 停止確認は**1通だけ**出して以降は沈黙
         _reply_or_push(event, "了解しました。この会話での応答を停止します。\n再開したいときは「再開」と送ってください。")
         return True
 
-    # ミュート中は沈黙
+    # ---- ここから通常のガード ----
+    # 全体一時停止中は沈黙（上の再開/停止は例外的に応答済み）
+    if _is_global_paused():
+        return True
+
+    # 会話ミュート中は沈黙
     if _is_muted_target(tid):
         return True
 
@@ -2288,6 +2325,12 @@ def login():
             flash("ユーザーIDまたはパスワードが違います")
     return render_template("login.html")
 
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("ログアウトしました")
+    return redirect(url_for("login"))
+
 
 # =========================
 #  マスター管理（復活＆強化）
@@ -3023,27 +3066,30 @@ def admin_data_files_new():
 def admin_data_files_save():
     if session.get("role") != "admin":
         abort(403)
-    name = (request.form.get("edit_name") or "").strip()
-    enc  = (request.form.get("save_encoding") or "utf-8").strip().lower()
+
+    name = (request.form.get("name") or "").strip()
     content = request.form.get("content") or ""
+    encoding = (request.form.get("encoding") or "utf-8").strip()
+
     safe = _safe_txt_name(name)
     if not safe:
         flash("ファイル名が不正です")
         return redirect(url_for("admin_data_files"))
+
     path = os.path.join(DATA_DIR, safe)
     if not _ensure_in_data_dir(path):
         flash("保存先エラー")
         return redirect(url_for("admin_data_files"))
 
     try:
-        used, warn = _write_text(path, content, encoding=("cp932" if enc == "cp932" else "utf-8"))
-        msg = f"保存しました（encoding: {used}）"
-        if warn:
-            msg += " / " + warn
+        used_enc, note = _write_text(path, content, encoding=encoding)
+        msg = f"保存しました（{used_enc}）"
+        if note:
+            msg += f" / {note}"
         flash(msg)
     except Exception as e:
-        app.logger.exception("save failed")
-        flash("保存に失敗しました: " + str(e))
+        app.logger.exception("[admin_data_files_save] failed: %s", e)
+        flash("保存に失敗しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
 @app.route("/admin/data_files/delete", methods=["POST"])
