@@ -331,6 +331,24 @@ USERS_FILE     = os.path.join(BASE_DIR, "users.json")
 NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
 SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 
+
+# --- LINE安全対策（ミュート＆全体一時停止）---
+MUTES_FILE = os.path.join(BASE_DIR, "line_mutes.json")          # 会話単位のミュート管理
+GLOBAL_LINE_PAUSE_FILE = os.path.join(BASE_DIR, "line_paused.flag")  # 全体停止フラグ（存在すれば停止）
+
+# ミュート/再開コマンド（NFKC正規化＋小文字化で比較）
+STOP_COMMANDS = {
+    "停止", "中止", "応答停止", "配信停止", "やめて",
+    "stop", "stop!", "stop.", "mute", "silence"
+}
+RESUME_COMMANDS = {
+    "再開", "解除", "応答再開", "start", "resume", "unmute"
+}
+
+# 1通原則＋長文だけ分割のための閾値（既に定義済みならそのままでOK）
+LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3800"))
+
+
 # ---- synonyms 進捗＆キュー（追記）----
 PENDING_SYNONYMS_FILE = os.path.join(BASE_DIR, "synonyms_autogen_queue.json")
 
@@ -406,6 +424,82 @@ def _safe_read_json(path: str, default_obj):
         except Exception:
             app.logger.exception(f"[safe_read_json] JSON rewrite failed: {path}")
         return default_obj
+
+import unicodedata
+
+def _norm_cmd(s: str) -> str:
+    return unicodedata.normalize("NFKC", (s or "")).strip().lower()
+
+def _load_mutes() -> dict:
+    return _safe_read_json(MUTES_FILE, {})
+
+def _save_mutes(obj: dict):
+    _atomic_json_dump(MUTES_FILE, obj or {})
+
+def _line_target_id(event) -> str:
+    # 1:1/グループ/ルームのどれでも一意になるIDを返す
+    return getattr(event.source, "user_id", None) \
+        or getattr(event.source, "group_id", None) \
+        or getattr(event.source, "room_id", None) \
+        or "unknown"
+
+def _is_muted_target(target_id: str) -> bool:
+    m = _load_mutes()
+    rec = m.get(target_id)
+    return bool(rec and rec.get("muted"))
+
+def _set_muted_target(target_id: str, muted: bool, who="user"):
+    m = _load_mutes()
+    m[target_id] = m.get(target_id, {})
+    m[target_id]["muted"] = bool(muted)
+    m[target_id]["by"] = who
+    m[target_id]["ts"] = time.time()
+    _save_mutes(m)
+
+def _is_global_paused() -> bool:
+    return os.path.exists(GLOBAL_LINE_PAUSE_FILE)
+
+def _set_global_paused(paused: bool):
+    try:
+        if paused:
+            open(GLOBAL_LINE_PAUSE_FILE, "a", encoding="utf-8").close()
+        else:
+            if os.path.exists(GLOBAL_LINE_PAUSE_FILE):
+                os.remove(GLOBAL_LINE_PAUSE_FILE)
+    except Exception:
+        app.logger.exception("set_global_paused failed")
+
+def _line_mute_gate(event, text: str) -> bool:
+    """
+    返り値:
+      True  -> ここで処理完了（以降の通常応答は行わない）
+      False -> 通常の応答処理を継続
+    """
+    # 全体停止中は完全サイレンス
+    if _is_global_paused():
+        return True
+
+    tid = _line_target_id(event)
+    tnorm = _norm_cmd(text)
+
+    # 再開コマンド
+    if tnorm in RESUME_COMMANDS:
+        _set_muted_target(tid, False, who="user")
+        _reply_or_push(event, "了解です。応答を再開します。")
+        return True
+
+    # 停止コマンド
+    if tnorm in STOP_COMMANDS:
+        _set_muted_target(tid, True, who="user")
+        # 停止確認は**1通だけ**出して以降は沈黙
+        _reply_or_push(event, "了解しました。この会話での応答を停止します。\n再開したいときは「再開」と送ってください。")
+        return True
+
+    # ミュート中は沈黙
+    if _is_muted_target(tid):
+        return True
+
+    return False
 
 
 # 初回ブートストラップ
@@ -3093,53 +3187,60 @@ def _split_for_line(text: str, limit: int) -> List[str]:
 from linebot.models import TextSendMessage
 from linebot.exceptions import LineBotApiError
 
+_LINE_THROTTLE = {}  # ループ暴走の最終安全弁（会話ごとの最短インターバル）
+
+def _split_for_line(text: str, limit: int) -> List[str]:
+    if len(text or "") <= limit:
+        return [text or ""]
+    seps = ["\n\n", "\n", "。", "！", "？", ".", " "]
+    out, rest = [], text
+    while len(rest) > limit:
+        cut = -1
+        for s in seps:
+            pos = rest.rfind(s, 0, limit)
+            cut = max(cut, pos)
+        if cut <= 0:
+            cut = limit
+        out.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        out.append(rest)
+    return out
+
 def _reply_or_push(event, text: str):
-    """
-    原則1通。LINE_SAFE_CHARSを超えるときだけ自動分割して複数通。
-    """
+    # 全体停止フラグ／対象ミュートなら完全サイレンス
+    if _is_global_paused():
+        return
+    tid = _line_target_id(event)
+    if _is_muted_target(tid):
+        return
+
+    # 最低インターバル（0.7秒）で暴走抑制
+    now = time.time()
+    last = _LINE_THROTTLE.get(tid, 0)
+    if now - last < 0.7:
+        return
+    _LINE_THROTTLE[tid] = now
+
+    chunks = _split_for_line(text or "", LINE_SAFE_CHARS)
+    msgs = [TextSendMessage(text=c) for c in chunks]
+
+    # 1通に収まれば1通だけ、超えるときだけ複数通
     try:
-        chunks = _split_for_line(text, LINE_SAFE_CHARS)
+        line_bot_api.reply_message(event.reply_token, msgs if len(msgs) > 1 else msgs[0])
+        return
+    except Exception:
+        pass  # pushへ
 
-        # 原則1通の方針：収まるなら1通、超えた場合のみ複数通
-        if len(chunks) == 1:
-            try:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks[0]))
-                return
-            except LineBotApiError:
-                pass  # push にフォールバック
-            except Exception:
-                pass
-
-            target_id = getattr(event.source, "user_id", None) \
-                     or getattr(event.source, "group_id", None) \
-                     or getattr(event.source, "room_id", None)
-            if target_id:
-                line_bot_api.push_message(target_id, TextSendMessage(text=chunks[0]))
-            else:
-                app.logger.error("No target id found to push message")
-            return
-
-        # 超過時のみ分割送信（reply で一括送信 → 失敗なら push）
-        msgs = [TextSendMessage(text=c) for c in chunks]
-        try:
-            # reply_message は配列を受け付ける
-            line_bot_api.reply_message(event.reply_token, msgs)
-            return
-        except LineBotApiError:
-            pass
-        except Exception:
-            pass
-
-        target_id = getattr(event.source, "user_id", None) \
-                 or getattr(event.source, "group_id", None) \
-                 or getattr(event.source, "room_id", None)
-        if target_id:
-            line_bot_api.push_message(target_id, msgs)
+    try:
+        if tid:
+            line_bot_api.push_message(tid, msgs if len(msgs) > 1 else msgs[0])
         else:
-            app.logger.error("No target id found to push message")
-
+            app.logger.error("No target id to push message")
+    except LineBotApiError as e:
+        app.logger.exception("Line push failed: %s", e)
     except Exception as e:
-        app.logger.exception("Unexpected error in _reply_or_push: %s", e)
+        app.logger.exception("Unexpected push error: %s", e)
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -3276,6 +3377,10 @@ def _compute_and_push_async(event, user_message: str):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
+
+    # ★ここを先頭に追加：停止/再開コマンド・ミュート中は以降の処理を行わない
+    if _line_mute_gate(event, text):
+        return
 
     # 0) 天気は即返信
     weather_reply, weather_hit = get_weather_reply(user_message)
