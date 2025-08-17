@@ -44,16 +44,20 @@ def _split_lines_commas(val: str) -> List[str]:
     parts = re.split(r'[\n,]+', str(val))
     return [p.strip() for p in parts if p and p.strip()]
 
-def _split_for_line(text: str, limit: int = None) -> List[str]:
+# === これを1つだけ残す（重複は削除） ===
+# 既存をこの定義で置き換え
+# これで既存の max_len=... 呼び出しも通ります
+def _split_for_line(text: str, limit: int = None, max_len: int = None, **_ignored):
     """
     LINEの1通上限を超える長文を安全に分割する。
-    - まず改行単位で詰め、収まらない行はハードスプリット
+    - 改行優先で詰め、収まらない行はハードスプリット
     - limit 未指定時は LINE_SAFE_CHARS を採用
+    - max_len は互換用エイリアス（limit と同義）
+    - どんな入力でも最低1要素返す（空配列にしない）
     """
-    if text is None:
-        return [""]
-    s = str(text)
-    lim = int(limit or LINE_SAFE_CHARS or 3800)
+    s = "" if text is None else str(text)
+    eff = limit if limit is not None else max_len
+    lim = int(eff if eff is not None else (LINE_SAFE_CHARS or 3800))
     if lim <= 0:
         return [s]
 
@@ -65,14 +69,13 @@ def _split_for_line(text: str, limit: int = None) -> List[str]:
         if buf:
             out.append(buf.rstrip("\n"))
             buf = ""
-        # 行自体が長すぎる場合は強制分割
         while len(line) > lim:
             out.append(line[:lim].rstrip("\n"))
             line = line[lim:]
         buf = line
-    if buf:
-        out.append(buf.rstrip("\n"))
-    return out or [""]
+    if buf or not out:
+        out.append((buf or s).rstrip("\n"))
+    return out
 
 
 def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
@@ -160,6 +163,14 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 # リバースプロキシ配下で正しい IP/スキームを取る
 TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "2"))
+
+# 早期に APP_ENV を取得（このブロック内だけで使う）
+_APP_ENV_EARLY = os.getenv("APP_ENV", "dev").lower()
+
+# 本番で ProxyHop が 0 以下は危険なのでブロック
+if _APP_ENV_EARLY in {"prod", "production"} and TRUSTED_PROXY_HOPS <= 0:
+    raise RuntimeError("TRUSTED_PROXY_HOPS must be >= 1 in production")
+
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
 
 # flask-limiter が無い環境でも落ちないように（util も含めて try）
@@ -182,6 +193,10 @@ ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
 # 例: RATE_STORAGE_URI="redis://:pass@redis:6379/0"
 RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI") or "memory://"
 
+# 本番で memory:// は共有されず危険なので禁止
+if _APP_ENV_EARLY in {"prod", "production"} and (not RATE_STORAGE_URI or RATE_STORAGE_URI.startswith("memory://")):
+    raise RuntimeError("In production, set RATE_STORAGE_URI to a shared backend (e.g., redis://...)")
+
 if Limiter:
     # ★一度だけ初期化し、必要なら後からデコレータで利用
     limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URI)
@@ -192,7 +207,7 @@ else:
     def limit_deco(*a, **k):
         def _wrap(f): return f
         return _wrap
-        
+
 LOGIN_LIMITS = os.getenv("LOGIN_LIMITS", "10/minute;100/day")
 
 @app.errorhandler(429)
@@ -349,6 +364,48 @@ try:
     if _line_enabled():
         line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
         handler = WebhookHandler(LINE_CHANNEL_SECRET)
+        # --- 送信の重複抑止 & リクエスト世代管理 -----------------------------------
+        from collections import defaultdict, deque
+        import re, time  # 念のため
+
+        # 「ユーザーごとの現在世代」。新しいユーザー発話が来たら+1する
+        REQUEST_GENERATION: dict[str, int] = defaultdict(int)
+
+        # 「直近に送った本文」を保持して同一本文の連投を防ぐ（10分・最大12件）
+        _SENT_HISTORY: dict[str, deque] = defaultdict(lambda: deque(maxlen=12))
+        _SENT_TTL_SEC = 10 * 60  # 10分
+
+        def _text_key(s: str) -> str:
+            return re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+        def _was_sent_recent(target_id: str, text: str, *, mark: bool) -> bool:
+            """直近10分に同一本文を送っていれば True。mark=True なら今回送った扱いに記録。"""
+            now = time.time()
+            dq = _SENT_HISTORY[target_id]
+            # 期限切れを掃除
+            while dq and now - dq[0][1] > _SENT_TTL_SEC:
+                dq.popleft()
+            key = _text_key(text)
+            hit = any(k == key for k, _ in dq)
+            if mark and not hit:
+                dq.append((key, now))
+            return hit
+
+        # 待ちメッセージ（未定義だと NameError になるので用意）
+        WAIT_MESSAGES = (
+            "少しお待ちください…",
+            "調べています…",
+            "候補をまとめています…",
+            "もう少々お待ちください…",
+        )
+
+        def pick_wait_message(seed: str | None = None) -> str:
+            if not WAIT_MESSAGES:
+                return "少しお待ちください…"
+            idx = (abs(hash(seed)) if seed else 0) % len(WAIT_MESSAGES)
+            return WAIT_MESSAGES[idx]
+
+        # ---------------------------------------------------------------------------
         app.logger.info("LINE enabled")
     else:
         line_bot_api = None
@@ -363,10 +420,14 @@ except Exception as e:
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
 def _reply_or_push(event, text: str):
     """長文は自動分割して返信。LINE未設定環境ではログのみ。"""
-    parts = _split_for_line(text, limit=LINE_SAFE_CHARS)
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
+
+    parts = _split_for_line(text, LINE_SAFE_CHARS)
+    if not parts:
+        parts = [""]
+
     messages = [TextSendMessage(text=p) for p in parts]
     try:
         reply_token = getattr(event, "reply_token", None)
@@ -377,6 +438,8 @@ def _reply_or_push(event, text: str):
             if tid:
                 line_bot_api.push_message(tid, messages)
     except LineBotApiError as e:
+        global SEND_FAIL_COUNT
+        SEND_FAIL_COUNT += 1
         app.logger.exception("LINE send failed: %s", e)
 
 
@@ -395,6 +458,11 @@ SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 # --- LINE安全対策（ミュート＆全体一時停止）---
 MUTES_FILE = os.path.join(BASE_DIR, "line_mutes.json")          # 会話単位のミュート管理
 GLOBAL_LINE_PAUSE_FILE = os.path.join(BASE_DIR, "line_paused.flag")  # 全体停止フラグ（存在すれば停止）
+# 全体停止中にユーザーの「再開」で動かすか（既定=OFF）
+ALLOW_RESUME_WHEN_PAUSED = os.getenv("ALLOW_RESUME_WHEN_PAUSED", "0").lower() in {"1","true","on","yes"}
+LINE_RETHROW_ON_SEND_ERROR = os.getenv("LINE_RETHROW_ON_SEND_ERROR", "0").lower() in {"1","true","on","yes"}
+
+
 
 # ミュート/再開コマンド（NFKC正規化＋小文字化で比較）
 STOP_COMMANDS = {
@@ -490,6 +558,23 @@ import unicodedata
 def _norm_cmd(s: str) -> str:
     return unicodedata.normalize("NFKC", (s or "")).strip().lower()
 
+def _is_resume_cmd(tnorm: str) -> bool:
+    # 「再開」「解除」「応答再開」や英語、語尾つき（例：再開です／再開！）も拾う
+    if tnorm in RESUME_COMMANDS:
+        return True
+    if tnorm.startswith("再開") or tnorm.startswith("解除") or tnorm.startswith("応答再開"):
+        return True
+    return bool(re.search(r"\b(resume|unmute|start)\b", tnorm))
+
+def _is_stop_cmd(tnorm: str) -> bool:
+    # 「停止」「中止」「やめて」や英語、語尾つきも拾う
+    if tnorm in STOP_COMMANDS:
+        return True
+    if tnorm.startswith("停止") or tnorm.startswith("中止") or tnorm.startswith("やめて"):
+        return True
+    return bool(re.search(r"\b(stop|mute|silence)\b", tnorm))
+
+
 def _load_mutes() -> dict:
     return _safe_read_json(MUTES_FILE, {})
 
@@ -533,28 +618,43 @@ def _line_mute_gate(event, text: str) -> bool:
     返り値:
       True  -> ここで処理完了（以降の通常応答は行わない）
       False -> 通常の応答処理を継続
+    ルール:
+      - 「再開」「解除」等は、全体一時停止中でも必ず処理して応答する
+      - ユーザーの停止/再開コマンドは先に判定
+      - 全体一時停止中は、それ以外は沈黙
     """
-    # 全体停止中は完全サイレンス
-    if _is_global_paused():
-        return True
-
     tid = _line_target_id(event)
     tnorm = _norm_cmd(text)
 
-    # 再開コマンド
-    if tnorm in RESUME_COMMANDS:
+    # ---- 先にユーザーの再開/停止コマンドを判定（全体停止中でも通す）----
+    if _is_resume_cmd(tnorm):
         _set_muted_target(tid, False, who="user")
-        _reply_or_push(event, "了解です。応答を再開します。")
+        if _is_global_paused():
+            if ALLOW_RESUME_WHEN_PAUSED:
+                # 危険性を理解したうえで有効化する運用向け
+                _set_global_paused(False)
+                _reply_or_push(event, "了解です。応答を再開します。（全体一時停止も解除しました）")
+            else:
+                _reply_or_push(
+                    event,
+                    "了解です。この会話のミュートを解除しました。\n"
+                    "※ 現在は『全体一時停止』中のため、管理者が再開するまで返信は止まります。"
+                )
+        else:
+            _reply_or_push(event, "了解です。応答を再開します。")
         return True
 
-    # 停止コマンド
-    if tnorm in STOP_COMMANDS:
+    if _is_stop_cmd(tnorm):
         _set_muted_target(tid, True, who="user")
-        # 停止確認は**1通だけ**出して以降は沈黙
         _reply_or_push(event, "了解しました。この会話での応答を停止します。\n再開したいときは「再開」と送ってください。")
         return True
 
-    # ミュート中は沈黙
+    # ---- ここから通常のガード ----
+    # 全体一時停止中は沈黙（上の再開/停止は例外的に応答済み）
+    if _is_global_paused():
+        return True
+
+    # 会話ミュート中は沈黙
     if _is_muted_target(tid):
         return True
 
@@ -930,6 +1030,74 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(log, ensure_ascii=False) + "\n")
 
+def _messages_to_prompt(messages):
+    # role付きメッセージを1本のテキストにまとめる
+    if isinstance(messages, str):
+        return messages
+    lines = []
+    for m in messages:
+        role = m.get("role","user")
+        content = m.get("content","")
+        lines.append(f"{role.upper()}: {content}")
+    return "\n".join(lines)
+
+def openai_chat(model, messages, **kwargs):
+    params = dict(kwargs)
+    mot = (
+        params.pop("max_output_tokens", None)
+        or params.pop("max_completion_tokens", None)
+        or params.pop("max_tokens", None)
+    )
+    temp = params.pop("temperature", None)
+
+    def _to_prompt(msgs):
+        if isinstance(msgs, str):
+            return msgs
+        lines = []
+        for m in msgs:
+            role = m.get("role","user")
+            content = m.get("content","")
+            lines.append(f"{role.upper()}: {content}")
+        return "\n".join(lines)
+
+    use_responses = model.startswith(("gpt-5",))
+    prompt = _to_prompt(messages)
+
+    if use_responses:
+        try:
+            rparams = {"model": model, "input": prompt}
+            if mot is not None:
+                rparams["max_output_tokens"] = mot
+            resp = client.responses.create(**rparams)
+            return getattr(resp, "output_text", "") or ""
+        except Exception as e:
+            print("[OpenAI error - responses]", e)
+            return ""
+
+    try:
+        chat_params = {}
+        if mot is not None:
+            chat_params["max_tokens"] = mot
+        if temp is not None:
+            chat_params["temperature"] = temp
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role":"user","content":prompt}],
+            **chat_params,
+        )
+        return resp.choices[0].message.content
+    except Exception as e1:
+        print("[OpenAI error - chat.completions]", e1)
+        try:
+            rparams = {"model": model, "input": prompt}
+            if mot is not None:
+                rparams["max_output_tokens"] = mot
+            resp = client.responses.create(**rparams)
+            return getattr(resp, "output_text", "") or ""
+        except Exception as e2:
+            print("[OpenAI error - responses fallback]", e2)
+            return ""
+
 # OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
     """
@@ -1035,6 +1203,40 @@ def translate_text(text: str, target_lang: str) -> str:
         )
     return out or text
 
+# =========================
+#  スモールトーク／使い方（スタブ）
+# =========================
+def smalltalk_or_help_reply(text: str):
+    """
+    TODO: 後で本実装に差し替え。
+    ここでは '使い方' などの簡単なキーワードだけ返す簡易版。
+    未ヒットなら None を返す（ハンドラ側で通常フロー継続）。
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    # かんたんヘルプ
+    help_kw = ["使い方", "ヘルプ", "help", "つかいかた"]
+    if any(k in t for k in help_kw):
+        return (
+            "使い方のヒント:\n"
+            "・「天気」→各エリアの天気リンク\n"
+            "・「フェリー」「飛行機」→運行状況リンク\n"
+            "・スポット名や「教会」「うどん」などで検索できます"
+        )
+
+    # 軽いあいづち（必要に応じて増減OK）
+    smalltalk = {
+        "こんにちは": "こんにちは！ご用件をどうぞ。",
+        "ありがとう": "どういたしまして！",
+        "はじめまして": "はじめまして。五島のことなら任せてください！",
+    }
+    for k, v in smalltalk.items():
+        if k in t:
+            return v
+
+    return None
 
 # =========================
 #  お知らせ・データI/O
@@ -2195,6 +2397,12 @@ def login():
             flash("ユーザーIDまたはパスワードが違います")
     return render_template("login.html")
 
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("ログアウトしました")
+    return redirect(url_for("login"))
+
 
 # =========================
 #  マスター管理（復活＆強化）
@@ -2502,6 +2710,226 @@ def admin_synonyms_autogen():
 def admin_synonyms_auto():
     return admin_synonyms_autogen()
 
+# ===== ここから貼り付け（既存の /callback 定義を丸ごと置換OK）=====
+
+# 直近のコールバック状況を可視化するメモリ変数
+LAST_CALLBACK_AT = None
+CALLBACK_HIT_COUNT = 0
+LAST_SIGNATURE_BAD = 0
+LAST_LINE_ERROR = ""
+# ← 追加：送信側の失敗も可視化
+LAST_SEND_ERROR = ""
+SEND_ERROR_COUNT = 0
+SEND_FAIL_COUNT = 0 
+
+@app.route("/_debug/line_status")
+def _debug_line_status():
+    """
+    LINEの稼働状況を確認するデバッグ用エンドポイント。
+    本番では X-Debug-Token が一致しないと 404 にする。
+    """
+    if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
+        abort(404)
+
+    try:
+        muted_count = len(_load_mutes())
+    except Exception:
+        muted_count = -1
+
+    return jsonify({
+        "enabled": bool(_line_enabled() and handler),
+        "have_access_token": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        "have_channel_secret": bool(LINE_CHANNEL_SECRET),
+        "handler_inited": bool(handler is not None),
+        "paused": _is_global_paused(),
+        "muted_count": muted_count,
+        "last_callback_at": LAST_CALLBACK_AT,
+        "callback_hit_count": CALLBACK_HIT_COUNT,
+        "invalid_signature_count": LAST_SIGNATURE_BAD,
+        "send_fail_count": SEND_FAIL_COUNT,
+        "last_error": LAST_LINE_ERROR,
+        "send_error_count": SEND_ERROR_COUNT,
+        "last_send_error": LAST_SEND_ERROR,
+        "webhook_url_hint": "/callback (POST)",  # LINEコンソールにこのパスで登録されているか確認
+    })
+
+@app.route("/callback", methods=["POST"])
+def callback():
+    """
+    LINE Webhook 受け口。可視化のためログとカウンタを追加。
+    - キー未設定や初期化失敗時: 200 'LINE disabled' を返す（LINE側の再試行抑止）
+    - 署名不正: 400 'NG'（Channel secret違いが濃厚）
+    """
+    global LAST_CALLBACK_AT, CALLBACK_HIT_COUNT, LAST_LINE_ERROR, LAST_SIGNATURE_BAD
+    CALLBACK_HIT_COUNT += 1
+    LAST_CALLBACK_AT = datetime.datetime.utcnow().isoformat() + "Z"
+
+    # キー未設定や初期化失敗
+    if not _line_enabled() or not handler:
+        app.logger.warning("[LINE] callback hit but LINE disabled (check env vars / init)")
+        return "LINE disabled", 200
+
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        LAST_SIGNATURE_BAD += 1
+        app.logger.warning("[LINE] Invalid signature. Check LINE_CHANNEL_SECRET / webhook origin.")
+        return "NG", 400
+    except Exception as e:
+        LAST_LINE_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("[LINE] handler error")
+        # エラーでも 200 を返すとLINE側が再試行しないので 500 を返す
+        return "NG", 500
+
+    return "OK", 200
+
+# 管理者用：任意ユーザーに push して疎通確認（userId はログやLINEの開発者ツールで取得）
+@app.route("/admin/line/test_push", methods=["POST","GET"])
+@login_required
+def admin_line_test_push():
+    if session.get("role") != "admin":
+        abort(403)
+    to = (request.values.get("to") or "").strip()
+    text = (request.values.get("text") or "テスト配信です。").strip()
+
+    if not _line_enabled() or not line_bot_api:
+        flash("LINEが無効です（環境変数を確認）")
+        return redirect(url_for("admin_entry"))
+
+    if not to:
+        flash("to（userId）が指定されていません")
+        return redirect(url_for("admin_entry"))
+
+    try:
+        parts = _split_for_line(text, LINE_SAFE_CHARS)
+        msgs = [TextSendMessage(text=p) for p in parts]
+        line_bot_api.push_message(to, msgs)
+        flash("push 送信を実行しました")
+    except LineBotApiError as e:
+        global LAST_SEND_ERROR, SEND_ERROR_COUNT
+        SEND_ERROR_COUNT += 1
+        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed: %s", e)
+        if LINE_RETHROW_ON_SEND_ERROR:
+            # /callback 側まで例外を伝播させ、500 を返して気付けるようにする
+            raise
+    return redirect(url_for("admin_entry"))
+# ===== ここまで貼り付け =====
+
+# --- 最低限のDB回答（ヒット/複数/未ヒット） ---
+def _answer_from_entries_min(question: str):
+    q = (question or "").strip()
+    if not q:
+        return "（内容が読み取れませんでした）", False
+
+    es = load_entries()
+    ql = q.lower()
+    hits = []
+    for e in es:
+        hay = " ".join(filter(None, [
+            e.get("title",""),
+            e.get("desc",""),
+            e.get("address",""),
+            " ".join(e.get("tags",[]) or []),
+            " ".join(e.get("areas",[]) or []),
+        ])).lower()
+        # ★修正：冗長な all([...]) を排除し、素直に部分一致
+        if ql and (ql in hay):
+            hits.append(e)
+
+    if not hits:
+        refine, _meta = build_refine_suggestions(q)
+        return "該当が見つかりませんでした。\n" + refine, False
+
+    if len(hits) == 1:
+        e = hits[0]
+        areas = " / ".join(e.get("areas", []) or "") or ""
+        tags  = ", ".join(e.get("tags", []) or "") or ""
+        lines = [
+            f"",
+            (e.get("desc","") or "").strip(),
+        ]
+        if e.get("address"):    lines.append(f"住所：{e['address']}")
+        if e.get("open_hours"): lines.append(f"営業時間：{e['open_hours']}")
+        if e.get("holiday"):    lines.append(f"休み：{e['holiday']}")
+        if e.get("tel"):        lines.append(f"電話：{e['tel']}")
+        if e.get("map"):        lines.append(f"地図：{e['map']}")
+        if areas:               lines.append(f"エリア：{areas}")
+        if tags:                lines.append(f"タグ：{tags}")
+        return "\n".join([s for s in lines if s]), True
+
+    # 複数ヒット
+    lines = ["候補が複数見つかりました。気になるものはありますか？"]
+    for i, e in enumerate(hits[:8], 1):
+        area = " / ".join(e.get("areas", []) or "") or ""
+        suffix = f"（{area}）" if area else ""
+        lines.append(f"{i}. {e.get('title','')}{suffix}")
+    if len(hits) > 8:
+        lines.append(f"…ほか {len(hits)-8} 件")
+
+    refine, _meta = build_refine_suggestions(q)
+    return "\n".join(lines) + "\n\n" + refine, True
+
+
+# --- メッセージ受信 ---
+# --- メッセージ受信 ---
+if handler:
+    @handler.add(MessageEvent, message=TextMessage)
+    def handle_message(event):
+        try:
+            text = getattr(event.message, "text", "") or ""
+        except Exception:
+            text = ""
+
+        # ミュート/一時停止
+        try:
+            if _line_mute_gate(event, text):
+                return
+        except Exception:
+            app.logger.exception("_line_mute_gate failed")
+
+        # 即答リンク（天気/航路）
+        try:
+            w, ok = get_weather_reply(text)
+            if ok and w:
+                _reply_or_push(event, w)
+                save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
+                return
+            t, ok = get_transport_reply(text)
+            if ok and t:
+                _reply_or_push(event, t)
+                save_qa_log(text, t, source="line", hit_db=False, extra={"kind":"transport"})
+                return
+        except Exception:
+            app.logger.exception("quick link reply failed")
+
+        # スモールトーク/ヘルプ
+        try:
+            st = smalltalk_or_help_reply(text)
+            if st:
+                _reply_or_push(event, st)
+                save_qa_log(text, st, source="line", hit_db=False, extra={"kind":"smalltalk"})
+                return
+        except Exception:
+            app.logger.exception("smalltalk failed")
+
+        # DB優先の簡易回答
+        try:
+            ans, hit = _answer_from_entries_min(text)
+            _reply_or_push(event, ans)
+            save_qa_log(text, ans, source="line", hit_db=hit)
+        except Exception as e:
+            app.logger.exception("answer flow failed: %s", e)
+            fallback, _ = build_refine_suggestions(text)
+            _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
+            save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
+else:
+    # LINE無効時のダミー（何もしない）
+    def handle_message(event):
+        return
 
 @app.route("/admin/manual")
 @login_required
@@ -2647,41 +3075,31 @@ def admin_data_files_upload():
         if not safe:
             flash(f"スキップ: 不正なファイル名 {f.filename}")
             continue
-        dst = os.path.join(DATA_DIR, safe)
-        if not _ensure_in_data_dir(dst):
-            flash(f"スキップ: 保存先エラー {safe}")
-            continue
 
-        data = f.read()
-        if not data:
-            flash(f"スキップ: 空ファイル {safe}")
-            continue
-
-        # ★ここから追加：同名回避の連番付与
+        # 同名回避の連番付与
         base, ext = os.path.splitext(safe)
         candidate = safe
         i = 1
         while os.path.exists(os.path.join(DATA_DIR, candidate)):
             candidate = f"{base} ({i}){ext}"
             i += 1
+
         dst = os.path.join(DATA_DIR, candidate)
-        # ★ここまで追加
+        if not _ensure_in_data_dir(dst):
+            flash(f"スキップ: 保存先エラー {candidate}")
+            continue
 
-        # 文字コードを自動判定
-        text = None
-        for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "utf-16"):
-            try:
-                text = data.decode(enc)
-                break
-            except UnicodeDecodeError:
-                pass
-        if text is None:
-            text = data.decode("cp932", errors="replace")
+        data = f.read()
+        if not data:
+            flash(f"スキップ: 空ファイル {candidate}")
+            continue
 
-        _write_text(dst, text, encoding="utf-8")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(dst, "wb") as wf:
+            wf.write(data)
         count += 1
 
-    flash(f"アップロード完了：{count} 件")
+    flash(f"{count} ファイルをアップロードしました")
     return redirect(url_for("admin_data_files"))
 
 @app.route("/admin/data_files/new", methods=["POST"])
@@ -2694,15 +3112,18 @@ def admin_data_files_new():
     if not safe:
         flash("ファイル名が不正です（拡張子は .txt / .md のみ）")
         return redirect(url_for("admin_data_files"))
+
     path = os.path.join(DATA_DIR, safe)
     if not _ensure_in_data_dir(path):
-        flash("保存先エラー")
+        flash("保存先が不正です")
         return redirect(url_for("admin_data_files"))
+
     if os.path.exists(path):
         flash("同名ファイルが既にあります")
-        return redirect(url_for("admin_data_files", edit=safe))
+        return redirect(url_for("admin_data_files"))
+
     _write_text(path, "", encoding="utf-8")
-    flash("新規作成しました")
+    flash("新規ファイルを作成しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
 @app.route("/admin/data_files/save", methods=["POST"])
@@ -2710,27 +3131,30 @@ def admin_data_files_new():
 def admin_data_files_save():
     if session.get("role") != "admin":
         abort(403)
-    name = (request.form.get("edit_name") or "").strip()
-    enc  = (request.form.get("save_encoding") or "utf-8").strip().lower()
+
+    name = (request.form.get("name") or "").strip()
     content = request.form.get("content") or ""
+    encoding = (request.form.get("encoding") or "utf-8").strip()
+
     safe = _safe_txt_name(name)
     if not safe:
         flash("ファイル名が不正です")
         return redirect(url_for("admin_data_files"))
+
     path = os.path.join(DATA_DIR, safe)
     if not _ensure_in_data_dir(path):
         flash("保存先エラー")
         return redirect(url_for("admin_data_files"))
 
     try:
-        used, warn = _write_text(path, content, encoding=("cp932" if enc == "cp932" else "utf-8"))
-        msg = f"保存しました（encoding: {used}）"
-        if warn:
-            msg += " / " + warn
+        used_enc, note = _write_text(path, content, encoding=encoding)
+        msg = f"保存しました（{used_enc}）"
+        if note:
+            msg += f" / {note}"
         flash(msg)
     except Exception as e:
-        app.logger.exception("save failed")
-        flash("保存に失敗しました: " + str(e))
+        app.logger.exception("[admin_data_files_save] failed: %s", e)
+        flash("保存に失敗しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
 @app.route("/admin/data_files/delete", methods=["POST"])
@@ -2825,106 +3249,156 @@ https://www.goto-sangyo.co.jp/
 その他の航路や詳細は各リンクをご覧ください。
 """
 
+# === 天気・交通（フェリー／飛行機）応答 ===
 def get_weather_reply(question):
     """天気リンクを返す。ENABLE_FOREIGN_LANG=0 のときは常に日本語で返答。"""
     weather_keywords = [
-        "天気", "天候", "気象", "weather", "天気予報", "雨", "晴", "曇", "降水", "気温", "forecast",
-        "天氣", "天气", "氣象", "温度", "陰", "晴朗", "預報"
+        "天気", "天候", "気象", "天気予報", "雨", "晴", "曇", "降水", "気温",
+        "weather", "forecast", "temperature", "rain", "sunny", "cloud",
+        "天氣", "天气", "氣象", "預報", "温度", "陰", "晴朗"
     ]
     if not question:
         return None, False
 
-    lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
     if not any(kw in question for kw in weather_keywords):
         return None, False
 
+    lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
+
+    # エリア名が含まれていれば個別リンクを返す
     for entry in WEATHER_LINKS:
         if entry["area"] in question:
             if lang == "zh-Hant":
-                return f"【{entry['area']}天氣】\n最新資訊：\n{entry['url']}\n（可查看今日、週預報與降雨雷達）", True
+                return f"【{entry['area']}天氣】\n最新資訊：\n{entry['url']}\n（可查看今日與一週預報）", True
             if lang == "en":
                 return f"[{entry['area']} weather]\nLatest forecast:\n{entry['url']}", True
             return f"【{entry['area']}の天気】\n最新の{entry['area']}の天気情報はこちら\n{entry['url']}", True
 
+    # エリア未特定 → 主要リンク一覧
     if lang == "zh-Hant":
-        reply = "【五島列島的主要天氣連結】\n"
+        reply = "【五島列島・主要天氣連結】\n"
         for e in WEATHER_LINKS:
             reply += f"{e['area']}: {e['url']}\n"
         return reply.strip(), True
+
     if lang == "en":
         reply = "Main weather links for the Goto Islands:\n"
         for e in WEATHER_LINKS:
             reply += f"{e['area']}: {e['url']}\n"
         return reply.strip(), True
 
-    reply = "【五島列島の主な天気情報リンク】\n"
+    # 日本語
+    reply = "【五島の主な天気リンク】\n"
     for e in WEATHER_LINKS:
         reply += f"{e['area']}: {e['url']}\n"
     return reply.strip(), True
 
-def get_transport_reply(question: str):
-    """飛行機・船の運行状況を、天気と同様に即答＆多言語で返す。"""
+
+def get_transport_reply(question):
+    """
+    フェリー／高速船／飛行機（航空便）の運行・運航リンクを返す。
+    - フェリー関連語のみ → フェリー情報
+    - 飛行機関連語のみ → 飛行機情報
+    - 両方 or あいまい → 両方まとめて
+    """
     if not question:
         return None, False
 
-    # 言語判定（多言語を有効にしていない場合は日本語で固定）
+    ferry_keywords = [
+        "フェリー", "船", "ジェットフォイル", "高速船", "運航", "運行", "ダイヤ",
+        "九州商船", "野母商船", "五島産業汽船",
+        "ferry", "boat", "ship", "schedule", "status",
+        "渡輪", "船班", "航班", "航行", "運行資訊"
+    ]
+    flight_keywords = [
+        "飛行機", "航空", "空路", "便", "フライト", "空港", "到着", "出発", "欠航", "遅延",
+        "ANA", "オリエンタルエアブリッジ", "ORC", "五島つばき空港", "福江空港",
+        "flight", "airport", "arrival", "departure", "delay", "cancel",
+        "航班", "機場", "起飛", "到達", "延誤", "取消"
+    ]
+
+    has_ferry = any(kw in question for kw in ferry_keywords)
+    has_flight = any(kw in question for kw in flight_keywords)
+
+    if not (has_ferry or has_flight):
+        return None, False
+
     lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
 
-    # キーワード
-    ferry_kw_ja = ["フェリー", "船", "運航", "ジェットフォイル", "太古", "欠航", "ダイヤ"]
-    ferry_kw_zh = ["渡輪", "船", "航線", "噴射船", "停航", "班次"]
-    ferry_kw_en = ["ferry", "jetfoil", "ship", "sailing", "service", "cancel", "status", "schedule"]
+    # --- 航空便（飛行機）案内（言語別） ---
+    # ※ リンクは公式の運航情報/トップへの汎用リンク。必要に応じて詳細URLに差し替えてください。
+    if lang == "zh-Hant":
+        flight_text = (
+            "【五島椿機場（福江）航班資訊】\n"
+            "・Oriental Air Bridge（長崎／福岡 ⇄ 五島）\n"
+            "https://www.orc-air.co.jp/\n"
+            "・ANA（與 ORC 共同營運的班次）\n"
+            "https://www.ana.co.jp/\n"
+            "最新的延誤／取消請查看各公司「運航資訊」頁面。"
+        )
+        ferry_text = (
+            "【長崎—五島 航線・運行資訊】\n"
+            "・野母商船（太古輪）\n"
+            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+            "・九州商船（渡輪／噴射船）\n"
+            "https://kyusho.co.jp/status\n"
+            "・五島產業汽船（渡輪）\n"
+            "https://www.goto-sangyo.co.jp/\n"
+            "詳情請見各連結。"
+        )
+    elif lang == "en":
+        flight_text = (
+            "[Goto Tsubaki Airport (Fukue) – flight info]\n"
+            "- Oriental Air Bridge (Nagasaki / Fukuoka ⇄ Goto)\n"
+            "https://www.orc-air.co.jp/\n"
+            "- ANA (code-share with ORC)\n"
+            "https://www.ana.co.jp/\n"
+            "For delays/cancellations, check each airline's status page."
+        )
+        ferry_text = (
+            "[Nagasaki — Goto ferry status]\n"
+            "- Nomo Shosen (Taiko ferry)\n"
+            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+            "- Kyushu Shosen (Ferry / Jetfoil)\n"
+            "https://kyusho.co.jp/status\n"
+            "- Goto Sangyo Kisen (Ferry)\n"
+            "https://www.goto-sangyo.co.jp/\n"
+            "For details, check each link."
+        )
+    else:
+        # 日本語
+        flight_text = (
+            "【五島つばき空港（福江）・運航情報】\n"
+            "・オリエンタルエアブリッジ（長崎／福岡 ⇄ 五島）\n"
+            "https://www.orc-air.co.jp/\n"
+            "・ANA（ORCとの共同運航便を含む）\n"
+            "https://www.ana.co.jp/\n"
+            "最新の欠航・遅延は各社の「運航情報」ページをご確認ください。"
+        )
+        # 既存の FERRY_INFO を優先利用（無い場合はフォールバック文）
+        ferry_text = FERRY_INFO if 'FERRY_INFO' in globals() else (
+            "【長崎ー五島航路 運行状況】\n"
+            "・野母商船「フェリー太古」運航情報\n"
+            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+            "・九州商船「フェリー・ジェットフォイル」運航情報\n"
+            "https://kyusho.co.jp/status\n"
+            "・五島産業汽船「フェリー」運航情報\n"
+            "https://www.goto-sangyo.co.jp/\n"
+            "その他の航路や詳細は各リンクをご覧ください。"
+        )
 
-    flight_kw_ja = ["飛行機", "空港", "航空便", "欠航", "到着", "出発", "フライト", "遅延"]
-    flight_kw_zh = ["飛機", "機場", "航班", "延誤", "取消", "起飛", "到達"]
-    flight_kw_en = ["flight", "airport", "delay", "cancel", "arrival", "departure", "status"]
+    # 返却ロジック
+    if has_ferry and has_flight:
+        return f"{ferry_text}\n\n{flight_text}", True
+    if has_ferry:
+        return ferry_text, True
+    return flight_text, True
 
-    q = question
+def get_weather_reply(text: str):
+    return ("", False)
 
-    ferry_hit = any(k in q for k in ferry_kw_ja) or any(k in q for k in ferry_kw_zh) or any(k in q.lower() for k in ferry_kw_en)
-    flight_hit = any(k in q for k in flight_kw_ja) or any(k in q for k in flight_kw_zh) or any(k in q.lower() for k in flight_kw_en)
-
-    # まず船（キーワードが被る「欠航」等は船優先）
-    if ferry_hit:
-        if lang == "zh-Hant":
-            text = (
-                "【長崎—五島 航線運行資訊】\n"
-                "・野母商船「太古號」運行資訊\n"
-                "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-                "・九州商船（渡輪／噴射船）運行資訊\n"
-                "https://kyusho.co.jp/status\n"
-                "・五島產業汽船（渡輪）運行資訊\n"
-                "https://www.goto-sangyo.co.jp/\n"
-                "其他航線請見各連結。"
-            )
-        elif lang == "en":
-            text = (
-                "[Nagasaki ⇄ Goto Ferry/Jetfoil Status]\n"
-                "• Nomo Shipping “Ferry Taiko” status:\n"
-                "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-                "• Kyushu Shosen (Ferry / Jetfoil) status:\n"
-                "https://kyusho.co.jp/status\n"
-                "• Goto Sangyo Kisen (Ferry) status:\n"
-                "https://www.goto-sangyo.co.jp/\n"
-                "For other routes, please check the links above."
-            )
-        else:
-            # 既存の日本語定型をそのまま使用
-            text = FERRY_INFO
-        return text, True
-
-    # 次に飛行機
-    if flight_hit:
-        if lang == "zh-Hant":
-            text = "五島椿機場的最新航班資訊請見官方網站：\n▶ https://www.fukuekuko.jp/"
-        elif lang == "en":
-            text = "Latest flight status for Goto Tsubaki Airport (official site):\n▶ https://www.fukuekuko.jp/"
-        else:
-            text = "五島つばき空港の最新の運行状況は、公式Webサイトでご確認ください。\n▶ https://www.fukuekuko.jp/"
-        return text, True
-
-    return None, False
-
+def get_transport_reply(text: str):
+    return ("", False)
 
 SMALLTALK_PATTERNS = {
     "greet": ["おはよう", "こんにちは", "こんばんは", "やあ", "はじめまして"],
@@ -3339,70 +3813,41 @@ def _split_for_line(text: str, limit: int) -> List[str]:
         out.append(rest)
     return out
 
-def _reply_or_push(event, text: str):
-    if not _line_enabled():
+# === 返信ユーティリティ（重複抑止＋世代ガード版） ===========================
+def _reply_or_push(event, text: str, *, reqgen: int | None = None):
+    """
+    返信トークンがあれば reply、無ければ push。
+    - 同一本文の連投を10分間抑止
+    - reqgen 指定時は「ユーザー世代が変わっていたら送信中断」
+    """
+    if not text:
         return
-    # 全体停止／ミュート中は沈黙
-    if _is_global_paused():
-        return
-    tid = _line_target_id(event)
-    if _is_muted_target(tid):
-        return
+    target_id = _line_target_id(event)
 
-    # 最低インターバル（0.7秒）で暴走抑制
-    now = time.time()
-    last = _LINE_THROTTLE.get(tid, 0)
-    if now - last < 0.7:
-        return
-    _LINE_THROTTLE[tid] = now
+    def stale() -> bool:
+        return (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen)
 
-    chunks = _split_for_line(text or "", LINE_SAFE_CHARS)
-    msgs = [TextSendMessage(text=c) for c in chunks]
+    chunks = _split_for_line(text, limit=4900)
+    first = True
+    for ch in chunks:
+        if stale():
+            app.logger.info("drop stale reply/push (gen changed) uid=%s", target_id)
+            break
+        # 直近重複の抑止
+        if _was_sent_recent(target_id, ch, mark=False):
+            app.logger.info("skip dup message uid=%s", target_id)
+            continue
+        try:
+            if first and getattr(event, "reply_token", None):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ch))
+            else:
+                line_bot_api.push_message(target_id, TextSendMessage(text=ch))
+            _was_sent_recent(target_id, ch, mark=True)
+        except LineBotApiError as e:
+            app.logger.warning("reply/push error: %s", e)
+        first = False
+# ========================================================================
 
-    # reply_token があれば優先して reply、無ければ push
-    reply_token = getattr(event, "reply_token", None)
-    try:
-        if reply_token:
-            line_bot_api.reply_message(reply_token, msgs if len(msgs) > 1 else msgs[0])
-            return
-    except Exception:
-        pass  # reply失敗 → pushへ
-
-    try:
-        if tid:
-            line_bot_api.push_message(tid, msgs if len(msgs) > 1 else msgs[0])
-        else:
-            app.logger.error("No target id to push message")
-    except LineBotApiError as e:
-        app.logger.exception("Line push failed: %s", e)
-    except Exception as e:
-        app.logger.exception("Unexpected push error: %s", e)
-
-@app.route("/callback", methods=["POST"])
-def callback():
-    # LINE未設定 or 全体停止中は即200で何もしない
-    if not _line_enabled() or _is_global_paused():
-        return ("OK", 200)
-    
-    # ★ 緊急停止中は一切処理せず 200 を即返す（LINE側の再送を防ぐ）
-    if _is_global_paused():
-        return ("paused", 200)
-
-    # 設定未投入なら即200で返す（ログ汚染回避）
-    if not (LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET):
-        return ("OK", 200)
-
-    signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError as e:
-        app.logger.warning(f"LINE invalid signature: {e}")
-        return ("OK", 200)
-    except Exception as e:
-        app.logger.exception("LINE handler error")
-        return ("OK", 200)
-    return ("OK", 200)
 
 # --- LINE 送信先IDの取得ヘルパー ---
 def _target_id_from_event(event):
@@ -3455,46 +3900,76 @@ def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[s
         parts.append(rest)
     return parts
 
-def _reply_or_push_multi(event, texts: List[str]):
-    """複数メッセージでreply→失敗時pushにフォールバック。"""
-    msgs = [TextSendMessage(text=t) for t in texts if t]
-    if not msgs:
-        msgs = [TextSendMessage(text="（空メッセージ）")]
-
-    try:
-        if len(msgs) <= LINE_MAX_PER_REQUEST:
-            line_bot_api.reply_message(event.reply_token, msgs)
-        else:
-            line_bot_api.reply_message(event.reply_token, msgs[:LINE_MAX_PER_REQUEST])
-            target_id = _target_id_from_event(event)
-            batch = msgs[LINE_MAX_PER_REQUEST:]
-            # 以降はpushで残りを送る（5件ずつ）
-            for i in range(0, len(batch), LINE_MAX_PER_REQUEST):
-                line_bot_api.push_message(target_id, batch[i:i+LINE_MAX_PER_REQUEST])
+# === LINE 返信ユーティリティ（差し替え） ===
+def _reply_or_push(event, text: str):
+    """長文は自動分割して返信。reply は最大5通に収め、溢れた分は push で送る。"""
+    if not _line_enabled() or not line_bot_api:
+        app.logger.info("[LINE disabled] would send: %r", text)
         return
-    except Exception as e:
-        app.logger.exception("reply multi failed -> fallback to push: %s", e)
+
+    parts = [p for p in _split_for_line(text, limit=LINE_SAFE_CHARS) if (p or "").strip()]
+    if not parts:
+        parts = [""]  # 空でも最低1通
+
+    MAX_PER_CALL = 5
+    reply_token = getattr(event, "reply_token", None)
 
     try:
-        target_id = _target_id_from_event(event)
-        if not target_id:
-            return
-        # push（5件ごと）
-        for i in range(0, len(msgs), LINE_MAX_PER_REQUEST):
-            line_bot_api.push_message(target_id, msgs[i:i+LINE_MAX_PER_REQUEST])
-    except Exception as e:
-        app.logger.exception("push multi failed: %s", e)
+        if reply_token:
+            head = [TextSendMessage(text=p) for p in parts[:MAX_PER_CALL]]
+            line_bot_api.reply_message(reply_token, head)
 
-def _push_multi_by_id(target_id: str, texts: List[str]):
-    """push専用：複数メッセージを5件ごとに送る。"""
-    msgs = [TextSendMessage(text=t) for t in texts if t]
-    if not msgs:
-        msgs = [TextSendMessage(text="（空メッセージ）")]
-    for i in range(0, len(msgs), LINE_MAX_PER_REQUEST):
-        line_bot_api.push_message(target_id, msgs[i:i+LINE_MAX_PER_REQUEST])
+            # 残りがあれば push（reply_token は1回しか使えない）
+            rest = parts[MAX_PER_CALL:]
+            if rest:
+                tid = _line_target_id(event)
+                if tid:
+                    for i in range(0, len(rest), MAX_PER_CALL):
+                        chunk = [TextSendMessage(text=p) for p in rest[i:i+MAX_PER_CALL]]
+                        line_bot_api.push_message(tid, chunk)
+        else:
+            # 直接 push（グループやルーム含む）
+            tid = _line_target_id(event)
+            if tid:
+                for i in range(0, len(parts), MAX_PER_CALL):
+                    chunk = [TextSendMessage(text=p) for p in parts[i:i+MAX_PER_CALL]]
+                    line_bot_api.push_message(tid, chunk)
+
+    except LineBotApiError as e:
+        global SEND_FAIL_COUNT, LAST_SEND_ERROR, SEND_ERROR_COUNT
+        SEND_FAIL_COUNT += 1
+        SEND_ERROR_COUNT += 1
+        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed")
+        if LINE_RETHROW_ON_SEND_ERROR:
+            raise
+
+def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
+    """複数テキストを順に push。重複抑止＋世代ガード付き。"""
+    if not texts:
+        return
+    for t in texts:
+        if not t:
+            continue
+        for ch in _split_for_line(t, max_len=4900):
+            # 世代ガード：新しいユーザー発話が来て世代が進んでいれば以降は送らない
+            if (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen):
+                app.logger.info("abort stale push uid=%s", target_id)
+                return
+            # 直近重複の抑止
+            if _was_sent_recent(target_id, ch, mark=False):
+                app.logger.info("skip dup push uid=%s", target_id)
+                continue
+            try:
+                line_bot_api.push_message(target_id, TextSendMessage(text=ch))
+                _was_sent_recent(target_id, ch, mark=True)
+            except LineBotApiError as e:
+                app.logger.warning("push error: %s", e)
+                return
+            time.sleep(0.1)
 
 # --- 最終回答を計算して push する非同期処理 ---
-def _compute_and_push_async(event, user_message: str):
+def _compute_and_push_async(event, user_message: str, reqgen=None):
     from linebot.models import TextSendMessage
     target_id = _target_id_from_event(event)
     if not target_id:
@@ -3510,105 +3985,13 @@ def _compute_and_push_async(event, user_message: str):
 
         save_qa_log(user_message, answer, source="line", hit_db=hit_db, extra=meta)
         texts = _split_for_messaging(answer)
-        _push_multi_by_id(target_id, texts)
+        _push_multi_by_id(target_id, texts, reqgen=reqgen)
     except Exception as e:
         app.logger.exception("compute/push failed: %s", e)
         try:
             line_bot_api.push_message(target_id, TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"))
         except Exception:
             pass
-
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_message = event.message.text
-
-    # ★ここを先頭に追加：停止/再開コマンド・ミュート中は以降の処理を行わない
-    if _line_mute_gate(event, text):
-        return
-
-    # 0) 天気は即返信
-    weather_reply, weather_hit = get_weather_reply(user_message)
-    if weather_hit:
-        save_qa_log(user_message, weather_reply, source="line", hit_db=True, extra={"kind": "weather"})
-        _reply_or_push(event, weather_reply)
-        return
-
-    # 0.5) 船/飛行機も即返信
-    trans_reply, trans_hit = get_transport_reply(user_message)
-    if trans_hit:
-        save_qa_log(user_message, trans_reply, source="line", hit_db=True, extra={"kind": "transport"})
-        _reply_or_push(event, trans_reply)
-        return
-
-    # 日本語かどうか（多言語は非同期に回す）
-    orig_lang = detect_lang_simple(user_message)
-    is_ja = (orig_lang == "ja") or (not ENABLE_FOREIGN_LANG)
-
-    # 1) 雑談/使い方は即返信（日本語のみ）
-    if is_ja:
-        st = smalltalk_or_help_reply(user_message)
-        if st:
-            save_qa_log(user_message, st, source="line", hit_db=True, extra={"kind": "smalltalk"})
-            _reply_or_push(event, st)
-            return
-
-        # 2) DBヒットを先に当てる
-        hits = []
-        try:
-            hits = find_entry_info(user_message)
-        except Exception:
-            hits = []
-
-        if hits:
-            if len(hits) == 1:
-                ans = format_entry_detail(hits[0])
-                save_qa_log(user_message, ans, source="line", hit_db=True, extra={"kind":"db_single"})
-                _reply_or_push(event, ans)
-                return
-            else:
-                # 要約トライ → ダメなら短い候補一覧＋深掘り
-                try:
-                    snippets = [
-                        f"タイトル: {e.get('title','')}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n"
-                        for e in hits[:10]
-                    ]
-                    ai_ans = ai_summarize(snippets, user_message, model=OPENAI_MODEL_PRIMARY) or ""
-                    if len(ai_ans.strip()) >= 30:
-                        save_qa_log(user_message, ai_ans, source="line", hit_db=True, extra={"kind":"db_multi_summarized"})
-                        _reply_or_push(event, ai_ans)
-                        return
-                except Exception:
-                    pass
-
-                lines = ["候補が複数見つかりました。気になるものはありますか？"]
-                for i, e in enumerate(hits[:8], 1):
-                    name = (e.get("title") or "（無題）").strip()
-                    areas = ", ".join(e.get("areas") or [])
-                    lines.append(f"{i}. {name}" + (f"（{areas}）" if areas else ""))
-
-                if len(hits) > 8:
-                    lines.append(f"…ほか {len(hits)-8} 件")
-
-                try:
-                    suggest_text, _ = build_refine_suggestions(user_message)
-                    if suggest_text:
-                        lines += ["", suggest_text]
-                except Exception:
-                    pass
-
-                msg = "\n".join(lines)
-                save_qa_log(user_message, msg, source="line", hit_db=False, extra={"kind":"db_multi_list"})
-                _reply_or_push(event, msg)
-                return
-
-    # 3) ここに来たら非同期で重い処理（多言語や未ヒット検索など）
-    # 例: handle_message の中、即時返信の分岐を抜けたあと
-    wait = pick_wait_message(user_message)
-    _reply_or_push(event, wait)
-    threading.Thread(
-        target=_compute_and_push_async, args=(event, user_message), daemon=True
-    ).start()
 
 
 # =========================
