@@ -18,6 +18,11 @@
   .note{font-size:12px;color:var(--muted);margin-left:8px}
   .flash{background:#ecfeff;border:1px solid #bae6fd;color:#075985;padding:8px 10px;border-radius:8px;margin:8px 0}
 
+  /* simple card */
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0;box-shadow:0 4px 16px #c6d4e71a}
+  .card h2{margin:0 0 8px;font-size:16px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
   /* 横スクロール用：テーブルをラップして overflow-x */
   .table-wrap{overflow-x:auto;background:var(--panel);border-radius:12px;box-shadow:0 4px 16px #c6d4e71a}
   table{border-collapse:collapse;min-width:1900px;width:100%}
@@ -43,6 +48,10 @@
   .jsonbox textarea{width:100%;min-height:220px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
   summary{cursor:pointer}
   .muted{opacity:.45}
+
+  /* preview list */
+  .preview{max-height:240px;overflow:auto;border:1px dashed #cbd5e1;border-radius:8px;padding:8px;background:#fafcff}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef6ff;color:#2563eb;font-size:12px;margin-left:6px}
 </style>
 <script>
 function addRow(){
@@ -66,6 +75,41 @@ function onCategoryChange(sel){
 window.addEventListener('DOMContentLoaded', ()=>{
   document.querySelectorAll('select[name="category[]"]').forEach(onCategoryChange);
 });
+
+/* ===== 重複統合（AI最適化）プレビュー ===== */
+async function previewDedupe(){
+  const box = document.getElementById('dedupe_preview');
+  const meta = document.getElementById('dedupe_meta');
+  box.innerHTML = '読み込み中…';
+  meta.textContent = '';
+  try{
+    const r = await fetch('{{ url_for("admin_entries_dedupe") }}', {credentials:'same-origin'});
+    const j = await r.json();
+    if(!j || !j.ok){
+      box.innerHTML = 'プレビュー取得に失敗しました。';
+      return;
+    }
+    const stats = j.stats || {};
+    meta.innerHTML =
+      '重複グループ: <b>'+ (stats.merged_groups||0) +'</b> / 統合後件数: <b>'+ (stats.total_after||'-') +'</b>'
+      + ' <span class="pill">削除予定: '+ (stats.removed||0) +'</span>';
+
+    const list = (j.preview||[]).map((p,i)=>(
+      (i+1)+'. '+ escapeHtml(p.title||'(無題)') +'  <span class="muted">（'+ (p.merged_from||1) +' 件を統合）</span>'
+    ));
+    box.innerHTML = list.length ? '<ul><li>'+ list.join('</li><li>') +'</li></ul>' : '重複は見つかりませんでした。';
+  }catch(e){
+    box.innerHTML = 'プレビュー通信エラー: '+ e;
+  }
+}
+function runDedupe(){
+  if(confirm('タイトル重複をAI最適化で統合します。よろしいですか？（この操作は元に戻せません。事前にバックアップを推奨）')){
+    document.getElementById('dedupe_form').submit();
+  }
+}
+function escapeHtml(s){
+  return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
 </script>
 </head>
 <body>
@@ -85,6 +129,20 @@ window.addEventListener('DOMContentLoaded', ()=>{
       {% endfor %}
     {% endif %}
   {% endwith %}
+
+  <!-- ▼ タイトル重複のAI最適化統合（プレビュー＆実行） -->
+  <div class="card">
+    <h2>タイトル重複の統合（AI最適化）</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn ghost" type="button" onclick="previewDedupe()">👀 プレビューを取得</button>
+      <form id="dedupe_form" method="post" action="{{ url_for('admin_entries_dedupe') }}">
+        <button class="btn" type="button" onclick="runDedupe()">✨ 統合を実行</button>
+      </form>
+      <span class="note">※ 説明文はAIで最適化（環境変数 <code>DEDUPE_USE_AI=1</code> 時）。実行前に <a class="btn ghost" href="{{ url_for('admin_backup') }}">バックアップ</a> を推奨。</span>
+    </div>
+    <div id="dedupe_meta" class="note" style="margin-bottom:6px"></div>
+    <div id="dedupe_preview" class="preview">（プレビュー未取得）</div>
+  </div>
 
   <!-- ▼ CSV 取り込み（既存に追加） -->
   <form class="csvbar" method="post" action="{{ url_for('admin_entries_import_csv') }}" enctype="multipart/form-data">
