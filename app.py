@@ -24,6 +24,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 # LINE Bot関連
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage  
+from linebot.models import QuickReply, QuickReplyButton, MessageAction
 from linebot.exceptions import LineBotApiError, InvalidSignatureError   
 
 from openai import OpenAI
@@ -93,6 +94,21 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
 #  Flask / 設定
 # =========================
 app = Flask(__name__)
+
+# --- LINE 応答制御フラグ（環境変数で上書き可） ---
+# 1質問=原則1通（長文で収まらない場合のみ自動分割）
+LINE_SINGLE_REPLY = os.getenv("LINE_SINGLE_REPLY", "1").lower() in {"1", "true", "on", "yes"}
+
+# まずエリアを尋ねる（曖昧ワードのとき）
+LINE_ASK_AREA_FIRST = os.getenv("LINE_ASK_AREA_FIRST", "1").lower() in {"1", "true", "on", "yes"}
+
+# 1通に収める目安の文字数（超過時のみ分割）
+try:
+    LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3800"))
+except ValueError:
+    LINE_SAFE_CHARS = 3800
+
+
 # LINE は使わない環境では callback を閉じる/無効化でもOK
 
 # --- Jinja2 互換用: 'string' / 'mapping' テストが無い環境向け ---
@@ -3044,35 +3060,86 @@ def admin_unhit_report():
     return render_template("admin_unhit_report.html", unhit_report=report)
 
 
+def _split_for_line(text: str, limit: int) -> List[str]:
+    """
+    LINEに送る本文を limit 以下に“だけ”分割する。
+    改行/句点/スペース優先で自然に切る。必要な時だけ複数通。
+    """
+    t = text or ""
+    if len(t) <= limit:
+        return [t]
+
+    chunks = []
+    rest = t
+    seps = ["\n\n", "\n", "。", "！", "？", ".", " "]
+
+    while len(rest) > limit:
+        cut = -1
+        for sep in seps:
+            pos = rest.rfind(sep, 0, limit)
+            cut = max(cut, pos)
+        if cut <= 0:
+            cut = limit  # きれいに切れない場合は強制カット
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+
+    if rest:
+        chunks.append(rest)
+    return chunks
+
 # =========================
 #  LINE Webhook
 # =========================
+from linebot.models import TextSendMessage
+from linebot.exceptions import LineBotApiError
+
 def _reply_or_push(event, text: str):
-    """replyが失敗（Invalid reply token等）したらpushに切替える"""
-    from linebot.models import TextSendMessage
-    from linebot.exceptions import LineBotApiError
-
+    """
+    原則1通。LINE_SAFE_CHARSを超えるときだけ自動分割して複数通。
+    """
     try:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
-        return
-    except LineBotApiError as e:
-        app.logger.exception("LineBotApiError on reply: %s", e)
-    except Exception as e:
-        app.logger.exception("Unexpected error on reply: %s", e)
+        chunks = _split_for_line(text, LINE_SAFE_CHARS)
 
-    # replyに失敗 → pushで再送
-    try:
+        # 原則1通の方針：収まるなら1通、超えた場合のみ複数通
+        if len(chunks) == 1:
+            try:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=chunks[0]))
+                return
+            except LineBotApiError:
+                pass  # push にフォールバック
+            except Exception:
+                pass
+
+            target_id = getattr(event.source, "user_id", None) \
+                     or getattr(event.source, "group_id", None) \
+                     or getattr(event.source, "room_id", None)
+            if target_id:
+                line_bot_api.push_message(target_id, TextSendMessage(text=chunks[0]))
+            else:
+                app.logger.error("No target id found to push message")
+            return
+
+        # 超過時のみ分割送信（reply で一括送信 → 失敗なら push）
+        msgs = [TextSendMessage(text=c) for c in chunks]
+        try:
+            # reply_message は配列を受け付ける
+            line_bot_api.reply_message(event.reply_token, msgs)
+            return
+        except LineBotApiError:
+            pass
+        except Exception:
+            pass
+
         target_id = getattr(event.source, "user_id", None) \
                  or getattr(event.source, "group_id", None) \
                  or getattr(event.source, "room_id", None)
         if target_id:
-            line_bot_api.push_message(target_id, TextSendMessage(text=text))
+            line_bot_api.push_message(target_id, msgs)
         else:
             app.logger.error("No target id found to push message")
-    except LineBotApiError as e:
-        app.logger.exception("LineBotApiError on push: %s", e)
+
     except Exception as e:
-        app.logger.exception("Unexpected error on push: %s", e)
+        app.logger.exception("Unexpected error in _reply_or_push: %s", e)
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -3118,7 +3185,7 @@ def pick_wait_message(q: str) -> str:
 from linebot.models import TextSendMessage
 
 LINE_MAX_PER_REQUEST = 5         # LINEは1リクエスト最大5メッセージ
-LINE_SAFE_CHARS = 1200           # 1通あたり安全な文字数目安（改行・句点で分割）
+LINE_SAFE_CHARS = 3800           # 1通あたり安全な文字数目安（改行・句点で分割）
 
 def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[str]:
     """長文を自然な区切り（段落→句点）で2〜複数通に分割。最低1通は返す。"""
