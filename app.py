@@ -349,6 +349,52 @@ try:
     if _line_enabled():
         line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
         handler = WebhookHandler(LINE_CHANNEL_SECRET)
+        # --- 送信の重複抑止 & リクエスト世代管理 -----------------------------------
+        from collections import defaultdict, deque
+        import re, time  # 念のため
+
+        # 「ユーザーごとの現在世代」。新しいユーザー発話が来たら+1する
+        REQUEST_GENERATION: dict[str, int] = defaultdict(int)
+
+        # 「直近に送った本文」を保持して同一本文の連投を防ぐ（10分・最大12件）
+        _SENT_HISTORY: dict[str, deque] = defaultdict(lambda: deque(maxlen=12))
+        _SENT_TTL_SEC = 10 * 60  # 10分
+
+        def _text_key(s: str) -> str:
+            return re.sub(r"\s+", " ", (s or "")).strip().lower()
+
+        def _was_sent_recent(target_id: str, text: str, *, mark: bool) -> bool:
+            """直近10分に同一本文を送っていれば True。mark=True なら今回送った扱いに記録。"""
+            now = time.time()
+            dq = _SENT_HISTORY[target_id]
+            # 期限切れを掃除
+            while dq and now - dq[0][1] > _SENT_TTL_SEC:
+                dq.popleft()
+            key = _text_key(text)
+            hit = any(k == key for k, _ in dq)
+            if mark and not hit:
+                dq.append((key, now))
+            return hit
+
+        # 待ちメッセージ（未定義だと NameError になるので用意）
+        WAIT_MESSAGES = (
+            "少しお待ちください…",
+            "調べています…",
+            "候補をまとめています…",
+            "もう少々お待ちください…",
+        )
+
+        def pick_wait_message(seed: str | None = None) -> str:
+            if not WAIT_MESSAGES:
+                return "少しお待ちください…"
+            idx = (abs(hash(seed)) if seed else 0) % len(WAIT_MESSAGES)
+            return WAIT_MESSAGES[idx]
+
+        def _split_for_line(s: str, max_len: int = 4900) -> list[str]:
+            """LINEの1メッセージ上限に収まるよう分割"""
+            s = s if isinstance(s, str) else str(s)
+            return [s[i:i+max_len] for i in range(0, len(s), max_len)] if s else []
+        # ---------------------------------------------------------------------------
         app.logger.info("LINE enabled")
     else:
         line_bot_api = None
@@ -3339,44 +3385,40 @@ def _split_for_line(text: str, limit: int) -> List[str]:
         out.append(rest)
     return out
 
-def _reply_or_push(event, text: str):
-    if not _line_enabled():
+# === 返信ユーティリティ（重複抑止＋世代ガード版） ===========================
+def _reply_or_push(event, text: str, *, reqgen: int | None = None):
+    """
+    返信トークンがあれば reply、無ければ push。
+    - 同一本文の連投を10分間抑止
+    - reqgen 指定時は「ユーザー世代が変わっていたら送信中断」
+    """
+    if not text:
         return
-    # 全体停止／ミュート中は沈黙
-    if _is_global_paused():
-        return
-    tid = _line_target_id(event)
-    if _is_muted_target(tid):
-        return
+    target_id = _line_target_id(event)
 
-    # 最低インターバル（0.7秒）で暴走抑制
-    now = time.time()
-    last = _LINE_THROTTLE.get(tid, 0)
-    if now - last < 0.7:
-        return
-    _LINE_THROTTLE[tid] = now
+    def stale() -> bool:
+        return (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen)
 
-    chunks = _split_for_line(text or "", LINE_SAFE_CHARS)
-    msgs = [TextSendMessage(text=c) for c in chunks]
-
-    # reply_token があれば優先して reply、無ければ push
-    reply_token = getattr(event, "reply_token", None)
-    try:
-        if reply_token:
-            line_bot_api.reply_message(reply_token, msgs if len(msgs) > 1 else msgs[0])
-            return
-    except Exception:
-        pass  # reply失敗 → pushへ
-
-    try:
-        if tid:
-            line_bot_api.push_message(tid, msgs if len(msgs) > 1 else msgs[0])
-        else:
-            app.logger.error("No target id to push message")
-    except LineBotApiError as e:
-        app.logger.exception("Line push failed: %s", e)
-    except Exception as e:
-        app.logger.exception("Unexpected push error: %s", e)
+    chunks = _split_for_line(text, max_len=4900)
+    first = True
+    for ch in chunks:
+        if stale():
+            app.logger.info("drop stale reply/push (gen changed) uid=%s", target_id)
+            break
+        # 直近重複の抑止
+        if _was_sent_recent(target_id, ch, mark=False):
+            app.logger.info("skip dup message uid=%s", target_id)
+            continue
+        try:
+            if first and getattr(event, "reply_token", None):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ch))
+            else:
+                line_bot_api.push_message(target_id, TextSendMessage(text=ch))
+            _was_sent_recent(target_id, ch, mark=True)
+        except LineBotApiError as e:
+            app.logger.warning("reply/push error: %s", e)
+        first = False
+# ========================================================================
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -3485,16 +3527,32 @@ def _reply_or_push_multi(event, texts: List[str]):
     except Exception as e:
         app.logger.exception("push multi failed: %s", e)
 
-def _push_multi_by_id(target_id: str, texts: List[str]):
-    """push専用：複数メッセージを5件ごとに送る。"""
-    msgs = [TextSendMessage(text=t) for t in texts if t]
-    if not msgs:
-        msgs = [TextSendMessage(text="（空メッセージ）")]
-    for i in range(0, len(msgs), LINE_MAX_PER_REQUEST):
-        line_bot_api.push_message(target_id, msgs[i:i+LINE_MAX_PER_REQUEST])
+def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
+    """複数テキストを順に push。重複抑止＋世代ガード付き。"""
+    if not texts:
+        return
+    for t in texts:
+        if not t:
+            continue
+        for ch in _split_for_line(t, max_len=4900):
+            # 世代ガード：新しいユーザー発話が来て世代が進んでいれば以降は送らない
+            if (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen):
+                app.logger.info("abort stale push uid=%s", target_id)
+                return
+            # 直近重複の抑止
+            if _was_sent_recent(target_id, ch, mark=False):
+                app.logger.info("skip dup push uid=%s", target_id)
+                continue
+            try:
+                line_bot_api.push_message(target_id, TextSendMessage(text=ch))
+                _was_sent_recent(target_id, ch, mark=True)
+            except LineBotApiError as e:
+                app.logger.warning("push error: %s", e)
+                return
+            time.sleep(0.1)
 
 # --- 最終回答を計算して push する非同期処理 ---
-def _compute_and_push_async(event, user_message: str):
+def _compute_and_push_async(event, user_message: str, reqgen=None):
     from linebot.models import TextSendMessage
     target_id = _target_id_from_event(event)
     if not target_id:
@@ -3510,7 +3568,7 @@ def _compute_and_push_async(event, user_message: str):
 
         save_qa_log(user_message, answer, source="line", hit_db=hit_db, extra=meta)
         texts = _split_for_messaging(answer)
-        _push_multi_by_id(target_id, texts)
+        _push_multi_by_id(target_id, texts, reqgen=reqgen)
     except Exception as e:
         app.logger.exception("compute/push failed: %s", e)
         try:
@@ -3609,9 +3667,11 @@ def handle_message(event):
     # 3) ここに来たら非同期で重い処理（多言語や未ヒット検索など）
     # 例: handle_message の中、即時返信の分岐を抜けたあと
     wait = pick_wait_message(user_message)
-    _reply_or_push(event, wait)
+    _reply_or_push(event, wait, reqgen=reqgen)
     threading.Thread(
-        target=_compute_and_push_async, args=(event, user_message), daemon=True
+        target=_compute_and_push_async,
+        args=(event, user_message, reqgen),
+        daemon=True
     ).start()
 
 
