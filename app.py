@@ -3522,7 +3522,11 @@ def _compute_and_push_async(event, user_message: str):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
-
+    # ★Hotfix: text 未定義エラー対策（非テキストでも空文字にする）
+    try:
+        text = (getattr(getattr(event, "message", object()), "text", "") or "").strip()
+    except Exception:
+        text = ""
     # ★ここを先頭に追加：停止/再開コマンド・ミュート中は以降の処理を行わない
     if _line_mute_gate(event, text):
         return
