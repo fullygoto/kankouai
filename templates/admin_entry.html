@@ -218,7 +218,7 @@
         <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
         <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
         <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-        <a href="{{ url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
+        <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
         <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
         <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
@@ -226,6 +226,18 @@
             <input type="file" name="backup_zip" accept=".zip" style="display:inline;">
             <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
         </form>
+        <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
+          <button class="btn" type="submit" style="background:#e35;"
+                  onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">
+            [LINE応答 一時停止]
+          </button>
+        </form>
+        <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
+          <button class="btn ghost" type="submit">[再開]</button>
+        </form>
+        {% if global_paused %}
+          <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">LINE停止中</span>
+        {% endif %}
     </div>
     <h1 style="margin-bottom:20px;">観光データ（管理者モード） {{ '編集' if edit_id else '登録' }}</h1>
     {% else %}
