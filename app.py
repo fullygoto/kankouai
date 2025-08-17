@@ -567,6 +567,57 @@ def _merge_extras(dicts: List[dict]) -> dict:
         out[k] = _mode_or_longest(vals)
     return {k: v for k, v in out.items() if v}
 
+# ===== 重複統合の採用ロジック強化（地図URLなど） =====
+MAP_PREFER_HOSTS = (
+    "google.com/maps",
+    "goo.gl/maps",
+    "maps.app.goo.gl",
+    "g.page",
+    "g.co/kgs",
+)
+
+def _pick_best_map_url(urls):
+    """候補URL群から“より良い”地図URLを1つ選ぶ（Google系を優先）"""
+    if not urls:
+        return ""
+    cand = [str(u or "").strip() for u in urls if str(u or "").strip()]
+    if not cand:
+        return ""
+
+    def score(u: str):
+        s = 0
+        # 形式がちゃんとしているものを優遇
+        if u.startswith(("http://", "https://")):
+            s += 2
+        # Google系・Maps らしさを優遇
+        if any(h in u for h in MAP_PREFER_HOSTS):
+            s += 10
+        if "maps" in u:
+            s += 2
+        # 極端に短いダミーURLよりは、ある程度長さがある方を少しだけ優遇
+        if len(u) >= 20:
+            s += 1
+        return (s, len(u))
+
+    cand.sort(key=score, reverse=True)
+    return cand[0]
+
+def _pick_best_string(values):
+    """文字列系（住所/電話/営業時間など）は 最頻→最長 を採用"""
+    return _mode_or_longest(values)
+
+def _union_list(*lists):
+    """複数の配列を結合しつつユニーク化＆順序維持"""
+    out = []
+    seen = set()
+    for lst in lists:
+        for x in (lst or []):
+            s = str(x).strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
 def _ai_optimize_description(title: str, descs: List[str], tags: List[str], areas: List[str]) -> str:
     base = _mode_or_longest(descs)
     # 追加：実質1件ならAIスキップ
@@ -631,14 +682,15 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
         # タイトルは最頻→最長
         title = _mode_or_longest(titles)
         # 主要文字列項目
-        address     = _mode_or_longest([g.get("address","")     for g in group])
-        tel         = _mode_or_longest([g.get("tel","")         for g in group])
-        holiday     = _mode_or_longest([g.get("holiday","")     for g in group])
-        open_hours  = _mode_or_longest([g.get("open_hours","")  for g in group])
-        parking     = _mode_or_longest([g.get("parking","")     for g in group])
-        parking_num = _mode_or_longest([g.get("parking_num","") for g in group])
-        remark      = _mode_or_longest([g.get("remark","")      for g in group])
-        map_url     = _mode_or_longest([g.get("map","")         for g in group])
+        address     = _pick_best_string([g.get("address","")     for g in group])
+        tel         = _pick_best_string([g.get("tel","")         for g in group])
+        holiday     = _pick_best_string([g.get("holiday","")     for g in group])
+        open_hours  = _pick_best_string([g.get("open_hours","")  for g in group])
+        parking     = _pick_best_string([g.get("parking","")     for g in group])
+        parking_num = _pick_best_string([g.get("parking_num","") for g in group])
+        remark      = _pick_best_string([g.get("remark","")      for g in group])
+        # map は Google系など好ましいURLを優先採用
+        map_url     = _pick_best_map_url([g.get("map","")        for g in group])
         category    = _mode_or_longest([g.get("category","")    for g in group]) or "観光"
 
         # リスト系は結合ユニーク
@@ -1475,15 +1527,44 @@ def admin_entries_dedupe():
         abort(403)
 
     entries = load_entries()
-    if request.method == "GET":
-        _, stats, preview = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=True)
-        # 簡易プレビュー(JSON)
-        return jsonify({"ok": True, "stats": stats, "preview": preview})
 
-    # POST: 実行→保存
+    # GET: プレビュー（detail=1 なら各グループの説明候補も返す）
+    if request.method == "GET":
+        detail = (request.args.get("detail") == "1")
+        _, stats, preview = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=True)
+
+        if not detail:
+            return jsonify({"ok": True, "stats": stats, "preview": preview})
+
+        # detail モード: 同一タイトルキーごとに要素の断片を返す
+        groups = {}
+        for e in entries:
+            k = _title_key(e.get("title",""))
+            if not k: 
+                continue
+            groups.setdefault(k, []).append(e)
+
+        detail_list = []
+        for k, gs in groups.items():
+            if len(gs) <= 1: 
+                continue
+            item = {
+                "key": k,
+                "count": len(gs),
+                "titles": [g.get("title","") for g in gs],
+                "descs":  [g.get("desc","")  for g in gs if g.get("desc","").strip()],
+                "maps":   [g.get("map","")   for g in gs if g.get("map","").strip()],
+                "areas":  list(sorted({a for g in gs for a in (g.get("areas") or [])})),
+                "tags":   list(sorted({t for g in gs for t in (g.get("tags")  or [])})),
+            }
+            detail_list.append(item)
+
+        return jsonify({"ok": True, "stats": stats, "groups": detail_list[:60]})  # 多すぎ防止に60件まで
+
+    # POST: 実行→保存（AI最適化あり）
     merged, stats, _ = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=False)
-    _atomic_json_dump(ENTRIES_FILE, merged)   # save_entries()でもOK（重複実行でも冪等）
-    flash(f"統合完了：{stats['merged_groups']} グループ / 重複 {stats['removed']} 件解消")
+    _atomic_json_dump(ENTRIES_FILE, merged)
+    flash(f"統合完了：{stats['merged_groups']} グループ / 重複 {stats['removed']} 件解消（AI最適化あり）")
     return redirect(url_for("admin_entries_edit"))
 
 # =========================
