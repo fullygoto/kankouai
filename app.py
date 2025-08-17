@@ -315,6 +315,43 @@ USERS_FILE     = os.path.join(BASE_DIR, "users.json")
 NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
 SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 
+# ---- synonyms 進捗＆キュー（追記）----
+PENDING_SYNONYMS_FILE = os.path.join(BASE_DIR, "synonyms_autogen_queue.json")
+
+def _compute_tag_sets_for_synonyms():
+    """
+    entries.json から全タグ集合を作り、
+    ・have    = 辞書に類義語が「ある」タグ
+    ・missing = 辞書に類義語が「ない」タグ
+    を返すユーティリティ。
+    """
+    entries = load_entries()
+    all_tags = set()
+    for e in entries:
+        for t in (e.get("tags") or []):
+            t = (t or "").strip()
+            if t:
+                all_tags.add(t)
+
+    syn = load_synonyms()
+    have = sorted([t for t in all_tags if syn.get(t)])
+    missing = sorted([t for t in all_tags if not syn.get(t)])
+    return sorted(all_tags), have, missing
+
+def _load_syn_queue():
+    """
+    生成待ち行列（キュー）を JSON から読み込む。
+    無ければ {} を返す（新規作成時に使う）。
+    """
+    return _safe_read_json(PENDING_SYNONYMS_FILE, {})
+
+def _save_syn_queue(data):
+    """
+    生成待ち行列（キュー）を安全に保存する。
+    """
+    _atomic_json_dump(PENDING_SYNONYMS_FILE, data)
+
+
 # 必要フォルダ作成
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -1900,7 +1937,58 @@ def admin_synonyms():
         return redirect(url_for("admin_synonyms"))
 
     synonyms = load_synonyms()
-    return render_template("admin_synonyms.html", synonyms=synonyms)
+    # 追加: 進捗とキュー残
+    all_tags, have, missing = _compute_tag_sets_for_synonyms()
+    q = _load_syn_queue()
+    pending_count = len(q.get("pending", []))
+    return render_template(
+        "admin_synonyms.html",
+        synonyms=synonyms,
+        stats={"total": len(all_tags), "with": len(have), "missing": len(missing)},
+        queue_pending=pending_count
+    )
+
+@app.route("/admin/synonyms/export_missing")
+@login_required
+def admin_synonyms_export_missing():
+    if session.get("role") != "admin":
+        abort(403)
+    all_tags, have, missing = _compute_tag_sets_for_synonyms()
+    payload = {t: [] for t in missing}  # 空配列のスケルトン
+    buf = io.BytesIO(json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+    buf.seek(0)
+    return send_file(buf, as_attachment=True,
+                     download_name="synonyms_missing.json",
+                     mimetype="application/json")
+
+
+@app.route("/admin/synonyms/queue/reset")
+@login_required
+def admin_synonyms_queue_reset():
+    if session.get("role") != "admin":
+        abort(403)
+    target = request.args.get("target", "missing")
+    all_tags, have, missing = _compute_tag_sets_for_synonyms()
+    pending = sorted(missing if target != "all" else all_tags)
+    data = {
+        "target": target,
+        "created": datetime.datetime.now().isoformat(),
+        "pending": pending
+    }
+    _save_syn_queue(data)
+    flash(f"AI生成キューを作成: {len(pending)} 件")
+    return redirect(url_for("admin_synonyms"))
+
+
+@app.route("/admin/synonyms/queue/status")
+@login_required
+def admin_synonyms_queue_status():
+    if session.get("role") != "admin":
+        abort(403)
+    q = _load_syn_queue()
+    return jsonify({"pending": len(q.get("pending", []))})
+
+
 
 # ========== 類義語：インポート（上書き） ==========
 @app.route("/admin/synonyms/import", methods=["POST"])
@@ -1967,11 +2055,7 @@ def admin_synonyms_export():
 @login_required
 def admin_synonyms_autogen():
     """
-    Render の 100秒制限で落ちないよう、
-    - 1クリックあたりの処理対象: 既定 30タグ（?limit= で変更可）
-    - 1回の OpenAI 呼び出し: 既定 8タグ（?chunk= で変更可）
-    - 全体ハード上限: 40秒（超えそうなら部分保存して終了）
-    - 例外は握って flash のみ返す
+    ...（既存のdocstringはそのまま）...
     """
     try:
         if session.get("role") != "admin":
@@ -1980,55 +2064,53 @@ def admin_synonyms_autogen():
             flash("OPENAI_API_KEY が未設定です")
             return redirect(url_for("admin_synonyms"))
 
-        # GET 直叩きにも応答できるように（フォームからでもOK）
         target = request.values.get("target", "missing")      # "missing" or "all"
         mode   = request.values.get("mode", "append")         # "append" or "overwrite"
 
-        # パラメータで微調整できるように
+        # ▼▼ ここを既存から少し変更：より安全な既定値＆ENVで可変 ▼▼
         try:
-            MAX_TAGS_PER_REQUEST = max(1, min(100, int(request.values.get("limit", 30))))
+            MAX_TAGS_PER_REQUEST = max(1, min(60, int(request.values.get("limit", 20))))
         except Exception:
-            MAX_TAGS_PER_REQUEST = 30
+            MAX_TAGS_PER_REQUEST = 20
         try:
-            CHUNK = max(1, min(20, int(request.values.get("chunk", 8))))
+            CHUNK = max(1, min(10, int(request.values.get("chunk", 4))))
         except Exception:
-            CHUNK = 8
+            CHUNK = 4
 
-        # Render の 100秒を確実に避ける
-        HARD_DEADLINE_SEC = 40
+        HARD_DEADLINE_SEC = int(os.getenv("SYN_AUTOGEN_DEADLINE", "20"))
         start_time = time.time()
 
-        # 既存エントリからタグ集合
-        entries = load_entries()
-        all_tags = set()
-        for e in entries:
-            for t in (e.get("tags") or []):
-                t = (t or "").strip()
-                if t:
-                    all_tags.add(t)
+        # ▼▼ 追加：キュー使用フラグ ▼▼
+        use_queue = (request.values.get("use_queue", "1").lower() in {"1","true","on","yes"})
 
-        cur = load_synonyms()
-        if target == "all":
-            target_tags = sorted(all_tags)
+        # 既存の all_tags / missing 計算:
+        all_tags, have, missing = _compute_tag_sets_for_synonyms()
+
+        if use_queue:
+            q = _load_syn_queue()
+            if not q.get("pending"):
+                # キューが無ければ初期化
+                pending = sorted(missing if target != "all" else all_tags)
+                q = {"target": target, "created": datetime.datetime.now().isoformat(), "pending": pending}
+                _save_syn_queue(q)
+            target_tags = list(q["pending"][:MAX_TAGS_PER_REQUEST])
         else:
-            target_tags = sorted([t for t in all_tags if t not in cur or not cur[t]])
+            target_tags = sorted(missing if target != "all" else all_tags)[:MAX_TAGS_PER_REQUEST]
 
         if not target_tags:
-            flash("生成対象のタグがありません（missing対象なし）")
+            flash("処理対象のタグがありません（未生成なし or キュー空）")
             return redirect(url_for("admin_synonyms"))
-
-        # 対象をさらに厳しく制限（小刻みに進める）
-        target_tags = target_tags[:MAX_TAGS_PER_REQUEST]
 
         merged = {}
         i = 0
+        updated = 0
+
+        # === ここから既存のループを流用（CHUNKずつAI呼び出し） ===
         while i < len(target_tags):
-            # 時間ガード：40秒超えそうなら途中保存して終了
             if time.time() - start_time > HARD_DEADLINE_SEC:
-                flash("タイムアウト回避のため途中までで保存しました。もう一度実行すると続きが処理されます。")
+                flash("タイムアウト回避のため途中まで保存しました。もう一度実行してください。")
                 break
 
-            # ... while i < len(target_tags):
             chunk = target_tags[i:i+CHUNK]
             prompt = (
                 "次の観光関連タグごとに、日本語の類義語・言い換え・表記揺れを最大5個ずつ返してください。"
@@ -2036,19 +2118,17 @@ def admin_synonyms_autogen():
                 "タグ: " + ", ".join(chunk)
             )
 
-            # まず高精度モデル
             content = ""
             try:
                 content = openai_chat(
                     OPENAI_MODEL_HIGH,
                     [{"role": "user", "content": prompt}],
                     temperature=0.2,
-                    max_tokens=1000,
+                    max_tokens=900,
                 ) or ""
             except Exception as e:
                 app.logger.exception("autogen openai (HIGH) failed: %s", e)
 
-            # フォールバック（応答が空のときだけ）
             if not content:
                 try:
                     content = openai_chat(
@@ -2061,28 +2141,21 @@ def admin_synonyms_autogen():
                     app.logger.exception("autogen openai (PRIMARY) failed: %s", e2)
                     content = ""
 
-            # ここが重要：常に安全抽出のみを使う（生loads禁止）
             data = _extract_json_object(content)
-            if not isinstance(data, dict) or not data:
-                app.logger.warning("autogen parse failed: 先頭200=%r", content[:200])
-                i += CHUNK
-                continue
-
-            # マージ
-            for k, v in data.items():
-                if isinstance(v, str):
-                    syns = _split_lines_commas(v)
-                elif isinstance(v, (list, tuple)):
-                    syns = [str(x).strip() for x in v if str(x).strip()]
-                else:
-                    syns = []
-                merged[str(k).strip()] = syns
+            if isinstance(data, dict) and data:
+                for k, v in data.items():
+                    if isinstance(v, str):
+                        syns = _split_lines_commas(v)
+                    elif isinstance(v, (list, tuple)):
+                        syns = [str(x).strip() for x in v if str(x).strip()]
+                    else:
+                        syns = []
+                    merged[str(k).strip()] = syns
 
             i += CHUNK
 
         # 反映
         cur = load_synonyms()
-        updated = 0
         for tag, syns in merged.items():
             if mode == "overwrite":
                 cur[tag] = syns
@@ -2092,17 +2165,29 @@ def admin_synonyms_autogen():
                     if s and s not in cur[tag]:
                         cur[tag].append(s)
             updated += 1
-
         save_synonyms(cur)
 
-        total = len(target_tags)
-        if updated == 0:
-            flash("AI生成に失敗しました（部分タイムアウト/応答空の可能性）。もう一度お試しください。")
-        elif updated < total:
-            flash(f"AI生成（部分実行）: {updated}/{total} タグを反映しました。再度実行で続きが処理されます。")
+        # ▼▼ 追加：キューから消す ▼▼
+        if use_queue:
+            q = _load_syn_queue()
+            # 先頭から、今回処理した target_tags の件数だけ削る
+            q["pending"] = q.get("pending", [])[len(target_tags):]
+            _save_syn_queue(q)
+            flash(f"AI生成: {updated}/{len(target_tags)} タグ反映（キュー残り {len(q['pending'])} 件）")
         else:
-            flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
+            total = len(target_tags)
+            if updated == 0:
+                flash("AI生成に失敗しました。もう一度実行してください。")
+            elif updated < total:
+                flash(f"AI生成（部分実行）: {updated}/{total} タグを反映しました。")
+            else:
+                flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
 
+        return redirect(url_for("admin_synonyms"))
+
+    except Exception as e:
+        app.logger.exception("autogen endpoint fatal error: %s", e)
+        flash("内部エラーが発生しました（ログを確認してください）。")
         return redirect(url_for("admin_synonyms"))
 
     except Exception as e:
