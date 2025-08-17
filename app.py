@@ -46,7 +46,8 @@ def _split_lines_commas(val: str) -> List[str]:
 
 # === これを1つだけ残す（重複は削除） ===
 # 既存をこの定義で置き換え
-def _split_for_line(text: str, limit: int = None, max_len: int = None) -> List[str]:
+# これで既存の max_len=... 呼び出しも通ります
+def _split_for_line(text: str, limit: int = None, max_len: int = None, **_ignored) -> List[str]:
     """
     LINEの1通上限を超える長文を安全に分割する。
     - 改行優先で詰め、収まらない行はハードスプリット
@@ -55,9 +56,8 @@ def _split_for_line(text: str, limit: int = None, max_len: int = None) -> List[s
     - どんな入力でも最低1要素返す（空配列にしない）
     """
     s = "" if text is None else str(text)
-    # ← ここで limit / max_len / 既定 の優先順を統一
-    eff_limit = limit if limit is not None else max_len
-    lim = int(eff_limit if eff_limit is not None else (LINE_SAFE_CHARS or 3800))
+    eff = limit if limit is not None else max_len
+    lim = int(eff if eff is not None else (LINE_SAFE_CHARS or 3800))
     if lim <= 0:
         return [s]
 
@@ -1029,6 +1029,36 @@ def save_qa_log(question, answer, source="web", hit_db=False, extra=None):
     }
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(log, ensure_ascii=False) + "\n")
+
+def _messages_to_prompt(messages):
+    # role付きメッセージを1本のテキストにまとめる
+    if isinstance(messages, str):
+        return messages
+    lines = []
+    for m in messages:
+        role = m.get("role","user")
+        content = m.get("content","")
+        lines.append(f"{role.upper()}: {content}")
+    return "\n".join(lines)
+
+def openai_chat(model, messages, **kwargs):
+    params = dict(kwargs)
+    mot = (params.pop("max_output_tokens", None)
+           or params.pop("max_completion_tokens", None)
+           or params.pop("max_tokens", None))
+    # GPT-5 系は Responses
+    if model.startswith(("gpt-5",)):
+        try:
+            prompt = _messages_to_prompt(messages)
+            rparams = {"model": model, "input": prompt}
+            if mot is not None:
+                rparams["max_output_tokens"] = mot
+            resp = client.responses.create(**rparams)
+            return getattr(resp, "output_text", "") or ""
+        except Exception as e:
+            print("[OpenAI error - responses]", e)
+            return ""
+    # …以下は既存の chat.completions 分岐のままでOK
 
 # OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
@@ -3054,15 +3084,18 @@ def admin_data_files_new():
     if not safe:
         flash("ファイル名が不正です（拡張子は .txt / .md のみ）")
         return redirect(url_for("admin_data_files"))
+
     path = os.path.join(DATA_DIR, safe)
     if not _ensure_in_data_dir(path):
-        flash("保存先エラー")
+        flash("保存先が不正です")
         return redirect(url_for("admin_data_files"))
+
     if os.path.exists(path):
         flash("同名ファイルが既にあります")
-        return redirect(url_for("admin_data_files", edit=safe))
+        return redirect(url_for("admin_data_files"))
+
     _write_text(path, "", encoding="utf-8")
-    flash("新規作成しました")
+    flash("新規ファイルを作成しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
 @app.route("/admin/data_files/save", methods=["POST"])
@@ -3333,6 +3366,11 @@ def get_transport_reply(question):
         return ferry_text, True
     return flight_text, True
 
+def get_weather_reply(text: str):
+    return ("", False)
+
+def get_transport_reply(text: str):
+    return ("", False)
 
 SMALLTALK_PATTERNS = {
     "greet": ["おはよう", "こんにちは", "こんばんは", "やあ", "はじめまして"],
