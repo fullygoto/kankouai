@@ -214,16 +214,16 @@
     <div class="nav" style="float:right;">
         <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
         <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-        <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+        <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
         <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
         <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
         <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
         <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
-        <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
-        <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
+        <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
+        <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
         <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
         <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
-            <input type="file" name="backup_zip" accept=".zip" style="display:inline;">
+            <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
             <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
         </form>
         <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
@@ -470,7 +470,7 @@ https://instagram.com/xxx">
             <span class="card-label">説明：</span>{{ e.desc }}<br>
             <span class="card-label">住所：</span>{{ e.address }}<br>
             <span class="card-label">地図：</span>
-            {% if e.map %}<a href="{{ e.map }}" target="_blank">MAP</a>{% endif %}<br>
+            {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
             <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
             <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
 
@@ -488,7 +488,7 @@ https://instagram.com/xxx">
               <ul class="compact">
                 {% for u in _links %}
                   {% set u2 = (u ~ '') | trim %}
-                  {% if u2 %}<li><a href="{{ u2 }}" target="_blank">{{ u2 }}</a></li>{% endif %}
+                  {% if u2 %}<li><a href="{{ u2 }}" target="_blank" rel="noopener noreferrer">{{ u2 }}</a></li>{% endif %}
                 {% endfor %}
               </ul>
             {% endif %}
