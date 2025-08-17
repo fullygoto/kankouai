@@ -420,9 +420,9 @@ def _reply_or_push(event, text: str):
         app.logger.info("[LINE disabled] would send: %r", text)
         return
 
-    parts = _split_for_line(text, LINE_SAFE_CHARS)  # 位置引数で呼ぶ
+    parts = _split_for_line(text, LINE_SAFE_CHARS)
     if not parts:
-        parts = [""]  # 念のための保険
+        parts = [""]
 
     messages = [TextSendMessage(text=p) for p in parts]
     try:
@@ -434,6 +434,8 @@ def _reply_or_push(event, text: str):
             if tid:
                 line_bot_api.push_message(tid, messages)
     except LineBotApiError as e:
+        global SEND_FAIL_COUNT
+        SEND_FAIL_COUNT += 1
         app.logger.exception("LINE send failed: %s", e)
 
 
@@ -2593,22 +2595,114 @@ def admin_synonyms_autogen():
 def admin_synonyms_auto():
     return admin_synonyms_autogen()
 
-# ===== LINE Webhook（安全版）=====
+# ===== ここから貼り付け（既存の /callback 定義を丸ごと置換OK）=====
+
+# 直近のコールバック状況を可視化するメモリ変数
+LAST_CALLBACK_AT = None
+CALLBACK_HIT_COUNT = 0
+LAST_SIGNATURE_BAD = 0
+LAST_LINE_ERROR = ""
+# ← 追加：送信側の失敗も可視化
+LAST_SEND_ERROR = ""
+SEND_ERROR_COUNT = 0
+SEND_FAIL_COUNT = 0 
+
+@app.route("/_debug/line_status")
+def _debug_line_status():
+    """
+    LINEの稼働状況を確認するデバッグ用エンドポイント。
+    本番では X-Debug-Token が一致しないと 404 にする。
+    """
+    if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
+        abort(404)
+
+    try:
+        muted_count = len(_load_mutes())
+    except Exception:
+        muted_count = -1
+
+    return jsonify({
+        "enabled": bool(_line_enabled() and handler),
+        "have_access_token": bool(LINE_CHANNEL_ACCESS_TOKEN),
+        "have_channel_secret": bool(LINE_CHANNEL_SECRET),
+        "handler_inited": bool(handler is not None),
+        "paused": _is_global_paused(),
+        "muted_count": muted_count,
+        "last_callback_at": LAST_CALLBACK_AT,
+        "callback_hit_count": CALLBACK_HIT_COUNT,
+        "invalid_signature_count": LAST_SIGNATURE_BAD,
+        "send_fail_count": SEND_FAIL_COUNT,
+        "last_error": LAST_LINE_ERROR,
+        "send_error_count": SEND_ERROR_COUNT,
+        "last_send_error": LAST_SEND_ERROR,
+        "webhook_url_hint": "/callback (POST)",  # LINEコンソールにこのパスで登録されているか確認
+    })
+
 @app.route("/callback", methods=["POST"])
 def callback():
+    """
+    LINE Webhook 受け口。可視化のためログとカウンタを追加。
+    - キー未設定や初期化失敗時: 200 'LINE disabled' を返す（LINE側の再試行抑止）
+    - 署名不正: 400 'NG'（Channel secret違いが濃厚）
+    """
+    global LAST_CALLBACK_AT, CALLBACK_HIT_COUNT, LAST_LINE_ERROR, LAST_SIGNATURE_BAD
+    CALLBACK_HIT_COUNT += 1
+    LAST_CALLBACK_AT = datetime.datetime.utcnow().isoformat() + "Z"
+
+    # キー未設定や初期化失敗
     if not _line_enabled() or not handler:
+        app.logger.warning("[LINE] callback hit but LINE disabled (check env vars / init)")
         return "LINE disabled", 200
+
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        app.logger.warning("Invalid LINE signature")
+        LAST_SIGNATURE_BAD += 1
+        app.logger.warning("[LINE] Invalid signature. Check LINE_CHANNEL_SECRET / webhook origin.")
         return "NG", 400
     except Exception as e:
-        app.logger.exception("LINE handler error: %s", e)
+        LAST_LINE_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("[LINE] handler error")
+        # エラーでも 200 を返すとLINE側が再試行しないので 500 を返す
+        return "NG", 500
+
     return "OK", 200
 
+# 管理者用：任意ユーザーに push して疎通確認（userId はログやLINEの開発者ツールで取得）
+@app.route("/admin/line/test_push", methods=["POST","GET"])
+@login_required
+def admin_line_test_push():
+    if session.get("role") != "admin":
+        abort(403)
+    to = (request.values.get("to") or "").strip()
+    text = (request.values.get("text") or "テスト配信です。").strip()
+
+    if not _line_enabled() or not line_bot_api:
+        flash("LINEが無効です（環境変数を確認）")
+        return redirect(url_for("admin_entry"))
+
+    if not to:
+        flash("to（userId）が指定されていません")
+        return redirect(url_for("admin_entry"))
+
+    try:
+        parts = _split_for_line(text, LINE_SAFE_CHARS)
+        msgs = [TextSendMessage(text=p) for p in parts]
+        line_bot_api.push_message(to, msgs)
+        flash("push 送信を実行しました")
+    except LineBotApiError as e:
+        global LAST_SEND_ERROR, SEND_ERROR_COUNT
+        SEND_ERROR_COUNT += 1
+        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed: %s", e)
+        if LINE_RETHROW_ON_SEND_ERROR:
+            # /callback 側まで例外を伝播させ、500 を返して気付けるようにする
+            raise
+    return redirect(url_for("admin_entry"))
+# ===== ここまで貼り付け =====
 
 # --- 最低限のDB回答（ヒット/複数/未ヒット） ---
 def _answer_from_entries_min(question: str):
