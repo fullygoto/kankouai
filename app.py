@@ -44,15 +44,15 @@ def _split_lines_commas(val: str) -> List[str]:
     parts = re.split(r'[\n,]+', str(val))
     return [p.strip() for p in parts if p and p.strip()]
 
+# === これを1つだけ残す（重複は削除） ===
 def _split_for_line(text: str, limit: int = None) -> List[str]:
     """
     LINEの1通上限を超える長文を安全に分割する。
-    - まず改行単位で詰め、収まらない行はハードスプリット
+    - 改行優先で詰め、収まらない行はハードスプリット
     - limit 未指定時は LINE_SAFE_CHARS を採用
+    - どんな入力でも最低1要素返す（空配列にしない）
     """
-    if text is None:
-        return [""]
-    s = str(text)
+    s = "" if text is None else str(text)
     lim = int(limit or LINE_SAFE_CHARS or 3800)
     if lim <= 0:
         return [s]
@@ -65,14 +65,13 @@ def _split_for_line(text: str, limit: int = None) -> List[str]:
         if buf:
             out.append(buf.rstrip("\n"))
             buf = ""
-        # 行自体が長すぎる場合は強制分割
         while len(line) > lim:
             out.append(line[:lim].rstrip("\n"))
             line = line[lim:]
         buf = line
-    if buf:
-        out.append(buf.rstrip("\n"))
-    return out or [""]
+    if buf or not out:
+        out.append((buf or s).rstrip("\n"))
+    return out
 
 
 def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
@@ -160,6 +159,14 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 # リバースプロキシ配下で正しい IP/スキームを取る
 TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "2"))
+
+# 早期に APP_ENV を取得（このブロック内だけで使う）
+_APP_ENV_EARLY = os.getenv("APP_ENV", "dev").lower()
+
+# 本番で ProxyHop が 0 以下は危険なのでブロック
+if _APP_ENV_EARLY in {"prod", "production"} and TRUSTED_PROXY_HOPS <= 0:
+    raise RuntimeError("TRUSTED_PROXY_HOPS must be >= 1 in production")
+
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
 
 # flask-limiter が無い環境でも落ちないように（util も含めて try）
@@ -182,6 +189,10 @@ ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
 # 例: RATE_STORAGE_URI="redis://:pass@redis:6379/0"
 RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI") or "memory://"
 
+# 本番で memory:// は共有されず危険なので禁止
+if _APP_ENV_EARLY in {"prod", "production"} and (not RATE_STORAGE_URI or RATE_STORAGE_URI.startswith("memory://")):
+    raise RuntimeError("In production, set RATE_STORAGE_URI to a shared backend (e.g., redis://...)")
+
 if Limiter:
     # ★一度だけ初期化し、必要なら後からデコレータで利用
     limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URI)
@@ -192,7 +203,7 @@ else:
     def limit_deco(*a, **k):
         def _wrap(f): return f
         return _wrap
-        
+
 LOGIN_LIMITS = os.getenv("LOGIN_LIMITS", "10/minute;100/day")
 
 @app.errorhandler(429)
@@ -390,10 +401,6 @@ try:
             idx = (abs(hash(seed)) if seed else 0) % len(WAIT_MESSAGES)
             return WAIT_MESSAGES[idx]
 
-        def _split_for_line(s: str, max_len: int = 4900) -> list[str]:
-            """LINEの1メッセージ上限に収まるよう分割"""
-            s = s if isinstance(s, str) else str(s)
-            return [s[i:i+max_len] for i in range(0, len(s), max_len)] if s else []
         # ---------------------------------------------------------------------------
         app.logger.info("LINE enabled")
     else:
@@ -409,10 +416,14 @@ except Exception as e:
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
 def _reply_or_push(event, text: str):
     """長文は自動分割して返信。LINE未設定環境ではログのみ。"""
-    parts = _split_for_line(text, limit=LINE_SAFE_CHARS)
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
+
+    parts = _split_for_line(text, LINE_SAFE_CHARS)  # 位置引数で呼ぶ
+    if not parts:
+        parts = [""]  # 念のための保険
+
     messages = [TextSendMessage(text=p) for p in parts]
     try:
         reply_token = getattr(event, "reply_token", None)
@@ -1081,6 +1092,40 @@ def translate_text(text: str, target_lang: str) -> str:
         )
     return out or text
 
+# =========================
+#  スモールトーク／使い方（スタブ）
+# =========================
+def smalltalk_or_help_reply(text: str):
+    """
+    TODO: 後で本実装に差し替え。
+    ここでは '使い方' などの簡単なキーワードだけ返す簡易版。
+    未ヒットなら None を返す（ハンドラ側で通常フロー継続）。
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    # かんたんヘルプ
+    help_kw = ["使い方", "ヘルプ", "help", "つかいかた"]
+    if any(k in t for k in help_kw):
+        return (
+            "使い方のヒント:\n"
+            "・「天気」→各エリアの天気リンク\n"
+            "・「フェリー」「飛行機」→運行状況リンク\n"
+            "・スポット名や「教会」「うどん」などで検索できます"
+        )
+
+    # 軽いあいづち（必要に応じて増減OK）
+    smalltalk = {
+        "こんにちは": "こんにちは！ご用件をどうぞ。",
+        "ありがとう": "どういたしまして！",
+        "はじめまして": "はじめまして。五島のことなら任せてください！",
+    }
+    for k, v in smalltalk.items():
+        if k in t:
+            return v
+
+    return None
 
 # =========================
 #  お知らせ・データI/O
@@ -2548,6 +2593,134 @@ def admin_synonyms_autogen():
 def admin_synonyms_auto():
     return admin_synonyms_autogen()
 
+# ===== LINE Webhook（安全版）=====
+@app.route("/callback", methods=["POST"])
+def callback():
+    if not _line_enabled() or not handler:
+        return "LINE disabled", 200
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        app.logger.warning("Invalid LINE signature")
+        return "NG", 400
+    except Exception as e:
+        app.logger.exception("LINE handler error: %s", e)
+    return "OK", 200
+
+
+# --- 最低限のDB回答（ヒット/複数/未ヒット） ---
+def _answer_from_entries_min(question: str):
+    q = (question or "").strip()
+    if not q:
+        return "（内容が読み取れませんでした）", False
+
+    es = load_entries()
+    ql = q.lower()
+    hits = []
+    for e in es:
+        hay = " ".join(filter(None, [
+            e.get("title",""),
+            e.get("desc",""),
+            e.get("address",""),
+            " ".join(e.get("tags",[]) or []),
+            " ".join(e.get("areas",[]) or []),
+        ])).lower()
+        # ★修正：冗長な all([...]) を排除し、素直に部分一致
+        if ql and (ql in hay):
+            hits.append(e)
+
+    if not hits:
+        refine, _meta = build_refine_suggestions(q)
+        return "該当が見つかりませんでした。\n" + refine, False
+
+    if len(hits) == 1:
+        e = hits[0]
+        areas = " / ".join(e.get("areas", []) or "") or ""
+        tags  = ", ".join(e.get("tags", []) or "") or ""
+        lines = [
+            f"",
+            (e.get("desc","") or "").strip(),
+        ]
+        if e.get("address"):    lines.append(f"住所：{e['address']}")
+        if e.get("open_hours"): lines.append(f"営業時間：{e['open_hours']}")
+        if e.get("holiday"):    lines.append(f"休み：{e['holiday']}")
+        if e.get("tel"):        lines.append(f"電話：{e['tel']}")
+        if e.get("map"):        lines.append(f"地図：{e['map']}")
+        if areas:               lines.append(f"エリア：{areas}")
+        if tags:                lines.append(f"タグ：{tags}")
+        return "\n".join([s for s in lines if s]), True
+
+    # 複数ヒット
+    lines = ["候補が複数見つかりました。気になるものはありますか？"]
+    for i, e in enumerate(hits[:8], 1):
+        area = " / ".join(e.get("areas", []) or "") or ""
+        suffix = f"（{area}）" if area else ""
+        lines.append(f"{i}. {e.get('title','')}{suffix}")
+    if len(hits) > 8:
+        lines.append(f"…ほか {len(hits)-8} 件")
+
+    refine, _meta = build_refine_suggestions(q)
+    return "\n".join(lines) + "\n\n" + refine, True
+
+
+# --- メッセージ受信 ---
+# --- メッセージ受信 ---
+if handler:
+    @handler.add(MessageEvent, message=TextMessage)
+    def handle_message(event):
+        try:
+            text = getattr(event.message, "text", "") or ""
+        except Exception:
+            text = ""
+
+        # ミュート/一時停止
+        try:
+            if _line_mute_gate(event, text):
+                return
+        except Exception:
+            app.logger.exception("_line_mute_gate failed")
+
+        # 即答リンク（天気/航路）
+        try:
+            w, ok = get_weather_reply(text)
+            if ok and w:
+                _reply_or_push(event, w)
+                save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
+                return
+            t, ok = get_transport_reply(text)
+            if ok and t:
+                _reply_or_push(event, t)
+                save_qa_log(text, t, source="line", hit_db=False, extra={"kind":"transport"})
+                return
+        except Exception:
+            app.logger.exception("quick link reply failed")
+
+        # スモールトーク/ヘルプ
+        try:
+            st = smalltalk_or_help_reply(text)
+            if st:
+                _reply_or_push(event, st)
+                save_qa_log(text, st, source="line", hit_db=False, extra={"kind":"smalltalk"})
+                return
+        except Exception:
+            app.logger.exception("smalltalk failed")
+
+        # DB優先の簡易回答
+        try:
+            ans, hit = _answer_from_entries_min(text)
+            _reply_or_push(event, ans)
+            save_qa_log(text, ans, source="line", hit_db=hit)
+        except Exception as e:
+            app.logger.exception("answer flow failed: %s", e)
+            fallback, _ = build_refine_suggestions(text)
+            _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
+            save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
+else:
+    # LINE無効時のダミー（何もしない）
+    def handle_message(event):
+        return
 
 @app.route("/admin/manual")
 @login_required
@@ -2871,105 +3044,150 @@ https://www.goto-sangyo.co.jp/
 その他の航路や詳細は各リンクをご覧ください。
 """
 
+# === 天気・交通（フェリー／飛行機）応答 ===
 def get_weather_reply(question):
     """天気リンクを返す。ENABLE_FOREIGN_LANG=0 のときは常に日本語で返答。"""
     weather_keywords = [
-        "天気", "天候", "気象", "weather", "天気予報", "雨", "晴", "曇", "降水", "気温", "forecast",
-        "天氣", "天气", "氣象", "温度", "陰", "晴朗", "預報"
+        "天気", "天候", "気象", "天気予報", "雨", "晴", "曇", "降水", "気温",
+        "weather", "forecast", "temperature", "rain", "sunny", "cloud",
+        "天氣", "天气", "氣象", "預報", "温度", "陰", "晴朗"
     ]
     if not question:
         return None, False
 
-    lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
     if not any(kw in question for kw in weather_keywords):
         return None, False
 
+    lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
+
+    # エリア名が含まれていれば個別リンクを返す
     for entry in WEATHER_LINKS:
         if entry["area"] in question:
             if lang == "zh-Hant":
-                return f"【{entry['area']}天氣】\n最新資訊：\n{entry['url']}\n（可查看今日、週預報與降雨雷達）", True
+                return f"【{entry['area']}天氣】\n最新資訊：\n{entry['url']}\n（可查看今日與一週預報）", True
             if lang == "en":
                 return f"[{entry['area']} weather]\nLatest forecast:\n{entry['url']}", True
             return f"【{entry['area']}の天気】\n最新の{entry['area']}の天気情報はこちら\n{entry['url']}", True
 
+    # エリア未特定 → 主要リンク一覧
     if lang == "zh-Hant":
-        reply = "【五島列島的主要天氣連結】\n"
+        reply = "【五島列島・主要天氣連結】\n"
         for e in WEATHER_LINKS:
             reply += f"{e['area']}: {e['url']}\n"
         return reply.strip(), True
+
     if lang == "en":
         reply = "Main weather links for the Goto Islands:\n"
         for e in WEATHER_LINKS:
             reply += f"{e['area']}: {e['url']}\n"
         return reply.strip(), True
 
-    reply = "【五島列島の主な天気情報リンク】\n"
+    # 日本語
+    reply = "【五島の主な天気リンク】\n"
     for e in WEATHER_LINKS:
         reply += f"{e['area']}: {e['url']}\n"
     return reply.strip(), True
 
-def get_transport_reply(question: str):
-    """飛行機・船の運行状況を、天気と同様に即答＆多言語で返す。"""
+
+def get_transport_reply(question):
+    """
+    フェリー／高速船／飛行機（航空便）の運行・運航リンクを返す。
+    - フェリー関連語のみ → フェリー情報
+    - 飛行機関連語のみ → 飛行機情報
+    - 両方 or あいまい → 両方まとめて
+    """
     if not question:
         return None, False
 
-    # 言語判定（多言語を有効にしていない場合は日本語で固定）
+    ferry_keywords = [
+        "フェリー", "船", "ジェットフォイル", "高速船", "運航", "運行", "ダイヤ",
+        "九州商船", "野母商船", "五島産業汽船",
+        "ferry", "boat", "ship", "schedule", "status",
+        "渡輪", "船班", "航班", "航行", "運行資訊"
+    ]
+    flight_keywords = [
+        "飛行機", "航空", "空路", "便", "フライト", "空港", "到着", "出発", "欠航", "遅延",
+        "ANA", "オリエンタルエアブリッジ", "ORC", "五島つばき空港", "福江空港",
+        "flight", "airport", "arrival", "departure", "delay", "cancel",
+        "航班", "機場", "起飛", "到達", "延誤", "取消"
+    ]
+
+    has_ferry = any(kw in question for kw in ferry_keywords)
+    has_flight = any(kw in question for kw in flight_keywords)
+
+    if not (has_ferry or has_flight):
+        return None, False
+
     lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
 
-    # キーワード
-    ferry_kw_ja = ["フェリー", "船", "運航", "ジェットフォイル", "太古", "欠航", "ダイヤ"]
-    ferry_kw_zh = ["渡輪", "船", "航線", "噴射船", "停航", "班次"]
-    ferry_kw_en = ["ferry", "jetfoil", "ship", "sailing", "service", "cancel", "status", "schedule"]
+    # --- 航空便（飛行機）案内（言語別） ---
+    # ※ リンクは公式の運航情報/トップへの汎用リンク。必要に応じて詳細URLに差し替えてください。
+    if lang == "zh-Hant":
+        flight_text = (
+            "【五島椿機場（福江）航班資訊】\n"
+            "・Oriental Air Bridge（長崎／福岡 ⇄ 五島）\n"
+            "https://www.orc-air.co.jp/\n"
+            "・ANA（與 ORC 共同營運的班次）\n"
+            "https://www.ana.co.jp/\n"
+            "最新的延誤／取消請查看各公司「運航資訊」頁面。"
+        )
+        ferry_text = (
+            "【長崎—五島 航線・運行資訊】\n"
+            "・野母商船（太古輪）\n"
+            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+            "・九州商船（渡輪／噴射船）\n"
+            "https://kyusho.co.jp/status\n"
+            "・五島產業汽船（渡輪）\n"
+            "https://www.goto-sangyo.co.jp/\n"
+            "詳情請見各連結。"
+        )
+    elif lang == "en":
+        flight_text = (
+            "[Goto Tsubaki Airport (Fukue) – flight info]\n"
+            "- Oriental Air Bridge (Nagasaki / Fukuoka ⇄ Goto)\n"
+            "https://www.orc-air.co.jp/\n"
+            "- ANA (code-share with ORC)\n"
+            "https://www.ana.co.jp/\n"
+            "For delays/cancellations, check each airline's status page."
+        )
+        ferry_text = (
+            "[Nagasaki — Goto ferry status]\n"
+            "- Nomo Shosen (Taiko ferry)\n"
+            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+            "- Kyushu Shosen (Ferry / Jetfoil)\n"
+            "https://kyusho.co.jp/status\n"
+            "- Goto Sangyo Kisen (Ferry)\n"
+            "https://www.goto-sangyo.co.jp/\n"
+            "For details, check each link."
+        )
+    else:
+        # 日本語
+        flight_text = (
+            "【五島つばき空港（福江）・運航情報】\n"
+            "・オリエンタルエアブリッジ（長崎／福岡 ⇄ 五島）\n"
+            "https://www.orc-air.co.jp/\n"
+            "・ANA（ORCとの共同運航便を含む）\n"
+            "https://www.ana.co.jp/\n"
+            "最新の欠航・遅延は各社の「運航情報」ページをご確認ください。"
+        )
+        # 既存の FERRY_INFO を優先利用（無い場合はフォールバック文）
+        ferry_text = FERRY_INFO if 'FERRY_INFO' in globals() else (
+            "【長崎ー五島航路 運行状況】\n"
+            "・野母商船「フェリー太古」運航情報\n"
+            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+            "・九州商船「フェリー・ジェットフォイル」運航情報\n"
+            "https://kyusho.co.jp/status\n"
+            "・五島産業汽船「フェリー」運航情報\n"
+            "https://www.goto-sangyo.co.jp/\n"
+            "その他の航路や詳細は各リンクをご覧ください。"
+        )
 
-    flight_kw_ja = ["飛行機", "空港", "航空便", "欠航", "到着", "出発", "フライト", "遅延"]
-    flight_kw_zh = ["飛機", "機場", "航班", "延誤", "取消", "起飛", "到達"]
-    flight_kw_en = ["flight", "airport", "delay", "cancel", "arrival", "departure", "status"]
-
-    q = question
-
-    ferry_hit = any(k in q for k in ferry_kw_ja) or any(k in q for k in ferry_kw_zh) or any(k in q.lower() for k in ferry_kw_en)
-    flight_hit = any(k in q for k in flight_kw_ja) or any(k in q for k in flight_kw_zh) or any(k in q.lower() for k in flight_kw_en)
-
-    # まず船（キーワードが被る「欠航」等は船優先）
-    if ferry_hit:
-        if lang == "zh-Hant":
-            text = (
-                "【長崎—五島 航線運行資訊】\n"
-                "・野母商船「太古號」運行資訊\n"
-                "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-                "・九州商船（渡輪／噴射船）運行資訊\n"
-                "https://kyusho.co.jp/status\n"
-                "・五島產業汽船（渡輪）運行資訊\n"
-                "https://www.goto-sangyo.co.jp/\n"
-                "其他航線請見各連結。"
-            )
-        elif lang == "en":
-            text = (
-                "[Nagasaki ⇄ Goto Ferry/Jetfoil Status]\n"
-                "• Nomo Shipping “Ferry Taiko” status:\n"
-                "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-                "• Kyushu Shosen (Ferry / Jetfoil) status:\n"
-                "https://kyusho.co.jp/status\n"
-                "• Goto Sangyo Kisen (Ferry) status:\n"
-                "https://www.goto-sangyo.co.jp/\n"
-                "For other routes, please check the links above."
-            )
-        else:
-            # 既存の日本語定型をそのまま使用
-            text = FERRY_INFO
-        return text, True
-
-    # 次に飛行機
-    if flight_hit:
-        if lang == "zh-Hant":
-            text = "五島椿機場的最新航班資訊請見官方網站：\n▶ https://www.fukuekuko.jp/"
-        elif lang == "en":
-            text = "Latest flight status for Goto Tsubaki Airport (official site):\n▶ https://www.fukuekuko.jp/"
-        else:
-            text = "五島つばき空港の最新の運行状況は、公式Webサイトでご確認ください。\n▶ https://www.fukuekuko.jp/"
-        return text, True
-
-    return None, False
+    # 返却ロジック
+    if has_ferry and has_flight:
+        return f"{ferry_text}\n\n{flight_text}", True
+    if has_ferry:
+        return ferry_text, True
+    return flight_text, True
 
 
 SMALLTALK_PATTERNS = {
@@ -3420,31 +3638,6 @@ def _reply_or_push(event, text: str, *, reqgen: int | None = None):
         first = False
 # ========================================================================
 
-@app.route("/callback", methods=["POST"])
-def callback():
-    # LINE未設定 or 全体停止中は即200で何もしない
-    if not _line_enabled() or _is_global_paused():
-        return ("OK", 200)
-    
-    # ★ 緊急停止中は一切処理せず 200 を即返す（LINE側の再送を防ぐ）
-    if _is_global_paused():
-        return ("paused", 200)
-
-    # 設定未投入なら即200で返す（ログ汚染回避）
-    if not (LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET):
-        return ("OK", 200)
-
-    signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError as e:
-        app.logger.warning(f"LINE invalid signature: {e}")
-        return ("OK", 200)
-    except Exception as e:
-        app.logger.exception("LINE handler error")
-        return ("OK", 200)
-    return ("OK", 200)
 
 # --- LINE 送信先IDの取得ヘルパー ---
 def _target_id_from_event(event):
@@ -3575,104 +3768,6 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
             line_bot_api.push_message(target_id, TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"))
         except Exception:
             pass
-
-
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_message = event.message.text
-    # ★Hotfix: text 未定義エラー対策（非テキストでも空文字にする）
-    try:
-        text = (getattr(getattr(event, "message", object()), "text", "") or "").strip()
-    except Exception:
-        text = ""
-    # ★ここを先頭に追加：停止/再開コマンド・ミュート中は以降の処理を行わない
-    if _line_mute_gate(event, text):
-        return
-
-    # 0) 天気は即返信
-    weather_reply, weather_hit = get_weather_reply(user_message)
-    if weather_hit:
-        save_qa_log(user_message, weather_reply, source="line", hit_db=True, extra={"kind": "weather"})
-        _reply_or_push(event, weather_reply)
-        return
-
-    # 0.5) 船/飛行機も即返信
-    trans_reply, trans_hit = get_transport_reply(user_message)
-    if trans_hit:
-        save_qa_log(user_message, trans_reply, source="line", hit_db=True, extra={"kind": "transport"})
-        _reply_or_push(event, trans_reply)
-        return
-
-    # 日本語かどうか（多言語は非同期に回す）
-    orig_lang = detect_lang_simple(user_message)
-    is_ja = (orig_lang == "ja") or (not ENABLE_FOREIGN_LANG)
-
-    # 1) 雑談/使い方は即返信（日本語のみ）
-    if is_ja:
-        st = smalltalk_or_help_reply(user_message)
-        if st:
-            save_qa_log(user_message, st, source="line", hit_db=True, extra={"kind": "smalltalk"})
-            _reply_or_push(event, st)
-            return
-
-        # 2) DBヒットを先に当てる
-        hits = []
-        try:
-            hits = find_entry_info(user_message)
-        except Exception:
-            hits = []
-
-        if hits:
-            if len(hits) == 1:
-                ans = format_entry_detail(hits[0])
-                save_qa_log(user_message, ans, source="line", hit_db=True, extra={"kind":"db_single"})
-                _reply_or_push(event, ans)
-                return
-            else:
-                # 要約トライ → ダメなら短い候補一覧＋深掘り
-                try:
-                    snippets = [
-                        f"タイトル: {e.get('title','')}\n説明: {e.get('desc','')}\n住所: {e.get('address','')}\n"
-                        for e in hits[:10]
-                    ]
-                    ai_ans = ai_summarize(snippets, user_message, model=OPENAI_MODEL_PRIMARY) or ""
-                    if len(ai_ans.strip()) >= 30:
-                        save_qa_log(user_message, ai_ans, source="line", hit_db=True, extra={"kind":"db_multi_summarized"})
-                        _reply_or_push(event, ai_ans)
-                        return
-                except Exception:
-                    pass
-
-                lines = ["候補が複数見つかりました。気になるものはありますか？"]
-                for i, e in enumerate(hits[:8], 1):
-                    name = (e.get("title") or "（無題）").strip()
-                    areas = ", ".join(e.get("areas") or [])
-                    lines.append(f"{i}. {name}" + (f"（{areas}）" if areas else ""))
-
-                if len(hits) > 8:
-                    lines.append(f"…ほか {len(hits)-8} 件")
-
-                try:
-                    suggest_text, _ = build_refine_suggestions(user_message)
-                    if suggest_text:
-                        lines += ["", suggest_text]
-                except Exception:
-                    pass
-
-                msg = "\n".join(lines)
-                save_qa_log(user_message, msg, source="line", hit_db=False, extra={"kind":"db_multi_list"})
-                _reply_or_push(event, msg)
-                return
-
-    # 3) ここに来たら非同期で重い処理（多言語や未ヒット検索など）
-    # 例: handle_message の中、即時返信の分岐を抜けたあと
-    wait = pick_wait_message(user_message)
-    _reply_or_push(event, wait, reqgen=reqgen)
-    threading.Thread(
-        target=_compute_and_push_async,
-        args=(event, user_message, reqgen),
-        daemon=True
-    ).start()
 
 
 # =========================
