@@ -44,6 +44,37 @@ def _split_lines_commas(val: str) -> List[str]:
     parts = re.split(r'[\n,]+', str(val))
     return [p.strip() for p in parts if p and p.strip()]
 
+def _split_for_line(text: str, limit: int = None) -> List[str]:
+    """
+    LINEの1通上限を超える長文を安全に分割する。
+    - まず改行単位で詰め、収まらない行はハードスプリット
+    - limit 未指定時は LINE_SAFE_CHARS を採用
+    """
+    if text is None:
+        return [""]
+    s = str(text)
+    lim = int(limit or LINE_SAFE_CHARS or 3800)
+    if lim <= 0:
+        return [s]
+
+    out, buf = [], ""
+    for line in s.splitlines(keepends=True):
+        if len(buf) + len(line) <= lim:
+            buf += line
+            continue
+        if buf:
+            out.append(buf.rstrip("\n"))
+            buf = ""
+        # 行自体が長すぎる場合は強制分割
+        while len(line) > lim:
+            out.append(line[:lim].rstrip("\n"))
+            line = line[lim:]
+        buf = line
+    if buf:
+        out.append(buf.rstrip("\n"))
+    return out or [""]
+
+
 def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
     """保存前/表示前にデータ構造を正規化"""
     e = dict(e or {})
@@ -102,13 +133,6 @@ LINE_SINGLE_REPLY = os.getenv("LINE_SINGLE_REPLY", "1").lower() in {"1", "true",
 # まずエリアを尋ねる（曖昧ワードのとき）
 LINE_ASK_AREA_FIRST = os.getenv("LINE_ASK_AREA_FIRST", "1").lower() in {"1", "true", "on", "yes"}
 
-# 1通に収める目安の文字数（超過時のみ分割）
-try:
-    LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3800"))
-except ValueError:
-    LINE_SAFE_CHARS = 3800
-
-
 # LINE は使わない環境では callback を閉じる/無効化でもOK
 
 # --- Jinja2 互換用: 'string' / 'mapping' テストが無い環境向け ---
@@ -132,9 +156,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
 )
 # ==== Rate limit setup (put right after Flask settings) ====
-import os
 from werkzeug.middleware.proxy_fix import ProxyFix
-from flask import request, jsonify
 
 # リバースプロキシ配下で正しい IP/スキームを取る
 TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "2"))
@@ -177,6 +199,7 @@ LOGIN_LIMITS = os.getenv("LOGIN_LIMITS", "10/minute;100/day")
 def _ratelimit_handler(e):
     return jsonify({"error": "Too Many Requests", "detail": "Rate limit exceeded."}), 429
 # ==== /Rate limit setup ====
+
 
 # ==== 追加（Flask設定の近くでOK）====
 ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on","yes"}
@@ -317,8 +340,45 @@ ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1"
 client = OpenAI(timeout=15)
 
 # LINE Bot
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# === LINE SDK init (safe) ===
+def _line_enabled() -> bool:
+    return bool(LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET)
+
+try:
+    if _line_enabled():
+        line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+        handler = WebhookHandler(LINE_CHANNEL_SECRET)
+        app.logger.info("LINE enabled")
+    else:
+        line_bot_api = None
+        handler = None
+        app.logger.warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
+except Exception as e:
+    line_bot_api = None
+    handler = None
+    app.logger.exception("LINE init failed: %s", e)
+
+
+# === LINE 返信ユーティリティ（未定義だったので追加） ===
+def _reply_or_push(event, text: str):
+    """長文は自動分割して返信。LINE未設定環境ではログのみ。"""
+    parts = _split_for_line(text, limit=LINE_SAFE_CHARS)
+    if not _line_enabled() or not line_bot_api:
+        app.logger.info("[LINE disabled] would send: %r", text)
+        return
+    messages = [TextSendMessage(text=p) for p in parts]
+    try:
+        reply_token = getattr(event, "reply_token", None)
+        if reply_token:
+            line_bot_api.reply_message(reply_token, messages)
+        else:
+            tid = _line_target_id(event)
+            if tid:
+                line_bot_api.push_message(tid, messages)
+    except LineBotApiError as e:
+        app.logger.exception("LINE send failed: %s", e)
+
 
 # データ格納先
 BASE_DIR       = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/data
@@ -437,11 +497,10 @@ def _save_mutes(obj: dict):
     _atomic_json_dump(MUTES_FILE, obj or {})
 
 def _line_target_id(event) -> str:
-    # 1:1/グループ/ルームのどれでも一意になるIDを返す
     return getattr(event.source, "user_id", None) \
         or getattr(event.source, "group_id", None) \
         or getattr(event.source, "room_id", None) \
-        or "unknown"
+        or ""
 
 def _is_muted_target(target_id: str) -> bool:
     m = _load_mutes()
@@ -620,7 +679,6 @@ def _extract_json_object(text: str):
 # =========================
 #  重複統合（タイトル基準）
 # =========================
-import unicodedata
 
 DEDUPE_ON_SAVE = os.environ.get("DEDUPE_ON_SAVE", "1").lower() in {"1","true","on","yes"}
 DEDUPE_USE_AI  = os.environ.get("DEDUPE_USE_AI",  "1").lower() in {"1","true","on","yes"}
@@ -1450,7 +1508,8 @@ def admin_entry():
         entries=entries,
         entry_edit=entry_edit,
         edit_id=edit_id if edit_id not in (None, "", "None") else None,
-        role=session.get("role", "")
+        role=session.get("role", ""),
+        global_paused=_is_global_paused(), 
     )
 
 @app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
@@ -1891,6 +1950,7 @@ def admin_unhit_questions():
     return render_template("admin_unhit.html", unhit_logs=unhit_logs, role=session.get("role",""))
 
 @app.route("/api/faq_suggest", methods=["POST"])
+@limit_deco(ASK_LIMITS)   # ★ これを追加
 @login_required
 def api_faq_suggest():
     if session.get("role") != "admin":
@@ -2019,12 +2079,19 @@ def admin_backup():
                          download_name=os.path.basename(path),
                          mimetype="application/zip")
 
-    # 画面表示（統計を出すと親切）
+    logs_count = 0
+    if os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, encoding="utf-8") as f:
+                logs_count = sum(1 for _ in f)
+        except Exception:
+            app.logger.exception("count log lines failed")
+
     stats = {
         "entries_count": len(load_entries()),
         "synonyms_count": len(load_synonyms()),
         "notices_count": len(load_notices()),
-        "logs_count": sum(1 for _ in open(LOG_FILE, encoding="utf-8")) if os.path.exists(LOG_FILE) else 0,
+        "logs_count": logs_count,
     }
     return render_template("admin_backup.html", stats=stats)
 
@@ -2041,6 +2108,7 @@ def admin_restore():
         _safe_extractall(zf, BASE_DIR)
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
+
 
 @app.route("/internal/backup", methods=["POST"])
 def internal_backup():
@@ -2066,6 +2134,42 @@ def internal_backup():
     app.logger.info(f"[backup] saved: {path}")
     return jsonify({"ok": True, "saved": path})
 
+
+# ===== LINE 緊急一括停止（管理者のみ） =====
+
+@app.route("/admin/line/pause", methods=["POST"])
+@login_required
+def admin_line_pause():
+    if session.get("role") != "admin":
+        abort(403)
+    _set_global_paused(True)
+    flash("LINE応答を一時停止しました（再開するまで完全サイレンス）")
+    return redirect(request.referrer or url_for("admin_entry"))
+
+@app.route("/admin/line/resume", methods=["POST"])
+@login_required
+def admin_line_resume():
+    if session.get("role") != "admin":
+        abort(403)
+    _set_global_paused(False)
+    flash("LINE応答を再開しました")
+    return redirect(request.referrer or url_for("admin_entry"))
+
+@app.route("/admin/line/mutes", methods=["GET","POST"])
+@login_required
+def admin_line_mutes():
+    if session.get("role") != "admin":
+        abort(403)
+    if request.method == "POST":
+        tid = (request.form.get("target_id") or "").strip()
+        if tid:
+            _set_muted_target(tid, False, who="admin")
+            flash(f"ミュート解除: {tid}")
+        return redirect(url_for("admin_line_mutes"))
+    # 画面を追加したくない場合は JSON で確認できるようにしておく
+    m = _load_mutes()
+    rows = [{"target_id": k, **(v or {})} for k, v in m.items()]
+    return jsonify({"paused": _is_global_paused(), "mutes": rows})
 
 # =========================
 #  認証
@@ -2258,7 +2362,6 @@ def admin_synonyms_autogen():
         target = request.values.get("target", "missing")      # "missing" or "all"
         mode   = request.values.get("mode", "append")         # "append" or "overwrite"
 
-        # ▼▼ ここを既存から少し変更：より安全な既定値＆ENVで可変 ▼▼
         try:
             MAX_TAGS_PER_REQUEST = max(1, min(60, int(request.values.get("limit", 20))))
         except Exception:
@@ -2270,21 +2373,22 @@ def admin_synonyms_autogen():
 
         HARD_DEADLINE_SEC = int(os.getenv("SYN_AUTOGEN_DEADLINE", "20"))
         start_time = time.time()
-
-        # ▼▼ 追加：キュー使用フラグ ▼▼
         use_queue = (request.values.get("use_queue", "1").lower() in {"1","true","on","yes"})
 
-        # 既存の all_tags / missing 計算:
+        def _norm(s: str) -> str:
+            # NFKC + 空白正規化 + 小文字
+            return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(s or "").strip())).lower()
+
         all_tags, have, missing = _compute_tag_sets_for_synonyms()
 
         if use_queue:
             q = _load_syn_queue()
-            if not q.get("pending"):
-                # キューが無ければ初期化
+            # キューが空、またはターゲットが変わったら再構築
+            if not q.get("pending") or q.get("target") != target:
                 pending = sorted(missing if target != "all" else all_tags)
                 q = {"target": target, "created": datetime.datetime.now().isoformat(), "pending": pending}
                 _save_syn_queue(q)
-            target_tags = list(q["pending"][:MAX_TAGS_PER_REQUEST])
+            target_tags = list(q.get("pending", [])[:MAX_TAGS_PER_REQUEST])
         else:
             target_tags = sorted(missing if target != "all" else all_tags)[:MAX_TAGS_PER_REQUEST]
 
@@ -2292,11 +2396,11 @@ def admin_synonyms_autogen():
             flash("処理対象のタグがありません（未生成なし or キュー空）")
             return redirect(url_for("admin_synonyms"))
 
-        merged = {}
-        i = 0
-        updated = 0
+        # 成功したタグのみ収集（→ この分だけキューから消す）
+        success_results: Dict[str, List[str]] = {}
+        processed_count = 0  # 試行した件数（タイムアウトで部分実行の可能性あり）
 
-        # === ここから既存のループを流用（CHUNKずつAI呼び出し） ===
+        i = 0
         while i < len(target_tags):
             if time.time() - start_time > HARD_DEADLINE_SEC:
                 flash("タイムアウト回避のため途中まで保存しました。もう一度実行してください。")
@@ -2334,20 +2438,26 @@ def admin_synonyms_autogen():
 
             data = _extract_json_object(content)
             if isinstance(data, dict) and data:
+                # 正規化マップ（AI出力→要求chunkのどれかに対応付け）
+                chunk_norm_map = {_norm(t): t for t in chunk}
                 for k, v in data.items():
-                    if isinstance(v, str):
-                        syns = _split_lines_commas(v)
-                    elif isinstance(v, (list, tuple)):
-                        syns = [str(x).strip() for x in v if str(x).strip()]
-                    else:
-                        syns = []
-                    merged[str(k).strip()] = syns
+                    kn = _norm(k)
+                    if kn in chunk_norm_map:  # 要求したタグに限って採用
+                        if isinstance(v, str):
+                            syns = _split_lines_commas(v)
+                        elif isinstance(v, (list, tuple)):
+                            syns = [str(x).strip() for x in v if str(x).strip()]
+                        else:
+                            syns = []
+                        success_results[chunk_norm_map[kn]] = syns
 
+            processed_count += len(chunk)
             i += CHUNK
 
-        # 反映
+        # 反映（成功分のみ）
         cur = load_synonyms()
-        for tag, syns in merged.items():
+        updated = 0
+        for tag, syns in success_results.items():
             if mode == "overwrite":
                 cur[tag] = syns
             else:
@@ -2358,27 +2468,26 @@ def admin_synonyms_autogen():
             updated += 1
         save_synonyms(cur)
 
-        # ▼▼ 追加：キューから消す ▼▼
         if use_queue:
             q = _load_syn_queue()
-            # 先頭から、今回処理した target_tags の件数だけ削る
-            q["pending"] = q.get("pending", [])[len(target_tags):]
+            pending = q.get("pending", [])
+            # 成功したものだけ取り除く（順序は維持しつつフィルタ）
+            success_norms = {_norm(t) for t in success_results.keys()}
+            new_pending = [t for t in pending if _norm(t) not in success_norms]
+            dropped = len(pending) - len(new_pending)
+            q["pending"] = new_pending
+            q["target"] = target  # 念のため同期
             _save_syn_queue(q)
-            flash(f"AI生成: {updated}/{len(target_tags)} タグ反映（キュー残り {len(q['pending'])} 件）")
+            flash(f"AI生成: {updated}/{processed_count} タグ反映（キューから {dropped} 件削除 / 残り {len(new_pending)} 件）")
         else:
-            total = len(target_tags)
+            # 非キュー時は試行件数ベースで進捗表示
             if updated == 0:
                 flash("AI生成に失敗しました。もう一度実行してください。")
-            elif updated < total:
-                flash(f"AI生成（部分実行）: {updated}/{total} タグを反映しました。")
+            elif updated < processed_count:
+                flash(f"AI生成（部分実行）: {updated}/{processed_count} タグを反映しました。")
             else:
                 flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
 
-        return redirect(url_for("admin_synonyms"))
-
-    except Exception as e:
-        app.logger.exception("autogen endpoint fatal error: %s", e)
-        flash("内部エラーが発生しました（ログを確認してください）。")
         return redirect(url_for("admin_synonyms"))
 
     except Exception as e:
@@ -2402,7 +2511,6 @@ def admin_manual():
     return render_template("admin_manual.html")
 
 # ======== ▼▼▼ ここから追記：テキストファイル管理（/admin/data_files） ▼▼▼ ========
-import unicodedata
 from flask import send_from_directory
 
 # ① 許可する文字クラスを拡張（全角括弧・句読点・記号などを許可）
@@ -2910,67 +3018,91 @@ def find_entry_info(question):
 
 def ai_summarize(snippets, question, model=None):
     model = model or OPENAI_MODEL_PRIMARY
+    text = "\n\n".join([s.strip() for s in snippets if s and str(s).strip()])
+    if not text:
+        return ""
     prompt = (
-        "以下は五島観光・生活ガイド資料から関連する抜粋です。\n"
-        f"質問: 「{question}」\n"
-        "抜粋資料を参考に、やさしく正確に回答してください。\n\n"
-        "-----\n"
-        + "\n---\n".join(snippets)
-        + "\n-----"
+        "以下の資料断片のみを根拠に、質問に答える日本語要約を300字以内で作成してください。"
+        "推測や未確認情報は避け、根拠が無ければ『不明』と明記。"
+        f"\n[質問]\n{question}\n[資料]\n{text[:4000]}"
     )
-    return openai_chat(
-        model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.5,
-        max_tokens=512,
-    )
+    try:
+        return (openai_chat(model, [{"role": "user", "content": prompt}], temperature=0.2, max_tokens=500) or "").strip()
+    except Exception:
+        app.logger.exception("ai_summarize failed")
+        return text[:500]
 
 def search_text_files(question, data_dir=DATA_DIR, max_snippets=5, window=80):
-    snippets = []
-    words = set(re.split(r'\s+|　|,|、|。', question))
-    pattern = '|'.join([re.escape(w) for w in words if w])
-    if not pattern:
+    """
+    DATA_DIR 配下の .txt/.md をざっくり全文検索して、ヒット周辺の抜粋を返す。
+    戻り値: list[str] or None
+    """
+    q = (question or "").strip()
+    words = [w for w in re.split(r"[\s　,、。]+", q) if w]
+    # 1文字語のノイズは除く
+    words = [w for w in words if len(w) > 1]
+    if not words:
         return None
-    for root, dirs, files in os.walk(data_dir):
-        for fname in files:
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in {'.txt', '.md'}:
+
+    pat = re.compile("|".join(map(re.escape, words)), re.I)
+    snippets = []
+
+    for root, _, files in os.walk(data_dir):
+        for fn in files:
+            if os.path.splitext(fn)[1].lower() not in {".txt", ".md"}:
                 continue
+            path = os.path.join(root, fn)
             try:
-                fpath = os.path.join(root, fname)
-                # 文字コード自動判定で読む（アップロード時はUTF-8保存だが保険）
-                text, _ = _read_text_any(fpath)
-                for m in re.finditer(pattern, text, re.IGNORECASE):
-                    start = max(m.start()-window, 0)
-                    end = min(m.end()+window, len(text))
-                    snippet = text[start:end].replace('\n', ' ').strip()
-                    if snippet not in snippets:
-                        snippets.append(snippet)
-                        if len(snippets) >= max_snippets:
-                            return snippets
-            except Exception as e:
-                print(f"[全文検索エラー] {fname}: {e}")
-    return snippets if snippets else None
+                text, _enc = _read_text_any(path)
+            except Exception:
+                continue
+
+            for m in pat.finditer(text):
+                start = max(0, m.start() - window)
+                end   = min(len(text), m.end() + window)
+                frag  = text[start:end].replace("\r\n", "\n").replace("\r", "\n").strip()
+                if frag and frag not in snippets:
+                    snippets.append(frag)
+                if len(snippets) >= max_snippets:
+                    return snippets
+    return snippets
 
 def fetch_and_search_web(question):
     return None
 
 def format_entry_detail(e: dict) -> str:
     lines = []
-    if e.get("title"):      lines.append(f"◼︎ {e['title']}")
-    if e.get("areas"):      lines.append(f"エリア: {', '.join(e['areas'])}")
-    if e.get("desc"):       lines.append(f"説明: {e['desc']}")
-    if e.get("address"):    lines.append(f"住所: {e['address']}")
-    if e.get("tel"):        lines.append(f"TEL: {e['tel']}")
-    if e.get("open_hours"): lines.append(f"営業時間: {e['open_hours']}")
-    if e.get("holiday"):    lines.append(f"定休日: {e['holiday']}")
-    if e.get("parking"):    lines.append(f"駐車場: {e['parking']}（台数: {e.get('parking_num','')}）")
-    if e.get("payment"):    lines.append("支払い: " + " / ".join(e['payment']))
-    if e.get("extras"):
-        for k, v in (e.get("extras") or {}).items():
-            if v: lines.append(f"{k}: {v}")
-    if e.get("map"):        lines.append(f"地図: {e['map']}")
-    if e.get("links"):      lines.append("リンク: " + " / ".join(e['links']))
+    if e.get("title"):
+        lines.append(f"◼︎ {e['title']}")
+    if e.get("areas"):
+        lines.append(f"エリア: {', '.join(e['areas'])}")
+    if e.get("desc"):
+        lines.append(f"説明: {e['desc']}")
+    if e.get("address"):
+        lines.append(f"住所: {e['address']}")
+    if e.get("map"):
+        lines.append(f"地図: {e['map']}")
+    if e.get("tel"):
+        lines.append(f"TEL: {e['tel']}")
+    if e.get("open_hours"):
+        lines.append(f"営業時間: {e['open_hours']}")
+    if e.get("holiday"):
+        lines.append(f"定休日: {e['holiday']}")
+    if e.get("parking"):
+        pn = f"（{e['parking_num']}台）" if e.get("parking_num") else ""
+        lines.append(f"駐車場: {e['parking']}{pn}")
+    if e.get("payment"):
+        lines.append(f"支払い: {', '.join(e['payment'])}")
+    if e.get("tags"):
+        lines.append(f"タグ: {', '.join(e['tags'])}")
+    if e.get("links"):
+        lines.append("リンク:\n" + "\n".join(f"- {u}" for u in e["links"]))
+    extras = e.get("extras") or {}
+    for k, v in extras.items():
+        if v:
+            lines.append(f"{k}: {v}")
+    if e.get("remark"):
+        lines.append(f"備考: {e['remark']}")
     return "\n".join(lines)
 
 
@@ -3208,7 +3340,9 @@ def _split_for_line(text: str, limit: int) -> List[str]:
     return out
 
 def _reply_or_push(event, text: str):
-    # 全体停止フラグ／対象ミュートなら完全サイレンス
+    if not _line_enabled():
+        return
+    # 全体停止／ミュート中は沈黙
     if _is_global_paused():
         return
     tid = _line_target_id(event)
@@ -3225,12 +3359,14 @@ def _reply_or_push(event, text: str):
     chunks = _split_for_line(text or "", LINE_SAFE_CHARS)
     msgs = [TextSendMessage(text=c) for c in chunks]
 
-    # 1通に収まれば1通だけ、超えるときだけ複数通
+    # reply_token があれば優先して reply、無ければ push
+    reply_token = getattr(event, "reply_token", None)
     try:
-        line_bot_api.reply_message(event.reply_token, msgs if len(msgs) > 1 else msgs[0])
-        return
+        if reply_token:
+            line_bot_api.reply_message(reply_token, msgs if len(msgs) > 1 else msgs[0])
+            return
     except Exception:
-        pass  # pushへ
+        pass  # reply失敗 → pushへ
 
     try:
         if tid:
@@ -3244,9 +3380,18 @@ def _reply_or_push(event, text: str):
 
 @app.route("/callback", methods=["POST"])
 def callback():
+    # LINE未設定 or 全体停止中は即200で何もしない
+    if not _line_enabled() or _is_global_paused():
+        return ("OK", 200)
+    
+    # ★ 緊急停止中は一切処理せず 200 を即返す（LINE側の再送を防ぐ）
+    if _is_global_paused():
+        return ("paused", 200)
+
     # 設定未投入なら即200で返す（ログ汚染回避）
     if not (LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET):
         return ("OK", 200)
+
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
