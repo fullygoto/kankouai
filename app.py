@@ -47,7 +47,7 @@ def _split_lines_commas(val: str) -> List[str]:
 # === これを1つだけ残す（重複は削除） ===
 # 既存をこの定義で置き換え
 # これで既存の max_len=... 呼び出しも通ります
-def _split_for_line(text: str, limit: int = None, max_len: int = None, **_ignored) -> List[str]:
+def _split_for_line(text: str, limit: int = None, max_len: int = None, **_ignored):
     """
     LINEの1通上限を超える長文を安全に分割する。
     - 改行優先で詰め、収まらない行はハードスプリット
@@ -1043,13 +1043,28 @@ def _messages_to_prompt(messages):
 
 def openai_chat(model, messages, **kwargs):
     params = dict(kwargs)
-    mot = (params.pop("max_output_tokens", None)
-           or params.pop("max_completion_tokens", None)
-           or params.pop("max_tokens", None))
-    # GPT-5 系は Responses
-    if model.startswith(("gpt-5",)):
+    mot = (
+        params.pop("max_output_tokens", None)
+        or params.pop("max_completion_tokens", None)
+        or params.pop("max_tokens", None)
+    )
+    temp = params.pop("temperature", None)
+
+    def _to_prompt(msgs):
+        if isinstance(msgs, str):
+            return msgs
+        lines = []
+        for m in msgs:
+            role = m.get("role","user")
+            content = m.get("content","")
+            lines.append(f"{role.upper()}: {content}")
+        return "\n".join(lines)
+
+    use_responses = model.startswith(("gpt-5",))
+    prompt = _to_prompt(messages)
+
+    if use_responses:
         try:
-            prompt = _messages_to_prompt(messages)
             rparams = {"model": model, "input": prompt}
             if mot is not None:
                 rparams["max_output_tokens"] = mot
@@ -1058,7 +1073,30 @@ def openai_chat(model, messages, **kwargs):
         except Exception as e:
             print("[OpenAI error - responses]", e)
             return ""
-    # …以下は既存の chat.completions 分岐のままでOK
+
+    try:
+        chat_params = {}
+        if mot is not None:
+            chat_params["max_tokens"] = mot
+        if temp is not None:
+            chat_params["temperature"] = temp
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role":"user","content":prompt}],
+            **chat_params,
+        )
+        return resp.choices[0].message.content
+    except Exception as e1:
+        print("[OpenAI error - chat.completions]", e1)
+        try:
+            rparams = {"model": model, "input": prompt}
+            if mot is not None:
+                rparams["max_output_tokens"] = mot
+            resp = client.responses.create(**rparams)
+            return getattr(resp, "output_text", "") or ""
+        except Exception as e2:
+            print("[OpenAI error - responses fallback]", e2)
+            return ""
 
 # OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
@@ -3037,41 +3075,31 @@ def admin_data_files_upload():
         if not safe:
             flash(f"スキップ: 不正なファイル名 {f.filename}")
             continue
-        dst = os.path.join(DATA_DIR, safe)
-        if not _ensure_in_data_dir(dst):
-            flash(f"スキップ: 保存先エラー {safe}")
-            continue
 
-        data = f.read()
-        if not data:
-            flash(f"スキップ: 空ファイル {safe}")
-            continue
-
-        # ★ここから追加：同名回避の連番付与
+        # 同名回避の連番付与
         base, ext = os.path.splitext(safe)
         candidate = safe
         i = 1
         while os.path.exists(os.path.join(DATA_DIR, candidate)):
             candidate = f"{base} ({i}){ext}"
             i += 1
+
         dst = os.path.join(DATA_DIR, candidate)
-        # ★ここまで追加
+        if not _ensure_in_data_dir(dst):
+            flash(f"スキップ: 保存先エラー {candidate}")
+            continue
 
-        # 文字コードを自動判定
-        text = None
-        for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "utf-16"):
-            try:
-                text = data.decode(enc)
-                break
-            except UnicodeDecodeError:
-                pass
-        if text is None:
-            text = data.decode("cp932", errors="replace")
+        data = f.read()
+        if not data:
+            flash(f"スキップ: 空ファイル {candidate}")
+            continue
 
-        _write_text(dst, text, encoding="utf-8")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(dst, "wb") as wf:
+            wf.write(data)
         count += 1
 
-    flash(f"アップロード完了：{count} 件")
+    flash(f"{count} ファイルをアップロードしました")
     return redirect(url_for("admin_data_files"))
 
 @app.route("/admin/data_files/new", methods=["POST"])
@@ -3799,7 +3827,7 @@ def _reply_or_push(event, text: str, *, reqgen: int | None = None):
     def stale() -> bool:
         return (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen)
 
-    chunks = _split_for_line(text, max_len=4900)
+    chunks = _split_for_line(text, limit=4900)
     first = True
     for ch in chunks:
         if stale():
@@ -3872,35 +3900,49 @@ def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[s
         parts.append(rest)
     return parts
 
-def _reply_or_push_multi(event, texts: List[str]):
-    """複数メッセージでreply→失敗時pushにフォールバック。"""
-    msgs = [TextSendMessage(text=t) for t in texts if t]
-    if not msgs:
-        msgs = [TextSendMessage(text="（空メッセージ）")]
-
-    try:
-        if len(msgs) <= LINE_MAX_PER_REQUEST:
-            line_bot_api.reply_message(event.reply_token, msgs)
-        else:
-            line_bot_api.reply_message(event.reply_token, msgs[:LINE_MAX_PER_REQUEST])
-            target_id = _target_id_from_event(event)
-            batch = msgs[LINE_MAX_PER_REQUEST:]
-            # 以降はpushで残りを送る（5件ずつ）
-            for i in range(0, len(batch), LINE_MAX_PER_REQUEST):
-                line_bot_api.push_message(target_id, batch[i:i+LINE_MAX_PER_REQUEST])
+# === LINE 返信ユーティリティ（差し替え） ===
+def _reply_or_push(event, text: str):
+    """長文は自動分割して返信。reply は最大5通に収め、溢れた分は push で送る。"""
+    if not _line_enabled() or not line_bot_api:
+        app.logger.info("[LINE disabled] would send: %r", text)
         return
-    except Exception as e:
-        app.logger.exception("reply multi failed -> fallback to push: %s", e)
+
+    parts = [p for p in _split_for_line(text, limit=LINE_SAFE_CHARS) if (p or "").strip()]
+    if not parts:
+        parts = [""]  # 空でも最低1通
+
+    MAX_PER_CALL = 5
+    reply_token = getattr(event, "reply_token", None)
 
     try:
-        target_id = _target_id_from_event(event)
-        if not target_id:
-            return
-        # push（5件ごと）
-        for i in range(0, len(msgs), LINE_MAX_PER_REQUEST):
-            line_bot_api.push_message(target_id, msgs[i:i+LINE_MAX_PER_REQUEST])
-    except Exception as e:
-        app.logger.exception("push multi failed: %s", e)
+        if reply_token:
+            head = [TextSendMessage(text=p) for p in parts[:MAX_PER_CALL]]
+            line_bot_api.reply_message(reply_token, head)
+
+            # 残りがあれば push（reply_token は1回しか使えない）
+            rest = parts[MAX_PER_CALL:]
+            if rest:
+                tid = _line_target_id(event)
+                if tid:
+                    for i in range(0, len(rest), MAX_PER_CALL):
+                        chunk = [TextSendMessage(text=p) for p in rest[i:i+MAX_PER_CALL]]
+                        line_bot_api.push_message(tid, chunk)
+        else:
+            # 直接 push（グループやルーム含む）
+            tid = _line_target_id(event)
+            if tid:
+                for i in range(0, len(parts), MAX_PER_CALL):
+                    chunk = [TextSendMessage(text=p) for p in parts[i:i+MAX_PER_CALL]]
+                    line_bot_api.push_message(tid, chunk)
+
+    except LineBotApiError as e:
+        global SEND_FAIL_COUNT, LAST_SEND_ERROR, SEND_ERROR_COUNT
+        SEND_FAIL_COUNT += 1
+        SEND_ERROR_COUNT += 1
+        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed")
+        if LINE_RETHROW_ON_SEND_ERROR:
+            raise
 
 def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
     """複数テキストを順に push。重複抑止＋世代ガード付き。"""
