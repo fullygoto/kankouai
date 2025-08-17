@@ -225,6 +225,7 @@ ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on
 from urllib.parse import urlparse
 
 CSRF_EXEMPT_ENDPOINTS = set()
+CSRF_EXEMPT_ENDPOINTS.add("callback")
 
 # CSRF 保護対象のパス接頭辞（管理／店舗）
 CSRF_PROTECT_PATHS = ("/admin", "/shop")
@@ -472,6 +473,26 @@ STOP_COMMANDS = {
 RESUME_COMMANDS = {
     "再開", "解除", "応答再開", "start", "resume", "unmute"
 }
+# （ここから追記）停止中案内の一回通知設定
+LINE_PAUSE_NOTICE = os.getenv("LINE_PAUSE_NOTICE", "1").lower() in {"1","true","on","yes"}
+
+def _notice_paused_once(event, target_id: str):
+    """全体一時停止中のとき、対象に一度だけ“停止中”メッセージを返す"""
+    if not LINE_PAUSE_NOTICE:
+        return
+    try:
+        # 送信履歴がある実装ならスパム防止で使う
+        if "_was_sent_recent" in globals():
+            key = "__paused_notice__"
+            if _was_sent_recent(target_id, key, mark=True):
+                return
+        _reply_or_push(event,
+            "（現在メンテナンスのため一時停止中です。再開までお待ちください）\n"
+            "※再開後に応答が必要なら「再開」と送ってください。"
+        )
+    except Exception:
+        app.logger.exception("paused notice failed")
+# （追記ここまで）
 
 # 1通原則＋長文だけ分割のための閾値（既に定義済みならそのままでOK）
 LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3800"))
@@ -650,8 +671,9 @@ def _line_mute_gate(event, text: str) -> bool:
         return True
 
     # ---- ここから通常のガード ----
-    # 全体一時停止中は沈黙（上の再開/停止は例外的に応答済み）
+    # 全体一時停止中は沈黙（ただし一度だけ案内は返す）
     if _is_global_paused():
+        _notice_paused_once(event, tid)   # ★ これを追加
         return True
 
     # 会話ミュート中は沈黙
@@ -2846,8 +2868,8 @@ def _answer_from_entries_min(question: str):
 
     if len(hits) == 1:
         e = hits[0]
-        areas = " / ".join(e.get("areas", []) or "") or ""
-        tags  = ", ".join(e.get("tags", []) or "") or ""
+        areas = " / ".join(e.get("areas") or [])
+        tags  = ", ".join(e.get("tags") or [])
         lines = [
             f"",
             (e.get("desc","") or "").strip(),
@@ -3900,49 +3922,73 @@ def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[s
         parts.append(rest)
     return parts
 
-# === LINE 返信ユーティリティ（差し替え） ===
+# === LINE 返信ユーティリティ（★安全送信版） ===
 def _reply_or_push(event, text: str):
-    """長文は自動分割して返信。reply は最大5通に収め、溢れた分は push で送る。"""
+    """長文は自動分割して返信。5通上限を厳守。超過分は結合 or pushで後送。"""
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
 
-    parts = [p for p in _split_for_line(text, limit=LINE_SAFE_CHARS) if (p or "").strip()]
-    if not parts:
-        parts = [""]  # 空でも最低1通
+    def _compress_to(parts, lim):
+        """分割済みpartsを、1通あたりlim文字以内でできるだけ結合して個数を減らす"""
+        out, buf = [], ""
+        for p in parts:
+            if not buf:
+                buf = p
+                continue
+            if len(buf) + 1 + len(p) <= lim:
+                buf += "\n" + p
+            else:
+                out.append(buf)
+                buf = p
+        if buf:
+            out.append(buf)
+        return out
 
+    lim = LINE_SAFE_CHARS
+    parts = _split_for_line(text, lim) or [""]
+
+    # まずは結合して個数をできるだけ減らす
+    parts = _compress_to(parts, lim)
+
+    # reply API の上限は5通
     MAX_PER_CALL = 5
-    reply_token = getattr(event, "reply_token", None)
+
+    def _do_reply(msgs):
+        line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=m) for m in msgs])
+
+    def _do_push(tid, msgs):
+        line_bot_api.push_message(tid, [TextSendMessage(text=m) for m in msgs])
 
     try:
-        if reply_token:
-            head = [TextSendMessage(text=p) for p in parts[:MAX_PER_CALL]]
-            line_bot_api.reply_message(reply_token, head)
-
-            # 残りがあれば push（reply_token は1回しか使えない）
+        if getattr(event, "reply_token", None):
+            head = parts[:MAX_PER_CALL]
+            _do_reply(head)
             rest = parts[MAX_PER_CALL:]
-            if rest:
-                tid = _line_target_id(event)
-                if tid:
-                    for i in range(0, len(rest), MAX_PER_CALL):
-                        chunk = [TextSendMessage(text=p) for p in rest[i:i+MAX_PER_CALL]]
-                        line_bot_api.push_message(tid, chunk)
         else:
-            # 直接 push（グループやルーム含む）
+            # reply_tokenが無ければpushのみ
             tid = _line_target_id(event)
             if tid:
                 for i in range(0, len(parts), MAX_PER_CALL):
-                    chunk = [TextSendMessage(text=p) for p in parts[i:i+MAX_PER_CALL]]
-                    line_bot_api.push_message(tid, chunk)
+                    _do_push(tid, parts[i:i+MAX_PER_CALL])
+            return
+
+        # 余りはpushで後送（ベストエフォート）
+        if rest:
+            tid = _line_target_id(event)
+            if tid:
+                for i in range(0, len(rest), MAX_PER_CALL):
+                    try:
+                        _do_push(tid, rest[i:i+MAX_PER_CALL])
+                    except LineBotApiError as e:
+                        app.logger.warning("LINE push failed on chunk %s: %s", i//MAX_PER_CALL, e)
+                        break
 
     except LineBotApiError as e:
-        global SEND_FAIL_COUNT, LAST_SEND_ERROR, SEND_ERROR_COUNT
+        global SEND_FAIL_COUNT, LAST_SEND_ERROR
         SEND_FAIL_COUNT += 1
-        SEND_ERROR_COUNT += 1
         LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
         app.logger.exception("LINE send failed")
-        if LINE_RETHROW_ON_SEND_ERROR:
-            raise
 
 def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
     """複数テキストを順に push。重複抑止＋世代ガード付き。"""
