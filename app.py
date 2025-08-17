@@ -2858,20 +2858,22 @@ def _answer_from_entries_min(question: str):
             " ".join(e.get("tags",[]) or []),
             " ".join(e.get("areas",[]) or []),
         ])).lower()
-        # ★修正：冗長な all([...]) を排除し、素直に部分一致
         if ql and (ql in hay):
             hits.append(e)
 
     if not hits:
+        # ← ここで data/ の txt を当ててみる
+        txt_ans = _answer_from_data_txt(q)
+        if txt_ans:
+            return txt_ans, False
         refine, _meta = build_refine_suggestions(q)
         return "該当が見つかりませんでした。\n" + refine, False
 
     if len(hits) == 1:
         e = hits[0]
-        areas = " / ".join(e.get("areas") or [])
-        tags  = ", ".join(e.get("tags") or [])
+        areas = " / ".join(e.get("areas", []) or "") or ""
+        tags  = ", ".join(e.get("tags", []) or "") or ""
         lines = [
-            f"",
             (e.get("desc","") or "").strip(),
         ]
         if e.get("address"):    lines.append(f"住所：{e['address']}")
@@ -2895,8 +2897,72 @@ def _answer_from_entries_min(question: str):
     refine, _meta = build_refine_suggestions(q)
     return "\n".join(lines) + "\n\n" + refine, True
 
+# =========================
+#  即返し（天気 / 運行状況）
+# =========================
+import unicodedata as _unic
 
-# --- メッセージ受信 ---
+def _norm_text_jp(s: str) -> str:
+    return _unic.normalize("NFKC", (s or "")).strip().lower()
+
+def get_weather_reply(text: str):
+    """
+    「天気/天候/予報」を含む問い合わせなら、五島の主要エリアの天気リンクを即返す。
+    戻り値: (message, True) / ("", False)
+    """
+    t = _norm_text_jp(text)
+    if not any(k in t for k in ["天気", "天候", "予報", "weather"]):
+        return "", False
+
+    msg = (
+        "【五島列島の主な天気情報リンク】\n"
+        "五島市: https://weathernews.jp/onebox/tenki/nagasaki/42211/\n"
+        "新上五島町: https://weathernews.jp/onebox/tenki/nagasaki/42411/\n"
+        "小値賀町: https://tenki.jp/forecast/9/45/8440/42383/\n"
+        "宇久町: https://weathernews.jp/onebox/33.262381/129.131027/q=%E9%95%B7%E5%B4%8E%E7%9C%8C%E4%BD%90%E4%B8%96%E4%BF%9D%E5%B8%82%E5%AE%87%E4%B9%85%E7%94%BA&v=da56215a2617fc2203c6cae4306d5fd8c92e3e26c724245d91160a4b3597570a&lang=ja&type=week"
+    )
+    return msg, True
+
+
+def get_transport_reply(text: str):
+    """
+    「運行/運航/欠航/状況」＋（船/フェリー/飛行機 等）を検出して即返す。
+    船/飛行機どちらとも特定できなければ両方をまとめて返す。
+    戻り値: (message, True) / ("", False)
+    """
+    t = _norm_text_jp(text)
+    if not any(k in t for k in ["運行", "運航", "運休", "欠航", "状況", "情報", "status"]):
+        # キーワードが薄くても “船/フェリー/飛行機/空港” があれば拾う
+        if not any(k in t for k in ["船", "フェリー", "ジェットフォイル", "高速船", "太古", "飛行機", "空港"]):
+            return "", False
+
+    wants_ship = any(k in t for k in ["船", "フェリー", "ジェットフォイル", "高速船", "太古", "九州商船", "産業汽船"])
+    wants_fly  = any(k in t for k in ["飛行機", "空港", "フライト", "福江空港", "五島つばき空港", "ana", "jal"])
+
+    ship_section = (
+        "【長崎ー五島航路 運行状況】\n"
+        "・野母商船「フェリー太古」運航情報  \n"
+        "  http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+        "・九州商船「フェリー・ジェットフォイル」運航情報  \n"
+        "  https://kyusho.co.jp/status\n"
+        "・五島産業汽船「フェリー」運航情報  \n"
+        "  https://www.goto-sangyo.co.jp/\n"
+        "その他の航路や詳細は各リンクをご覧ください。"
+    )
+    fly_section = (
+        "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
+        "▶ https://www.fukuekuko.jp/"
+    )
+
+    if wants_ship and not wants_fly:
+        return ship_section, True
+    if wants_fly and not wants_ship:
+        return fly_section, True
+    # どちらとも特定できない/両方含む → 両方まとめて
+    return ship_section + "\n\n" + fly_section, True
+
+
+
 # --- メッセージ受信 ---
 if handler:
     @handler.add(MessageEvent, message=TextMessage)
@@ -3052,6 +3118,50 @@ def _list_txt_files():
         f["mtime"] = datetime.datetime.fromtimestamp(f["mtime_ts"]).strftime("%Y-%m-%d %H:%M:%S")
         del f["mtime_ts"]
     return files
+
+def _answer_from_data_txt(question: str) -> str:
+    """
+    DATA_DIR 配下の .txt / .md をざっくりスキャンし、
+    質問語にヒットしたファイルの冒頭～近傍を OpenAI で 300～400字に要約。
+    ヒットなしなら空文字を返す。
+    """
+    try:
+        files = _list_txt_files()
+        if not files:
+            return ""
+        q = _norm_text_jp(question)
+        # 2文字以上のキーワードだけ使う（日本語想定の超簡易スコア）
+        kws = [w for w in re.split(r"[ \u3000、。・\n\r\t]", q) if len(w) >= 2]
+        best = None
+        best_score = 0
+        for f in files:
+            path = os.path.join(DATA_DIR, f["name"])
+            txt, _enc = _read_text_any(path)
+            tnorm = _norm_text_jp(txt)
+            score = sum(tnorm.count(k) for k in kws) if kws else 0
+            if score > best_score:
+                best_score, best = score, txt[:5000]  # 長すぎると要約が重いので頭5kに制限
+        if best_score <= 0 or not best:
+            return ""
+        # 要約（OpenAIなしでもそのまま返す）
+        try:
+            prompt = (
+                "以下の資料から、質問者に役立つ部分だけを抽出して日本語で300～400字に要約してください。"
+                "箇条書き可。URLや地名は残してください。\n"
+                f"【質問】{question}\n---\n{best[:8000]}\n---"
+            )
+            out = openai_chat(
+                OPENAI_MODEL_PRIMARY,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=500,
+            ).strip()
+            return out or best[:400]
+        except Exception:
+            return best[:400]
+    except Exception:
+        app.logger.exception("_answer_from_data_txt failed")
+        return ""
 
 # ② 例外を握ってログ＋フラッシュにして 500 を防ぐ
 @app.route("/admin/data_files", methods=["GET"])
