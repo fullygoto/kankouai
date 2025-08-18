@@ -2898,7 +2898,7 @@ def _answer_from_entries_min(question: str):
     return "\n".join(lines) + "\n\n" + refine, True
 
 # =========================
-#  即返し（天気 / 運行状況）
+#  即返し（天気 / 運行状況） - 保証版
 # =========================
 import unicodedata as _unic
 
@@ -2907,8 +2907,7 @@ def _norm_text_jp(s: str) -> str:
 
 def get_weather_reply(text: str):
     """
-    「天気/天候/予報」を含む問い合わせなら、五島の主要エリアの天気リンクを即返す。
-    戻り値: (message, True) / ("", False)
+    「天気/天候/予報/weather」を含めば即リンクを返す
     """
     t = _norm_text_jp(text)
     if not any(k in t for k in ["天気", "天候", "予報", "weather"]):
@@ -2923,21 +2922,24 @@ def get_weather_reply(text: str):
     )
     return msg, True
 
-
 def get_transport_reply(text: str):
     """
-    「運行/運航/欠航/状況」＋（船/フェリー/飛行機 等）を検出して即返す。
-    船/飛行機どちらとも特定できなければ両方をまとめて返す。
-    戻り値: (message, True) / ("", False)
+    「運行/運航/運休/欠航/状況/情報/status」か、乗り物語（船/フェリー/…/空港 等）の
+    どちらかでも含まれていれば即リンクを返す。
+    片方しか特定できなければ、その片方だけ返す。
     """
     t = _norm_text_jp(text)
-    if not any(k in t for k in ["運行", "運航", "運休", "欠航", "状況", "情報", "status"]):
-        # キーワードが薄くても “船/フェリー/飛行機/空港” があれば拾う
-        if not any(k in t for k in ["船", "フェリー", "ジェットフォイル", "高速船", "太古", "飛行機", "空港"]):
-            return "", False
 
-    wants_ship = any(k in t for k in ["船", "フェリー", "ジェットフォイル", "高速船", "太古", "九州商船", "産業汽船"])
-    wants_fly  = any(k in t for k in ["飛行機", "空港", "フライト", "福江空港", "五島つばき空港", "ana", "jal"])
+    state_hit = any(k in t for k in ["運行", "運航", "運休", "欠航", "状況", "情報", "status"])
+    vehicle_hit = any(k in t for k in [
+        "船","フェリー","ジェットフォイル","高速船","太古",
+        "飛行機","空港","福江空港","五島つばき空港","ana","jal"
+    ])
+    if not (state_hit or vehicle_hit):
+        return "", False
+
+    wants_ship = any(k in t for k in ["船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船"])
+    wants_fly  = any(k in t for k in ["飛行機","空港","フライト","福江空港","五島つばき空港","ana","jal"])
 
     ship_section = (
         "【長崎ー五島航路 運行状況】\n"
@@ -2958,10 +2960,30 @@ def get_transport_reply(text: str):
         return ship_section, True
     if wants_fly and not wants_ship:
         return fly_section, True
-    # どちらとも特定できない/両方含む → 両方まとめて
     return ship_section + "\n\n" + fly_section, True
 
 
+# ====== どこに貼る？ ======
+# app = Flask(__name__) 以降、get_weather_reply / get_transport_reply の定義より「後」ならどこでもOK。
+# 例：get_transport_reply の直下あたりに置くのが分かりやすいです。
+
+@app.route("/_debug/where")
+def _debug_where():
+    import os
+    return jsonify({"app_file": __file__, "cwd": os.getcwd()})
+
+
+@app.route("/_debug/test_weather")
+def _debug_test_weather():
+    q = request.args.get("q", "") or ""
+    m, ok = get_weather_reply(q)
+    return jsonify({"ok": ok, "answer": m})
+
+@app.route("/_debug/test_transport")
+def _debug_test_transport():
+    q = request.args.get("q", "") or ""
+    m, ok = get_transport_reply(q)
+    return jsonify({"ok": ok, "answer": m})
 
 # --- メッセージ受信 ---
 if handler:
@@ -2982,17 +3004,20 @@ if handler:
         # 即答リンク（天気/航路）
         try:
             w, ok = get_weather_reply(text)
+            app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
             if ok and w:
                 _reply_or_push(event, w)
                 save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
                 return
-            t, ok = get_transport_reply(text)
-            if ok and t:
-                _reply_or_push(event, t)
-                save_qa_log(text, t, source="line", hit_db=False, extra={"kind":"transport"})
+
+            tmsg, ok = get_transport_reply(text)
+            app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
+            if ok and tmsg:
+                _reply_or_push(event, tmsg)
+                save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
                 return
-        except Exception:
-            app.logger.exception("quick link reply failed")
+        except Exception as e:
+            app.logger.exception(f"quick link reply failed: {e}")
 
         # スモールトーク/ヘルプ
         try:
@@ -3349,6 +3374,40 @@ def admin_data_files_rename():
     return redirect(url_for("admin_data_files", edit=new_s))
 # ======== ▲▲▲ 追記ここまで ▲▲▲
 
+@app.route("/_debug/quick")
+def _debug_quick():
+    # 本番はトークン必須にしたい場合は下を有効化
+    # if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
+    #     abort(404)
+
+    q = request.args.get("q", "") or ""
+    t = _norm_text_jp(q)
+
+    w_msg, w_ok   = get_weather_reply(q)
+    tr_msg, tr_ok = get_transport_reply(q)
+
+    def _hit(s, words):
+        return [w for w in words if w in s]
+
+    weather_words  = ["天気","天候","予報","weather"]
+    primary_words  = ["運行","運航","運休","欠航","状況","情報","status"]
+    vehicle_words  = ["船","フェリー","ジェットフォイル","高速船","太古","飛行機","空港","福江空港","五島つばき空港","ana","jal"]
+
+    return jsonify({
+        "q": q,
+        "normalized": t,
+        "weather": {
+            "matched": bool(w_ok and w_msg),
+            "kw_hit": _hit(t, weather_words),
+            "message": w_msg,
+        },
+        "transport": {
+            "matched": bool(tr_ok and tr_msg),
+            "kw1_hit": _hit(t, primary_words),
+            "kw2_hit": _hit(t, vehicle_words),
+            "message": tr_msg,
+        }
+    })
 
 # =========================
 #  トップ/ヘルスチェック
@@ -3381,156 +3440,6 @@ https://www.goto-sangyo.co.jp/
 その他の航路や詳細は各リンクをご覧ください。
 """
 
-# === 天気・交通（フェリー／飛行機）応答 ===
-def get_weather_reply(question):
-    """天気リンクを返す。ENABLE_FOREIGN_LANG=0 のときは常に日本語で返答。"""
-    weather_keywords = [
-        "天気", "天候", "気象", "天気予報", "雨", "晴", "曇", "降水", "気温",
-        "weather", "forecast", "temperature", "rain", "sunny", "cloud",
-        "天氣", "天气", "氣象", "預報", "温度", "陰", "晴朗"
-    ]
-    if not question:
-        return None, False
-
-    if not any(kw in question for kw in weather_keywords):
-        return None, False
-
-    lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
-
-    # エリア名が含まれていれば個別リンクを返す
-    for entry in WEATHER_LINKS:
-        if entry["area"] in question:
-            if lang == "zh-Hant":
-                return f"【{entry['area']}天氣】\n最新資訊：\n{entry['url']}\n（可查看今日與一週預報）", True
-            if lang == "en":
-                return f"[{entry['area']} weather]\nLatest forecast:\n{entry['url']}", True
-            return f"【{entry['area']}の天気】\n最新の{entry['area']}の天気情報はこちら\n{entry['url']}", True
-
-    # エリア未特定 → 主要リンク一覧
-    if lang == "zh-Hant":
-        reply = "【五島列島・主要天氣連結】\n"
-        for e in WEATHER_LINKS:
-            reply += f"{e['area']}: {e['url']}\n"
-        return reply.strip(), True
-
-    if lang == "en":
-        reply = "Main weather links for the Goto Islands:\n"
-        for e in WEATHER_LINKS:
-            reply += f"{e['area']}: {e['url']}\n"
-        return reply.strip(), True
-
-    # 日本語
-    reply = "【五島の主な天気リンク】\n"
-    for e in WEATHER_LINKS:
-        reply += f"{e['area']}: {e['url']}\n"
-    return reply.strip(), True
-
-
-def get_transport_reply(question):
-    """
-    フェリー／高速船／飛行機（航空便）の運行・運航リンクを返す。
-    - フェリー関連語のみ → フェリー情報
-    - 飛行機関連語のみ → 飛行機情報
-    - 両方 or あいまい → 両方まとめて
-    """
-    if not question:
-        return None, False
-
-    ferry_keywords = [
-        "フェリー", "船", "ジェットフォイル", "高速船", "運航", "運行", "ダイヤ",
-        "九州商船", "野母商船", "五島産業汽船",
-        "ferry", "boat", "ship", "schedule", "status",
-        "渡輪", "船班", "航班", "航行", "運行資訊"
-    ]
-    flight_keywords = [
-        "飛行機", "航空", "空路", "便", "フライト", "空港", "到着", "出発", "欠航", "遅延",
-        "ANA", "オリエンタルエアブリッジ", "ORC", "五島つばき空港", "福江空港",
-        "flight", "airport", "arrival", "departure", "delay", "cancel",
-        "航班", "機場", "起飛", "到達", "延誤", "取消"
-    ]
-
-    has_ferry = any(kw in question for kw in ferry_keywords)
-    has_flight = any(kw in question for kw in flight_keywords)
-
-    if not (has_ferry or has_flight):
-        return None, False
-
-    lang = "ja" if not ENABLE_FOREIGN_LANG else detect_lang_simple(question)
-
-    # --- 航空便（飛行機）案内（言語別） ---
-    # ※ リンクは公式の運航情報/トップへの汎用リンク。必要に応じて詳細URLに差し替えてください。
-    if lang == "zh-Hant":
-        flight_text = (
-            "【五島椿機場（福江）航班資訊】\n"
-            "・Oriental Air Bridge（長崎／福岡 ⇄ 五島）\n"
-            "https://www.orc-air.co.jp/\n"
-            "・ANA（與 ORC 共同營運的班次）\n"
-            "https://www.ana.co.jp/\n"
-            "最新的延誤／取消請查看各公司「運航資訊」頁面。"
-        )
-        ferry_text = (
-            "【長崎—五島 航線・運行資訊】\n"
-            "・野母商船（太古輪）\n"
-            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-            "・九州商船（渡輪／噴射船）\n"
-            "https://kyusho.co.jp/status\n"
-            "・五島產業汽船（渡輪）\n"
-            "https://www.goto-sangyo.co.jp/\n"
-            "詳情請見各連結。"
-        )
-    elif lang == "en":
-        flight_text = (
-            "[Goto Tsubaki Airport (Fukue) – flight info]\n"
-            "- Oriental Air Bridge (Nagasaki / Fukuoka ⇄ Goto)\n"
-            "https://www.orc-air.co.jp/\n"
-            "- ANA (code-share with ORC)\n"
-            "https://www.ana.co.jp/\n"
-            "For delays/cancellations, check each airline's status page."
-        )
-        ferry_text = (
-            "[Nagasaki — Goto ferry status]\n"
-            "- Nomo Shosen (Taiko ferry)\n"
-            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-            "- Kyushu Shosen (Ferry / Jetfoil)\n"
-            "https://kyusho.co.jp/status\n"
-            "- Goto Sangyo Kisen (Ferry)\n"
-            "https://www.goto-sangyo.co.jp/\n"
-            "For details, check each link."
-        )
-    else:
-        # 日本語
-        flight_text = (
-            "【五島つばき空港（福江）・運航情報】\n"
-            "・オリエンタルエアブリッジ（長崎／福岡 ⇄ 五島）\n"
-            "https://www.orc-air.co.jp/\n"
-            "・ANA（ORCとの共同運航便を含む）\n"
-            "https://www.ana.co.jp/\n"
-            "最新の欠航・遅延は各社の「運航情報」ページをご確認ください。"
-        )
-        # 既存の FERRY_INFO を優先利用（無い場合はフォールバック文）
-        ferry_text = FERRY_INFO if 'FERRY_INFO' in globals() else (
-            "【長崎ー五島航路 運行状況】\n"
-            "・野母商船「フェリー太古」運航情報\n"
-            "http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-            "・九州商船「フェリー・ジェットフォイル」運航情報\n"
-            "https://kyusho.co.jp/status\n"
-            "・五島産業汽船「フェリー」運航情報\n"
-            "https://www.goto-sangyo.co.jp/\n"
-            "その他の航路や詳細は各リンクをご覧ください。"
-        )
-
-    # 返却ロジック
-    if has_ferry and has_flight:
-        return f"{ferry_text}\n\n{flight_text}", True
-    if has_ferry:
-        return ferry_text, True
-    return flight_text, True
-
-def get_weather_reply(text: str):
-    return ("", False)
-
-def get_transport_reply(text: str):
-    return ("", False)
 
 SMALLTALK_PATTERNS = {
     "greet": ["おはよう", "こんにちは", "こんばんは", "やあ", "はじめまして"],
