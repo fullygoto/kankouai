@@ -115,6 +115,14 @@ function escapeHtml(s){
 <body>
 {% include '_back_to_data.html' %}
 <div class="wrap">
+  {# 既存 + fullyGOTO をマージ（重複除去＆順序維持） #}
+  {% set _base_cats = ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
+  {% set _fg_cats = ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"] %}
+  {% set _ns = namespace(cats=_base_cats[:]) %}
+  {% for c in _fg_cats %}
+    {% if c not in _ns.cats %}{% set _ = _ns.cats.append(c) %}{% endif %}
+  {% endfor %}
+  {% set cat_list = _ns.cats %}
   <div class="top">
     <h1 style="margin:0;font-size:20px;">観光データ一括編集（UI）</h1>
     <span class="note">※タグ/エリア/支払方法はカンマ区切りで入力</span>
@@ -214,9 +222,8 @@ function escapeHtml(s){
           <tr>
             <td>
               <select name="category[]" onchange="onCategoryChange(this)">
-                {% set cats = ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
-                {% for c in cats %}
-                  <option value="{{ c }}" {% if e.category==c %}selected{% endif %}>{{ c }}</option>
+                {% for c in cat_list %}
+                  <option value="{{ c }}" {% if loop.first %}selected{% endif %}>{{ c }}</option>
                 {% endfor %}
               </select>
             </td>

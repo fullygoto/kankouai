@@ -52,11 +52,20 @@
 
     <form method="post" id="shop_entry_form" onsubmit="return validateAreasShop()">
         <label>カテゴリー</label><br>
-        <select name="category">
-            {% set cat_list = ["飲食", "宿泊", "診療所", "役所", "交通", "バス", "イベント", "特売"] %}
-            {% for c in cat_list %}
+
+        {# 既存＋fullyGOTOをマージ（重複除去＆順序維持） #}
+        {% set _base_cats = ["飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
+        {% set _fg_cats = ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"] %}
+        {% set _ns = namespace(cats=_base_cats[:]) %}
+        {% for c in _fg_cats %}
+          {% if c not in _ns.cats %}{% set _ = _ns.cats.append(c) %}{% endif %}
+        {% endfor %}
+        {% set cat_list = _ns.cats %}
+
+        <select name="category" id="category_select">
+          {% for c in cat_list %}
             <option value="{{ c }}" {% if shop_edit and shop_edit.category == c %}selected{% endif %}>{{ c }}</option>
-            {% endfor %}
+          {% endfor %}
         </select><br>
 
         <label>店舗名</label><br>

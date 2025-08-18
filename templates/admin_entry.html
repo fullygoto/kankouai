@@ -208,10 +208,22 @@
 <body>
 <div class="container">
 
-    {# --- セーフティ: 渡し忘れ/古いデータ形式でも落ちないように --- #}
-    {% if cat_list is not defined %}
-      {% set cat_list = ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
-    {% endif %}
+    {# --- カテゴリの自動マージ（既存 + fullyGOTO、重複除去＆順序保持） --- #}
+    {% set _base_cats = (cat_list if cat_list is defined
+      else ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"]) %}
+    {% set _fg_cats = (fg_cat_list if fg_cat_list is defined
+      else ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"]) %}
+
+    {# 既存順序を優先しつつ fullyGOTO で未収のものだけ末尾に追加 #}
+    {% set _ns = namespace(cats=_base_cats[:]) %}
+    {% for c in _fg_cats %}
+      {% if c not in _ns.cats %}
+        {% set _ = _ns.cats.append(c) %}
+      {% endif %}
+    {% endfor %}
+    {% set cat_list = _ns.cats %}
+
+    {# --- 既存のエリア・データのフォールバックはそのまま --- #}
     {% if area_opts is not defined %}
       {% set area_opts = ["五島市","新上五島町","宇久町","小値賀町"] %}
     {% endif %}
@@ -275,9 +287,9 @@
 
         <label>カテゴリー</label><br>
         <select name="category" id="category_select" onchange="onCategoryChange()">
-            {% for c in cat_list %}
+          {% for c in cat_list %}
             <option value="{{ c }}" {% if entry_edit and entry_edit.category == c %}selected{% endif %}>{{ c }}</option>
-            {% endfor %}
+          {% endfor %}
         </select>
         <hr>
 
