@@ -129,6 +129,23 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
 # =========================
 app = Flask(__name__)
 
+
+# ---- カテゴリマスタ（登録フォームで選択させる用）----
+CATEGORIES = [
+    "求人",
+    "五島を贈ろう",
+    "観光",
+    "泊まる",
+    "食べる・呑む",
+    "きれい",
+    "癒し",
+    "ショップ",
+    "生活",
+    "趣味・習い事",
+]
+app.jinja_env.globals["CATEGORIES"] = CATEGORIES  # テンプレートから参照できるようにする
+
+
 # --- LINE 応答制御フラグ（環境変数で上書き可） ---
 # 1質問=原則1通（長文で収まらない場合のみ自動分割）
 LINE_SINGLE_REPLY = os.getenv("LINE_SINGLE_REPLY", "1").lower() in {"1", "true", "on", "yes"}
@@ -2849,48 +2866,81 @@ def _answer_from_entries_min(question: str):
 
     es = load_entries()
     ql = q.lower()
-    hits = []
-    for e in es:
-        hay = " ".join(filter(None, [
-            e.get("title",""),
-            e.get("desc",""),
-            e.get("address",""),
-            " ".join(e.get("tags",[]) or []),
-            " ".join(e.get("areas",[]) or []),
-        ])).lower()
-        if ql and (ql in hay):
-            hits.append(e)
 
-    if not hits:
-        # ← ここで data/ の txt を当ててみる
+    def rank_for(e, ql):
+        """タイトル一致を最優先。その次に説明→住所/エリア→その他で優先度を下げる"""
+        title   = (e.get("title","") or "").lower()
+        desc    = (e.get("desc","") or "").lower()
+        address = (e.get("address","") or "").lower()
+        areas   = " ".join(e.get("areas",[]) or []).lower()
+        tags    = " ".join(e.get("tags",[])  or []).lower()
+        tel     = (e.get("tel","") or "").lower()
+        mp      = (e.get("map","") or "").lower()
+
+        if ql in title:   return (0, -len(title))   # 0=最優先（同順位はタイトル短い方を先）
+        if ql in desc:    return (1, 0)
+        if ql in address or ql in areas: return (2, 0)
+        if ql in tags or ql in tel or ql in mp:     return (3, 0)
+        return None
+
+    ranked = []
+    for e in es:
+        r = rank_for(e, ql) if ql else None
+        if r is not None:
+            ranked.append((r, e))
+
+    if not ranked:
+        # data/ のテキストから回答（あれば）
         txt_ans = _answer_from_data_txt(q)
         if txt_ans:
             return txt_ans, False
         refine, _meta = build_refine_suggestions(q)
         return "該当が見つかりませんでした。\n" + refine, False
 
-    if len(hits) == 1:
-        e = hits[0]
-        areas = " / ".join(e.get("areas", []) or "") or ""
-        tags  = ", ".join(e.get("tags", []) or "") or ""
-        lines = [
-            (e.get("desc","") or "").strip(),
-        ]
+    # 優先順に並べ替え（タイトル一致が先頭に来る）
+    ranked.sort(key=lambda x: x[0])
+    hits = [e for _, e in ranked]
+
+    # タイトル一致が1件だけなら、それを単独回答にする（「タイトルを優先」の明確化）
+    title_only = [e for (r, e) in ranked if r[0] == 0]
+    if len(hits) == 1 or len(title_only) == 1:
+        e = hits[0] if len(hits) == 1 else title_only[0]
+        lines = []
+
+        # 1行目: タイトル
+        if e.get("title"):
+            lines.append(f"{e['title'].strip()}")
+
+        # 2行目: 説明
+        if e.get("desc"):
+            lines.append(e["desc"].strip())
+
+        # 以降: 指定順で“存在するものだけ”
         if e.get("address"):    lines.append(f"住所：{e['address']}")
-        if e.get("open_hours"): lines.append(f"営業時間：{e['open_hours']}")
-        if e.get("holiday"):    lines.append(f"休み：{e['holiday']}")
         if e.get("tel"):        lines.append(f"電話：{e['tel']}")
         if e.get("map"):        lines.append(f"地図：{e['map']}")
+        areas = " / ".join(e.get("areas",[]) or [])
         if areas:               lines.append(f"エリア：{areas}")
-        if tags:                lines.append(f"タグ：{tags}")
+        if e.get("holiday"):    lines.append(f"休み：{e['holiday']}")
+        if e.get("open_hours"): lines.append(f"営業時間：{e['open_hours']}")
+        if e.get("parking"):
+            pn = f"（{e['parking_num']}台）" if e.get("parking_num") else ""
+            lines.append(f"駐車場：{e['parking']}{pn}")
+        if e.get("payment"):    lines.append(f"支払方法：{', '.join(e['payment'])}")
+        if e.get("remark"):     lines.append(f"備考：{e['remark']}")
+        if e.get("links"):      lines.append("リンク：\n" + "\n".join(f"- {u}" for u in e["links"]))
+        if e.get("category"):   lines.append(f"カテゴリー：{e['category']}")
+
+        # ※タグは返信に含めない
         return "\n".join([s for s in lines if s]), True
 
-    # 複数ヒット
+    # 複数ヒット：優先順（タイトル一致→説明一致→…）で提示
     lines = ["候補が複数見つかりました。気になるものはありますか？"]
     for i, e in enumerate(hits[:8], 1):
         area = " / ".join(e.get("areas", []) or "") or ""
         suffix = f"（{area}）" if area else ""
         lines.append(f"{i}. {e.get('title','')}{suffix}")
+
     if len(hits) > 8:
         lines.append(f"…ほか {len(hits)-8} 件")
 
