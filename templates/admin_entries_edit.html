@@ -223,7 +223,7 @@ function escapeHtml(s){
             <td>
               <select name="category[]" onchange="onCategoryChange(this)">
                 {% for c in cat_list %}
-                  <option value="{{ c }}" {% if loop.first %}selected{% endif %}>{{ c }}</option>
+                  <option value="{{ c }}" {% if e.category == c %}selected{% endif %}>{{ c }}</option>
                 {% endfor %}
               </select>
             </td>
