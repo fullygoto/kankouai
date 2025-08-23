@@ -38,6 +38,10 @@
         table.kv td {border:1px solid #e3e9ee; padding:4px 6px; font-size:0.92em}
         table.kv td.k {background:#f6f9fb; min-width:120px; font-weight:500; color:#345;}
         .muted{color:#789;font-size:.92em}
+        /* 画像サムネとメタ表示 */
+        .thumb{max-width:160px;height:auto;border:1px solid #ddd;border-radius:8px}
+        .imgmeta{font-size:.88em;color:#567;margin-top:4px}
+
 
         @media (max-width: 700px) {
             .container {padding:10px;}
@@ -530,7 +534,7 @@ https://instagram.com/xxx">
     {% for e in entries %}
         {# 型ゆれに強い正規化 #}
         {% set _tags = e.tags if e.tags is defined and e.tags is not string
-                 else (e.tags | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+                else (e.tags | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
         {% set _areas = e.areas if e.areas is defined and e.areas is not string else (e.areas.split(',') if e.areas else []) %}
         {% set _links = e.links if e.links is defined and e.links is not string
                   else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
@@ -538,11 +542,30 @@ https://instagram.com/xxx">
 
         {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ ((e.links or []) | join(' ')) ~ ' ' ~ (e.extras | tojson)) | lower %}
         <div class="entry-card"
-             data-title="{{ e.title or '' }}"
-             data-category="{{ e.category or '' }}"
-             data-areas="{{ _areas|join(', ') }}"
-             data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
-             data-text="{{ all_text }}">
+            data-title="{{ e.title or '' }}"
+            data-category="{{ e.category or '' }}"
+            data-areas="{{ _areas|join(', ') }}"
+            data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
+            data-text="{{ all_text }}">
+
+            {# ▼ 追加: サムネイル + 容量/サイズ表示（右上に配置） #}
+            {% if e.__image %}
+              <div style="float:right; text-align:center; margin:2px 0 8px 12px;">
+                {% if e.__image.url %}
+                  <a href="{{ e.__image.url }}" target="_blank" rel="noopener">
+                    <img class="thumb" src="{{ e.__image.url }}" alt="thumb">
+                  </a>
+                {% endif %}
+                <div class="imgmeta">
+                  {% if e.__image.exists %}
+                    {{ e.__image.width }}×{{ e.__image.height }} px / {{ e.__image.kb }} KB
+                  {% else %}
+                    <span style="color:#c33;">画像ファイル未検出</span>
+                  {% endif %}
+                </div>
+              </div>
+            {% endif %}
+
             <span class="card-label">タイトル：</span>{{ e.title }}<br>
             <span class="card-label">説明：</span>{{ e.desc }}<br>
             <span class="card-label">住所：</span>{{ e.address }}<br>
@@ -594,6 +617,8 @@ https://instagram.com/xxx">
             {% endif %}
 
             <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
+
+            <div style="clear:both;"></div>  {# ← サムネのfloat解除 #}
 
             <div class="entry-actions">
                 <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
