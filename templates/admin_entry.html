@@ -333,6 +333,15 @@
                 JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
               </small>
             </div>
+            <!-- ★ 透かしON/OFF -->
+            {% set _wm_on_edit = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+            <div class="mt-2">
+              <label style="display:inline-flex;align-items:center;gap:.4em;">
+                <input type="checkbox" name="wm_on" value="1" {% if _wm_on_edit %}checked{% endif %}>
+                外部公開URLに透かし（＠fullyGOTO）を付ける
+              </label>
+              <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
+            </div>
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
             <label>地図URL</label><br>
@@ -415,6 +424,15 @@ https://instagram.com/xxx">
               <small class="text-muted d-block mt-1">
                 JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
               </small>
+            </div>
+            <!-- ★ 透かしON/OFF -->
+            {% set _wm_on_edit = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+            <div class="mt-2">
+              <label style="display:inline-flex;align-items:center;gap:.4em;">
+                <input type="checkbox" name="wm_on" value="1" {% if _wm_on_edit %}checked{% endif %}>
+                外部公開URLに透かし（＠fullyGOTO）を付ける
+              </label>
+              <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
             </div>
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
@@ -553,9 +571,10 @@ https://instagram.com/xxx">
             data-text="{{ all_text }}">
 
           {% set _img = e.image_file or e.image %}
+          {% set _wm = (e.wm_on if e.wm_on is defined else True) %}
           <div style="display:flex; gap:12px; align-items:flex-start;">
             {% if _img %}
-              <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True) }}"
+              <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=1 if _wm else 0) }}"
                 target="_blank" rel="noopener noreferrer" style="flex:0 0 auto;">
                 <img
                   src="{{ safe_url_for('serve_image', filename=_img, wm=1) }}"
@@ -565,7 +584,6 @@ https://instagram.com/xxx">
                   loading="lazy" decoding="async" referrerpolicy="no-referrer">
               </a>
             {% endif %}
-
             <div style="flex:1 1 auto;">
               <span class="card-label">タイトル：</span>{{ e.title }}<br>
               <span class="card-label">説明：</span>{{ e.desc }}<br>
