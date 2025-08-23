@@ -3580,11 +3580,6 @@ def admin_manual():
 # ======== ▼▼▼ ここから追記：テキストファイル管理（/admin/data_files） ▼▼▼ ========
 from flask import send_from_directory
 
-@app.route("/media/img/<path:filename>")
-def serve_image(filename):
-    return send_from_directory(IMAGES_DIR, filename, conditional=True)
-
-
 # ① 許可する文字クラスを拡張（全角括弧・句読点・記号などを許可）
 ALLOWED_TXT_EXTS = {".txt", ".md"}
 
