@@ -589,7 +589,7 @@ IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or app.secret_key or "chan
 SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
 
 WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE","1").lower() in {"1","true","on","yes"}
-WATERMARK_TEXT = os.getenv("WATERMARK_TEXT","＠fullyGOTO")
+WATERMARK_TEXT = os.getenv("WATERMARK_TEXT","@fullyGOTO")
 WATERMARK_OPACITY = int(os.getenv("WATERMARK_OPACITY","160"))   # 0-255
 WATERMARK_SCALE = float(os.getenv("WATERMARK_SCALE","0.035"))   # 画像幅に対する割合（文字サイズ）
 
