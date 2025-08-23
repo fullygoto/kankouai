@@ -280,7 +280,7 @@
                           else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
 
     <!-- ===== 登録フォーム ===== -->
-    <form method="post" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
+    <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
         {% if edit_id %}
         <input type="hidden" name="edit_id" value="{{ edit_id }}">
         {% endif %}
@@ -299,6 +299,34 @@
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+            <!-- 画像アップロード（観光地） -->
+            <div class="mb-3">
+              <label for="image_file_t" class="form-label">画像アップロード</label>
+              <input
+                type="file"
+                class="form-control"
+                id="image_file_t"
+                name="image_file"
+                accept="image/*"
+              >
+              {% if entry_edit and (entry_edit.image_file or entry_edit.image) %}
+                <div class="mt-2">
+                  <div>現在の画像:</div>
+                  <img
+                    src="{{ safe_url_for('serve_image', filename=(entry_edit.image_file or entry_edit.image)) }}"
+                    alt="現在の画像"
+                    style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                  >
+                  <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
+                    <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
+                  </div>
+                </div>
+              {% endif %}
+              <small class="text-muted d-block mt-1">
+                JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
+              </small>
+            </div>
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
             <label>地図URL</label><br>
@@ -352,6 +380,34 @@ https://instagram.com/xxx">
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+            <!-- 画像アップロード（店舗） -->
+            <div class="mb-3">
+              <label for="image_file_s" class="form-label">画像アップロード</label>
+              <input
+                type="file"
+                class="form-control"
+                id="image_file_s"
+                name="image_file"
+                accept="image/*"
+              >
+              {% if entry_edit and (entry_edit.image_file or entry_edit.image) %}
+                <div class="mt-2">
+                  <div>現在の画像:</div>
+                  <img
+                    src="{{ safe_url_for('serve_image', filename=(entry_edit.image_file or entry_edit.image)) }}"
+                    alt="現在の画像"
+                    style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                  >
+                  <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="image_delete_s" name="image_delete" value="1">
+                    <label class="form-check-label" for="image_delete_s">この画像を削除する</label>
+                  </div>
+                </div>
+              {% endif %}
+              <small class="text-muted d-block mt-1">
+                JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
+              </small>
+            </div>
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
             <label>電話番号</label><br>
