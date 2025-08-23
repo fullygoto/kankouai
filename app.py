@@ -589,7 +589,7 @@ IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or app.secret_key or "chan
 SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
 
 WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE","1").lower() in {"1","true","on","yes"}
-WATERMARK_TEXT = os.getenv("WATERMARK_TEXT","© GOTOKANKO")
+WATERMARK_TEXT = os.getenv("WATERMARK_TEXT","＠fullyGOTO")
 WATERMARK_OPACITY = int(os.getenv("WATERMARK_OPACITY","160"))   # 0-255
 WATERMARK_SCALE = float(os.getenv("WATERMARK_SCALE","0.035"))   # 画像幅に対する割合（文字サイズ）
 
@@ -2048,32 +2048,58 @@ def admin_entry():
     # ---- 画像メタ情報を取得する小ヘルパ（この関数内だけで完結） ----
     def _image_meta(img_name: str | None):
         """
-        画像ファイルの存在/サイズ/解像度とURLを返す。
-        戻り値例:
-        {
-          "name": "abcd.jpg",
-          "exists": True/False,
-          "url": "https://.../media/img/abcd.jpg",
-          "bytes": 123456,
-          "kb": 121,               # 端数切り上げ
-          "width": 1080,
-          "height": 720
-        }
+        画像ファイルの存在/サイズ/解像度とアクセスURLを返す。
+        返すキー:
+          - name, exists, bytes, kb, width, height
+          - url            : 通常のURL
+          - url_wm         : 透かし(wm=1)付きURL
+          - url_signed     : 署名付きURL（あれば）
+          - url_wm_signed  : 署名+透かしURL（あれば）
         """
         if not img_name:
             return None
-        try:
-            # 画像URL（存在しなくてもURLは生成しておく）
-            try:
-                url = url_for("serve_image", filename=img_name, _external=True)
-            except Exception:
-                url = ""
 
+        # URL作成（safe_url_for / build_signed_image_url が無い環境でも落ちないように多段フォールバック）
+        def _plain_url(wm=False):
+            try:
+                # safe_url_for があれば優先（画像エンドポイント用の拡張あり）
+                return safe_url_for(
+                    "serve_image",
+                    filename=img_name,
+                    _external=True,
+                    wm=("1" if wm else None),
+                )
+            except Exception:
+                pass
+            try:
+                u = url_for("serve_image", filename=img_name, _external=True)
+                if wm:
+                    u += ("&" if "?" in u else "?") + "wm=1"
+                return u
+            except Exception:
+                return ""
+
+        def _signed_url(wm=False):
+            # build_signed_image_url が無ければ None を返す
+            try:
+                return build_signed_image_url(img_name, wm=wm, external=True)
+            except Exception:
+                return None
+
+        url_plain      = _plain_url(wm=False)
+        url_plain_wm   = _plain_url(wm=True)
+        url_signed     = _signed_url(wm=False)
+        url_wm_signed  = _signed_url(wm=True)
+
+        try:
             path = os.path.join(IMAGES_DIR, img_name)
             if not os.path.isfile(path):
                 return {
-                    "name": img_name, "exists": False, "url": url,
-                    "bytes": None, "kb": None, "width": None, "height": None
+                    "name": img_name, "exists": False,
+                    "url": url_plain, "url_wm": url_plain_wm,
+                    "url_signed": url_signed or url_plain,
+                    "url_wm_signed": url_wm_signed or url_plain_wm,
+                    "bytes": None, "kb": None, "width": None, "height": None,
                 }
 
             size_b = os.path.getsize(path)
@@ -2087,14 +2113,20 @@ def admin_entry():
                 pass
 
             return {
-                "name": img_name, "exists": True, "url": url,
-                "bytes": size_b, "kb": kb, "width": w, "height": h
+                "name": img_name, "exists": True,
+                "url": url_plain, "url_wm": url_plain_wm,
+                "url_signed": url_signed or url_plain,
+                "url_wm_signed": url_wm_signed or url_plain_wm,
+                "bytes": size_b, "kb": kb, "width": w, "height": h,
             }
         except Exception:
             # 何かあっても画面は壊さない
             return {
-                "name": img_name or "", "exists": False, "url": "",
-                "bytes": None, "kb": None, "width": None, "height": None
+                "name": img_name or "", "exists": False,
+                "url": url_plain, "url_wm": url_plain_wm,
+                "url_signed": url_signed or url_plain,
+                "url_wm_signed": url_wm_signed or url_plain_wm,
+                "bytes": None, "kb": None, "width": None, "height": None,
             }
 
     # ---- ここから従来どおり ----
@@ -2216,7 +2248,7 @@ def admin_entry():
         save_entries(entries)
         return redirect(url_for("admin_entry"))
 
-    # ---- ここで “サムネ/容量/サイズ” を各エントリに付加してテンプレへ渡す ----
+    # ---- “サムネ/容量/サイズ” を各エントリに付加してテンプレへ渡す ----
     entries_view = []
     for e in entries:
         e2 = dict(e)  # テンプレ用にコピー（元データは変更しない）
