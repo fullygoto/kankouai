@@ -7,6 +7,18 @@ import time
 import threading  
 import ipaddress
 import logging
+import uuid
+
+
+from PIL import Image, ImageOps  # ← 追加
+
+
+# 追加:
+import warnings
+from PIL import ImageFile, UnidentifiedImageError
+from werkzeug.exceptions import RequestEntityTooLarge
+
+from werkzeug.utils import secure_filename
 
 from collections import Counter
 from typing import Any, Dict, List
@@ -14,7 +26,7 @@ from werkzeug.routing import BuildError
 
 
 
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort, send_from_directory
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -26,6 +38,8 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, TextSendMessage  
 from linebot.models import QuickReply, QuickReplyButton, MessageAction
 from linebot.exceptions import LineBotApiError, InvalidSignatureError   
+from linebot.models import ImageSendMessage
+
 
 from openai import OpenAI
 import zipfile
@@ -57,7 +71,7 @@ def _split_for_line(text: str, limit: int = None, max_len: int = None, **_ignore
     """
     s = "" if text is None else str(text)
     eff = limit if limit is not None else max_len
-    lim = int(eff if eff is not None else (LINE_SAFE_CHARS or 3800))
+    lim = int(eff if eff is not None else globals().get("LINE_SAFE_CHARS", 3800))
     if lim <= 0:
         return [s]
 
@@ -129,6 +143,15 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
 # =========================
 app = Flask(__name__)
 
+# ← ここに追加（この下から各種設定が続く）
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))  # お好みで
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+
+# Flask本体と MAX_CONTENT_LENGTH の設定のすぐ後に追加
+MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))  # 例: 40MP
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS            # これを超えたら Pillow が警告/例外
+ImageFile.LOAD_TRUNCATED_IMAGES = False              # 途中で切れた画像は拒否
+warnings.simplefilter("error", Image.DecompressionBombWarning)  # 警告を例外化
 
 # ---- カテゴリマスタ（登録フォームで選択させる用）----
 CATEGORIES = [
@@ -232,6 +255,41 @@ def _ratelimit_handler(e):
     return jsonify({"error": "Too Many Requests", "detail": "Rate limit exceeded."}), 429
 # ==== /Rate limit setup ====
 
+@app.errorhandler(RequestEntityTooLarge)
+@app.errorhandler(413)
+def _too_large(e):
+    # API っぽいリクエストは JSON、それ以外は画面に戻す
+    wants_json = (
+        request.is_json
+        or "application/json" in (request.headers.get("Accept","") or "")
+        or request.path.startswith("/api/")
+    )
+
+    # 例外説明に "pixels" が含まれていれば画像のピクセル上限超過とみなす
+    desc = (getattr(e, "description", "") or "").lower()
+    is_pixels = "pixel" in desc or "pixels" in desc
+
+    if wants_json:
+        if is_pixels:
+            return jsonify({
+                "error": "Image too large",
+                "reason": "pixels",
+                "max_image_pixels": MAX_IMAGE_PIXELS
+            }), 413
+        else:
+            return jsonify({
+                "error": "File too large",
+                "reason": "body",
+                "limit_mb": MAX_UPLOAD_MB
+            }), 413
+
+    # HTML系はフラッシュして元画面へ
+    if is_pixels:
+        flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
+    else:
+        flash(f"ファイルが大きすぎます（上限 {MAX_UPLOAD_MB} MB）")
+    return redirect(request.referrer or url_for("admin_entry")), 413
+
 
 # ==== 追加（Flask設定の近くでOK）====
 ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on","yes"}
@@ -245,7 +303,7 @@ CSRF_EXEMPT_ENDPOINTS = set()
 CSRF_EXEMPT_ENDPOINTS.add("callback")
 
 # CSRF 保護対象のパス接頭辞（管理／店舗）
-CSRF_PROTECT_PATHS = ("/admin", "/shop")
+CSRF_PROTECT_PATHS = ("/admin", "/shop", "/api")
 
 
 
@@ -456,8 +514,7 @@ def _reply_or_push(event, text: str):
             if tid:
                 line_bot_api.push_message(tid, messages)
     except LineBotApiError as e:
-        global SEND_FAIL_COUNT
-        SEND_FAIL_COUNT += 1
+        globals()["SEND_FAIL_COUNT"] = globals().get("SEND_FAIL_COUNT", 0) + 1
         app.logger.exception("LINE send failed: %s", e)
 
 
@@ -473,14 +530,186 @@ NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
 SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 
 
+
+# === Images: config + route + normalized save (唯一の正) ===
+MEDIA_URL_PREFIX = "/media/img"  # 画像URLの先頭
+IMAGES_DIR = os.path.join(DATA_DIR, "images")
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
+# 入力として受け付ける拡張子（出力は常に .jpg）
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+@app.route(f"{MEDIA_URL_PREFIX}/<path:filename>")
+def serve_image(filename):
+    _, ext = os.path.splitext(filename.lower())
+    # 既存データの互換のため、移行期間は png/webp も許可（全部jpg化できたら {".jpg",".jpeg"} に戻してOK）
+    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+        abort(404)
+    return send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+
+# 1080px / 350KBに正規化してJPEG保存（出力は常に .jpg）
+TARGET_JPEG_MAX_W      = 1080
+TARGET_JPEG_MAX_KB     = 350
+TARGET_JPEG_MAX_BYTES  = TARGET_JPEG_MAX_KB * 1024
+
+try:
+    RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
+except AttributeError:
+    RESAMPLE_LANCZOS = Image.LANCZOS
+
+
+def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool=False) -> str|None:
+    """
+    画像アップロードを『横1080px, JPEG, 350KB以下』に正規化して保存。
+    - 新規/置換時は .jpg で保存してファイル名（例: "abcd1234.jpg"）を返す
+    - 削除時は "" を返す
+    - 変更なしは None を返す
+    - 極端に巨大なピクセル数の画像は 413 RequestEntityTooLarge を送出
+    """
+    # 関数内インポートでコピペ耐性を上げる（上位で import済みなら二重でもOK）
+    from werkzeug.exceptions import RequestEntityTooLarge
+    from PIL import UnidentifiedImageError
+
+    try:
+        # 削除指定
+        if delete:
+            if previous:
+                try:
+                    os.remove(os.path.join(IMAGES_DIR, previous))
+                except Exception:
+                    pass
+            return ""
+
+        # アップロード無し
+        if not file_storage or not getattr(file_storage, "filename", ""):
+            return None
+
+        # 元拡張子ざっくりチェック（受け付けフォーマット）
+        fname = secure_filename(file_storage.filename or "")
+        _, ext = os.path.splitext(fname)
+        ext = ext.lower()
+        if ext not in ALLOWED_IMAGE_EXTS:
+            return None
+
+        # 画像読み込み＋向き補正（ここで Pillow の爆弾検知を拾う）
+        file_storage.stream.seek(0)
+        try:
+            im = Image.open(file_storage.stream)
+            im = ImageOps.exif_transpose(im)
+
+            # ピクセル数ガード（二重の安全策）
+            w, h = im.size
+            limit = getattr(Image, "MAX_IMAGE_PIXELS", None)
+            if not limit:
+                try:
+                    limit = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))  # フォールバック: 40MP
+                except Exception:
+                    limit = 40000000
+            if (w * h) > int(limit):
+                raise RequestEntityTooLarge(f"pixels={w*h} > MAX_IMAGE_PIXELS={limit}")
+
+        except (Image.DecompressionBombError, Image.DecompressionBombWarning) as e:
+            app.logger.warning("Pillow decompression bomb blocked: %s", e)
+            # 413 でハンドラに渡す
+            raise RequestEntityTooLarge("Image pixel count too large")
+        except UnidentifiedImageError:
+            app.logger.warning("Uploaded file is not a valid image")
+            return None
+
+        # RGB化（JPEG保存のため）
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        elif im.mode == "L":
+            im = im.convert("RGB")
+
+        # 横幅1080pxまで縮小（※小さいものは拡大しない）
+        w, h = im.size
+        if w > TARGET_JPEG_MAX_W:
+            new_h = int(h * TARGET_JPEG_MAX_W / w)
+            im = im.resize((TARGET_JPEG_MAX_W, new_h), RESAMPLE_LANCZOS)
+
+        # 品質自動調整で <=350KB を狙う（バイナリサイズを見ながら圧縮）
+        def encode(quality, img):
+            buf = io.BytesIO()
+            img.save(
+                buf, format="JPEG",
+                quality=int(quality),
+                optimize=True,
+                progressive=True,
+                subsampling=2  # 4:2:0
+            )
+            return buf.getvalue()
+
+        # まず高めで試す → バイナリサーチ
+        lo, hi = 40, 88
+        best_bytes = None
+
+        first = encode(85, im)
+        if len(first) <= TARGET_JPEG_MAX_BYTES:
+            best_bytes = first
+        else:
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                data = encode(mid, im)
+                if len(data) <= TARGET_JPEG_MAX_BYTES:
+                    best_bytes = data
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+
+            # まだ大きい場合は少しずつ再縮小して再探索（最大2回）
+            shrink_try = 0
+            cur_im = im
+            while (best_bytes is None or len(best_bytes) > TARGET_JPEG_MAX_BYTES) and shrink_try < 2:
+                shrink_try += 1
+                w, h = cur_im.size
+                cur_im = cur_im.resize((int(w*0.9), int(h*0.9)), RESAMPLE_LANCZOS)
+                lo, hi = 40, 85
+                candidate = None
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    data = encode(mid, cur_im)
+                    if len(data) <= TARGET_JPEG_MAX_BYTES:
+                        candidate = data
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                if candidate:
+                    best_bytes = candidate
+
+            if best_bytes is None:
+                best_bytes = encode(75, cur_im)
+
+        # 保存（常に .jpg）
+        new_name  = f"{uuid.uuid4().hex}.jpg"
+        save_path = os.path.join(IMAGES_DIR, new_name)
+        os.makedirs(IMAGES_DIR, exist_ok=True)
+        with open(save_path, "wb") as f:
+            f.write(best_bytes)
+
+        # 古いファイル削除
+        if previous and previous != new_name:
+            try:
+                os.remove(os.path.join(IMAGES_DIR, previous))
+            except Exception:
+                pass
+
+        return new_name
+
+    except RequestEntityTooLarge:
+        # 413 は外へ伝播（グローバルハンドラに拾わせる）
+        raise
+    except Exception:
+        app.logger.exception("image normalize & save failed")
+        return None
+
+
 # --- LINE安全対策（ミュート＆全体一時停止）---
 MUTES_FILE = os.path.join(BASE_DIR, "line_mutes.json")          # 会話単位のミュート管理
 GLOBAL_LINE_PAUSE_FILE = os.path.join(BASE_DIR, "line_paused.flag")  # 全体停止フラグ（存在すれば停止）
 # 全体停止中にユーザーの「再開」で動かすか（既定=OFF）
 ALLOW_RESUME_WHEN_PAUSED = os.getenv("ALLOW_RESUME_WHEN_PAUSED", "0").lower() in {"1","true","on","yes"}
 LINE_RETHROW_ON_SEND_ERROR = os.getenv("LINE_RETHROW_ON_SEND_ERROR", "0").lower() in {"1","true","on","yes"}
-
-
 
 # ミュート/再開コマンド（NFKC正規化＋小文字化で比較）
 STOP_COMMANDS = {
@@ -592,6 +821,7 @@ def _safe_read_json(path: str, default_obj):
         return default_obj
 
 import unicodedata
+
 
 def _norm_cmd(s: str) -> str:
     return unicodedata.normalize("NFKC", (s or "")).strip().lower()
@@ -1080,62 +1310,6 @@ def _messages_to_prompt(messages):
         lines.append(f"{role.upper()}: {content}")
     return "\n".join(lines)
 
-def openai_chat(model, messages, **kwargs):
-    params = dict(kwargs)
-    mot = (
-        params.pop("max_output_tokens", None)
-        or params.pop("max_completion_tokens", None)
-        or params.pop("max_tokens", None)
-    )
-    temp = params.pop("temperature", None)
-
-    def _to_prompt(msgs):
-        if isinstance(msgs, str):
-            return msgs
-        lines = []
-        for m in msgs:
-            role = m.get("role","user")
-            content = m.get("content","")
-            lines.append(f"{role.upper()}: {content}")
-        return "\n".join(lines)
-
-    use_responses = model.startswith(("gpt-5",))
-    prompt = _to_prompt(messages)
-
-    if use_responses:
-        try:
-            rparams = {"model": model, "input": prompt}
-            if mot is not None:
-                rparams["max_output_tokens"] = mot
-            resp = client.responses.create(**rparams)
-            return getattr(resp, "output_text", "") or ""
-        except Exception as e:
-            print("[OpenAI error - responses]", e)
-            return ""
-
-    try:
-        chat_params = {}
-        if mot is not None:
-            chat_params["max_tokens"] = mot
-        if temp is not None:
-            chat_params["temperature"] = temp
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role":"user","content":prompt}],
-            **chat_params,
-        )
-        return resp.choices[0].message.content
-    except Exception as e1:
-        print("[OpenAI error - chat.completions]", e1)
-        try:
-            rparams = {"model": model, "input": prompt}
-            if mot is not None:
-                rparams["max_output_tokens"] = mot
-            resp = client.responses.create(**rparams)
-            return getattr(resp, "output_text", "") or ""
-        except Exception as e2:
-            print("[OpenAI error - responses fallback]", e2)
-            return ""
 
 # OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
@@ -1708,6 +1882,23 @@ def admin_entry():
             flash("エリアは1つ以上選択してください")
             return redirect(url_for("admin_entry"))
 
+        # ここで編集対象の既存画像名を取得（編集時のみ）
+        edit_hidden = request.form.get("edit_id")
+        prev_img = None
+        prev_entry = None
+        idx_edit = None
+        if edit_hidden not in (None, "", "None"):
+            try:
+                idx_edit = int(edit_hidden)
+                if 0 <= idx_edit < len(entries):
+                    prev_entry = entries[idx_edit]
+                    prev_img = (prev_entry.get("image_file") or prev_entry.get("image") or "") or None
+            except Exception:
+                prev_entry = None
+                prev_img = None
+                idx_edit = None
+
+        # 新規エントリの骨格
         new_entry = {
             "category": category,
             "title": title,
@@ -1728,11 +1919,28 @@ def admin_entry():
         }
         new_entry = _norm_entry(new_entry)  # 保存前にも正規化
 
-        edit_hidden = request.form.get("edit_id")
-        if edit_hidden not in (None, "", "None"):
+        # === 画像アップロード/削除 ===
+        upload = request.files.get("image_file")
+        delete_flag = (request.form.get("image_delete") == "1")
+        try:
+            result = _save_jpeg_1080_350kb(upload, previous=prev_img, delete=delete_flag)
+        except Exception:
+            result = None
+            app.logger.exception("image handler failed")
+
+        if result is not None:
+            if result == "":
+                # 削除
+                new_entry.pop("image_file", None)
+                new_entry.pop("image", None)
+            else:
+                # 新規 or 置換
+                new_entry["image_file"] = result
+
+        # === 保存 ===
+        if idx_edit is not None:
             try:
-                idx = int(edit_hidden)
-                entries[idx] = new_entry
+                entries[idx_edit] = new_entry
                 flash("編集しました")
             except Exception:
                 entries.append(new_entry)
@@ -1750,7 +1958,7 @@ def admin_entry():
         entry_edit=entry_edit,
         edit_id=edit_id if edit_id not in (None, "", "None") else None,
         role=session.get("role", ""),
-        global_paused=_is_global_paused(), 
+        global_paused=_is_global_paused(),
     )
 
 @app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
@@ -1833,6 +2041,20 @@ def shop_entry():
             "extras": extras
         }
         entry_data = _norm_entry(entry_data)
+        # 画像アップロード（任意）
+        up = request.files.get("image_file")
+        if up and up.filename:
+            # 既存データがあれば過去の画像名を previous に渡して置換できるようにする
+            entries = load_entries()
+            prev_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
+            prev_img = entries[prev_idx].get("image_file") if prev_idx is not None else None
+
+            res = _save_jpeg_1080_350kb(up, previous=prev_img, delete=False)
+            if res is None:
+                flash("画像アップロードに失敗しました")
+            else:
+                entry_data["image_file"] = res
+
 
         entries = load_entries()
         entry_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
@@ -2859,95 +3081,129 @@ def admin_line_test_push():
 # ===== ここまで貼り付け =====
 
 # --- 最低限のDB回答（ヒット/複数/未ヒット） ---
+# 1) まず _answer_from_entries_min を修正
 def _answer_from_entries_min(question: str):
+    import unicodedata, re
+    # 文字正規化（NFKC + 空白つぶし + 小文字）
+    def _n(s: str) -> str:
+        return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", (s or "")).strip()).lower()
+
     q = (question or "").strip()
     if not q:
-        return "（内容が読み取れませんでした）", False
+        return "（内容が読み取れませんでした）", False, ""
 
+    qn = _n(q)
     es = load_entries()
-    ql = q.lower()
 
-    def rank_for(e, ql):
-        """タイトル一致を最優先。その次に説明→住所/エリア→その他で優先度を下げる"""
-        title   = (e.get("title","") or "").lower()
-        desc    = (e.get("desc","") or "").lower()
-        address = (e.get("address","") or "").lower()
-        areas   = " ".join(e.get("areas",[]) or []).lower()
-        tags    = " ".join(e.get("tags",[])  or []).lower()
-        tel     = (e.get("tel","") or "").lower()
-        mp      = (e.get("map","") or "").lower()
-
-        if ql in title:   return (0, -len(title))   # 0=最優先（同順位はタイトル短い方を先）
-        if ql in desc:    return (1, 0)
-        if ql in address or ql in areas: return (2, 0)
-        if ql in tags or ql in tel or ql in mp:     return (3, 0)
-        return None
-
-    ranked = []
+    # --- タイトル最優先のスコアリング ---
+    ranked = []  # (score, tie_breaker, entry)
     for e in es:
-        r = rank_for(e, ql) if ql else None
-        if r is not None:
-            ranked.append((r, e))
+        title = e.get("title", "")
+        desc  = e.get("desc", "")
+        addr  = e.get("address", "")
+        tags  = e.get("tags", []) or []
+        areas = e.get("areas", []) or []
 
+        tn = _n(title)
+        dn = _n(desc)
+        an = _n(addr)
+
+        score = None
+        # 優先度：タイトル完全一致＞タイトル部分一致＞説明＞住所＞タグ・エリア
+        if qn and qn == tn:
+            score = 100
+        elif qn and qn in tn:
+            score = 80
+        elif qn and qn in dn:
+            score = 60
+        elif qn and qn in an:
+            score = 50
+        elif any(qn in _n(t) for t in tags):
+            score = 40
+        elif any(qn in _n(a) for a in areas):
+            score = 30
+
+        if score is not None:
+            # 近いタイトル長を優先（同点時の並び安定化）
+            tie = abs(len(tn) - len(qn))
+            ranked.append((score, tie, e))
+
+    # ・・・ ranked が空のとき
     if not ranked:
-        # data/ のテキストから回答（あれば）
-        txt_ans = _answer_from_data_txt(q)
-        if txt_ans:
-            return txt_ans, False
+        # 即返し（天気 / 運行）
+        m, ok = get_weather_reply(q)
+        if ok:
+            return m, False, ""
+        m, ok = get_transport_reply(q)
+        if ok:
+            return m, False, ""
         refine, _meta = build_refine_suggestions(q)
-        return "該当が見つかりませんでした。\n" + refine, False
+        return "該当が見つかりませんでした。\n" + refine, False, ""
 
-    # 優先順に並べ替え（タイトル一致が先頭に来る）
-    ranked.sort(key=lambda x: x[0])
-    hits = [e for _, e in ranked]
+    # スコア降順 → タイトル長の近さ昇順 → もとの順の安定性
+    ranked.sort(key=lambda t: (-t[0], t[1]))
+    hits = [e for _, __, e in ranked]
 
-    # タイトル一致が1件だけなら、それを単独回答にする（「タイトルを優先」の明確化）
-    title_only = [e for (r, e) in ranked if r[0] == 0]
-    if len(hits) == 1 or len(title_only) == 1:
-        e = hits[0] if len(hits) == 1 else title_only[0]
+    # タイトル一致（完全 or 部分）の最上位が単独なら、それを即採用
+    top_score = ranked[0][0]
+    same_top_count = sum(1 for s, _, __ in ranked if s == top_score)
+    if same_top_count == 1:
+        hits = [hits[0]]
+
+    if len(hits) == 1:
+        e = hits[0]
+
+        # 画像URL（file名があれば生成）
+        img_url = ""
+        img_name = e.get("image_file") or e.get("image") or ""
+        if img_name:
+            try:
+                img_url = url_for("serve_image", filename=img_name, _external=True)
+            except Exception:
+                img_url = ""
+
+        # 本文は「タイトル1行＋説明1行」→以降に項目（仕様どおり）
         lines = []
+        title = (e.get("title","") or "").strip()
+        desc  = (e.get("desc","")  or "").strip()
+        if title: lines.append(title)
+        if desc:  lines.append(desc)
 
-        # 1行目: タイトル
-        if e.get("title"):
-            lines.append(f"{e['title'].strip()}")
+        def add(label, key):
+            v = (e.get(key) or "")
+            if isinstance(v, list):
+                v = " / ".join(v)
+            v = v.strip()
+            if v:
+                lines.append(f"{label}：{v}")
 
-        # 2行目: 説明
-        if e.get("desc"):
-            lines.append(e["desc"].strip())
+        add("住所", "address")
+        add("電話", "tel")
+        add("地図", "map")
+        add("エリア", "areas")
+        add("休み", "holiday")
+        add("営業時間", "open_hours")
+        add("駐車場", "parking")
+        add("支払方法", "payment")
+        add("備考", "remark")
+        add("リンク", "links")
+        add("カテゴリー", "category")
 
-        # 以降: 指定順で“存在するものだけ”
-        if e.get("address"):    lines.append(f"住所：{e['address']}")
-        if e.get("tel"):        lines.append(f"電話：{e['tel']}")
-        if e.get("map"):        lines.append(f"地図：{e['map']}")
-        areas = " / ".join(e.get("areas",[]) or [])
-        if areas:               lines.append(f"エリア：{areas}")
-        if e.get("holiday"):    lines.append(f"休み：{e['holiday']}")
-        if e.get("open_hours"): lines.append(f"営業時間：{e['open_hours']}")
-        if e.get("parking"):
-            pn = f"（{e['parking_num']}台）" if e.get("parking_num") else ""
-            lines.append(f"駐車場：{e['parking']}{pn}")
-        if e.get("payment"):    lines.append(f"支払方法：{', '.join(e['payment'])}")
-        if e.get("remark"):     lines.append(f"備考：{e['remark']}")
-        if e.get("links"):      lines.append("リンク：\n" + "\n".join(f"- {u}" for u in e["links"]))
-        if e.get("category"):   lines.append(f"カテゴリー：{e['category']}")
+        # タグは返信に入れない（現状維持）
+        return "\n".join(lines), True, img_url
 
-        # ※タグは返信に含めない
-        return "\n".join([s for s in lines if s]), True
-
-    # 複数ヒット：優先順（タイトル一致→説明一致→…）で提示
+    # 複数ヒット（ランキング順で提示）
     lines = ["候補が複数見つかりました。気になるものはありますか？"]
     for i, e in enumerate(hits[:8], 1):
         area = " / ".join(e.get("areas", []) or "") or ""
         suffix = f"（{area}）" if area else ""
         lines.append(f"{i}. {e.get('title','')}{suffix}")
-
     if len(hits) > 8:
         lines.append(f"…ほか {len(hits)-8} 件")
 
     refine, _meta = build_refine_suggestions(q)
-    return "\n".join(lines) + "\n\n" + refine, True
+    return "\n".join(lines) + "\n\n" + refine, True, ""
 
-# =========================
 #  即返し（天気 / 運行状況） - 保証版
 # =========================
 import unicodedata as _unic
@@ -3012,10 +3268,26 @@ def get_transport_reply(text: str):
         return fly_section, True
     return ship_section + "\n\n" + fly_section, True
 
+@app.route("/admin/upload_image", methods=["POST"])
+@login_required
+def admin_upload_image():
+    if session.get("role") not in {"admin", "shop"}:
+        abort(403)
 
-# ====== どこに貼る？ ======
-# app = Flask(__name__) 以降、get_weather_reply / get_transport_reply の定義より「後」ならどこでもOK。
-# 例：get_transport_reply の直下あたりに置くのが分かりやすいです。
+    f = request.files.get("image")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "error": "ファイルがありません"}), 400
+
+    # 前半にある唯一の正の保存関数を使用
+    res = _save_jpeg_1080_350kb(f, previous=None, delete=False)
+    if res is None:
+        return jsonify({"ok": False, "error": "画像の保存に失敗しました"}), 400
+    if res == "":
+        return jsonify({"ok": False, "error": "削除指定は許可されていません"}), 400
+
+    url = url_for("serve_image", filename=res, _external=True)
+    return jsonify({"ok": True, "file": res, "url": url})
+
 
 @app.route("/_debug/where")
 def _debug_where():
@@ -3035,7 +3307,153 @@ def _debug_test_transport():
     m, ok = get_transport_reply(q)
     return jsonify({"ok": ok, "answer": m})
 
+def _format_entry_text(e: dict) -> str:
+    """指定仕様どおりの並びで1本のテキストを組む（タグは入れない）"""
+    lines = []
+    title = (e.get("title") or "").strip()
+    desc  = (e.get("desc")  or "").strip()
+    if title: lines.append(title)            # 1行目：タイトル
+    if desc:  lines.append(desc)             # 2行目：説明
+
+    if e.get("address"):    lines.append(f"住所：{e['address']}")
+    if e.get("tel"):        lines.append(f"電話：{e['tel']}")
+    if e.get("map"):        lines.append(f"地図：{e['map']}")
+    areas = " / ".join(e.get("areas") or [])
+    if areas:               lines.append(f"エリア：{areas}")
+    if e.get("holiday"):    lines.append(f"休み：{e['holiday']}")
+    if e.get("open_hours"): lines.append(f"営業時間：{e['open_hours']}")
+    # 駐車場（台数があれば併記）
+    if e.get("parking"):
+        if e.get("parking_num"):
+            lines.append(f"駐車場：{e['parking']}（{e['parking_num']}台）")
+        else:
+            lines.append(f"駐車場：{e['parking']}")
+    # 支払方法（配列をカンマ結合）
+    pay = ", ".join(e.get("payment") or [])
+    if pay: lines.append(f"支払方法：{pay}")
+    if e.get("remark"): lines.append(f"備考：{e['remark']}")
+    # リンク（複数想定）
+    links = e.get("links") or []
+    if links:
+        lines.append("リンク：")
+        lines.extend(links[:5])  # 多すぎ防止で上位5件
+    if e.get("category"):
+        lines.append(f"カテゴリー：{e['category']}")
+    return "\n".join(lines)
+
+
+def _format_entry_messages(e: dict):
+    """
+    画像があれば先に画像、その後テキストという並びで LINE メッセージ配列を返す。
+    """
+    msgs = []
+    # 画像
+    img_name = (e.get("image_file") or e.get("image") or "").strip()
+    if img_name:
+        try:
+            img_url = url_for("serve_image", filename=img_name, _external=True)
+            # LINE は HTTPS 必須。開発時に http の場合はスキップ
+            if img_url.startswith("https://"):
+                msgs.append(ImageSendMessage(original_content_url=img_url, preview_image_url=img_url))
+        except Exception:
+            app.logger.exception("build ImageSendMessage failed")
+
+    # テキスト
+    text = _format_entry_text(e)
+    if text:
+        # 長文分割（既存ユーティリティ）
+        for p in _split_for_line(text, LINE_SAFE_CHARS):
+            msgs.append(TextSendMessage(text=p))
+
+    # フォールバック
+    if not msgs:
+        msgs = [TextSendMessage(text="情報を取得できませんでした。")]
+
+    return msgs
+
+
+def _send_messages(event, messages):
+    """テキスト/画像など複合メッセージをまとめて送る"""
+    if not _line_enabled() or not line_bot_api:
+        # ログ出力のみ（開発/LINE無効時）
+        for m in messages:
+            try:
+                app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
+            except Exception:
+                pass
+        return
+    try:
+        reply_token = getattr(event, "reply_token", None)
+        if reply_token:
+            line_bot_api.reply_message(reply_token, messages)
+        else:
+            tid = _line_target_id(event)
+            if tid:
+                line_bot_api.push_message(tid, messages)
+    except LineBotApiError as e:
+        global LAST_SEND_ERROR, SEND_ERROR_COUNT
+        SEND_ERROR_COUNT += 1
+        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed: %s", e)
+
+
+def _search_entries_prioritized(q: str):
+    """タイトル一致＞タイトル部分一致＞その他（説明など）の順で優先度付きヒットを返す"""
+    qn = _norm_text_jp(q)
+    exact, part, others = [], [], []
+    for e in load_entries():
+        title_n = _norm_text_jp(e.get("title", ""))
+        desc_n  = _norm_text_jp(e.get("desc", ""))
+        address_n = _norm_text_jp(e.get("address", ""))
+        tags_n  = _norm_text_jp(" ".join(e.get("tags") or []))
+        areas_n = _norm_text_jp(" ".join(e.get("areas") or []))
+
+        if not qn:
+            continue
+        if title_n == qn:
+            exact.append(e)
+        elif qn in title_n:
+            part.append(e)
+        elif (qn in desc_n) or (qn in address_n) or (qn in tags_n) or (qn in areas_n):
+            others.append(e)
+    return exact, part, others
+
+
+def _answer_from_entries_rich(question: str):
+    """
+    タイトル最優先の検索で見つけ、画像＋所定フォーマットで返す。
+    戻り値: ([Message], hit:bool)
+    """
+    exact, part, others = _search_entries_prioritized(question)
+    hits = exact or part or others
+
+    if not hits:
+        refine, _ = build_refine_suggestions(question)
+        txt = "該当が見つかりませんでした。\n" + refine
+        return [TextSendMessage(text=p) for p in _split_for_line(txt, LINE_SAFE_CHARS)], False
+
+    if len(hits) == 1:
+        e = hits[0]
+        return _format_entry_messages(e), True
+
+    # 複数ヒット：候補リスト（タイトル優先順）
+    lines = ["候補が複数見つかりました。店名で指定してください。"]
+    for i, e in enumerate(hits[:8], 1):
+        area = " / ".join(e.get("areas") or [])
+        suffix = f"（{area}）" if area else ""
+        lines.append(f"{i}. {e.get('title','')}{suffix}")
+
+    refine, _ = build_refine_suggestions(question)
+    if refine:
+        lines.append("")
+        lines.append(refine)
+
+    txt = "\n".join(lines)
+    return [TextSendMessage(text=p) for p in _split_for_line(txt, LINE_SAFE_CHARS)], True
+
+
 # --- メッセージ受信 ---
+# === 修正版: LINEメッセージハンドラ（コピペで上書き） ===
 if handler:
     @handler.add(MessageEvent, message=TextMessage)
     def handle_message(event):
@@ -3044,14 +3462,14 @@ if handler:
         except Exception:
             text = ""
 
-        # ミュート/一時停止
+        # ミュート/一時停止ゲート
         try:
             if _line_mute_gate(event, text):
                 return
         except Exception:
             app.logger.exception("_line_mute_gate failed")
 
-        # 即答リンク（天気/航路）
+        # 即答リンク（天気・交通）
         try:
             w, ok = get_weather_reply(text)
             app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
@@ -3079,11 +3497,31 @@ if handler:
         except Exception:
             app.logger.exception("smalltalk failed")
 
-        # DB優先の簡易回答
+        # DB回答（画像→テキストの順で 1 回の reply にまとめて送信）
         try:
-            ans, hit = _answer_from_entries_min(text)
-            _reply_or_push(event, ans)
-            save_qa_log(text, ans, source="line", hit_db=hit)
+            ans, hit, img_url = _answer_from_entries_min(text)
+
+            msgs = []
+            if img_url:
+                msgs.append(ImageSendMessage(
+                    original_content_url=img_url,
+                    preview_image_url=img_url
+                ))
+            for p in _split_for_line(ans, LINE_SAFE_CHARS):
+                msgs.append(TextSendMessage(text=p))
+
+            # ★ ここで一度に返信（_send_messages は使わない）
+            line_bot_api.reply_message(event.reply_token, msgs)
+
+            joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
+            save_qa_log(text, joined, source="line", hit_db=hit)
+
+        except LineBotApiError as e:
+            # 送信失敗を可視化
+            global LAST_SEND_ERROR, SEND_ERROR_COUNT
+            SEND_ERROR_COUNT += 1
+            LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+            app.logger.exception("LINE send failed")
         except Exception as e:
             app.logger.exception("answer flow failed: %s", e)
             fallback, _ = build_refine_suggestions(text)
@@ -3103,6 +3541,11 @@ def admin_manual():
 
 # ======== ▼▼▼ ここから追記：テキストファイル管理（/admin/data_files） ▼▼▼ ========
 from flask import send_from_directory
+
+@app.route("/media/img/<path:filename>")
+def serve_image(filename):
+    return send_from_directory(IMAGES_DIR, filename, conditional=True)
+
 
 # ① 許可する文字クラスを拡張（全角括弧・句読点・記号などを許可）
 ALLOWED_TXT_EXTS = {".txt", ".md"}
@@ -3938,6 +4381,26 @@ def _reply_or_push(event, text: str, *, reqgen: int | None = None):
             app.logger.warning("reply/push error: %s", e)
         first = False
 # ========================================================================
+
+def _send_messages(event, messages):
+    """テキスト/画像など複合メッセージ送信"""
+    if not _line_enabled() or not line_bot_api:
+        for m in messages:
+            app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
+        return
+    try:
+        rt = getattr(event, "reply_token", None)
+        if rt:
+            line_bot_api.reply_message(rt, messages)
+        else:
+            tid = _line_target_id(event)
+            if tid:
+                line_bot_api.push_message(tid, messages)
+    except LineBotApiError as e:
+        global LAST_SEND_ERROR, SEND_ERROR_COUNT
+        SEND_ERROR_COUNT += 1
+        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed: %s", e)
 
 
 # --- LINE 送信先IDの取得ヘルパー ---
