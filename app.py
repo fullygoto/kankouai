@@ -3318,6 +3318,16 @@ def _debug_test_weather():
     m, ok = get_weather_reply(q)
     return jsonify({"ok": ok, "answer": m})
 
+
+@app.route("/healthz", methods=["GET", "HEAD"])
+def healthz():
+    # 必要なら軽い自己診断をここに追加可
+    return ("ok", 200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+    })
+
+
 @app.route("/_debug/test_transport")
 def _debug_test_transport():
     q = request.args.get("q", "") or ""
@@ -3941,10 +3951,6 @@ def _debug_quick():
 @app.route("/")
 def home():
     return "<a href='/admin/entry'>[観光データ管理]</a>"
-
-@app.route("/healthz")
-def healthz():
-    return "ok", 200
 
 
 # =========================
