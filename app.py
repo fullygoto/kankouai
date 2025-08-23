@@ -288,8 +288,7 @@ def _too_large(e):
         flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
     else:
         flash(f"ファイルが大きすぎます（上限 {MAX_UPLOAD_MB} MB）")
-    return redirect(request.referrer or url_for("admin_entry")), 413
-
+    return redirect(request.referrer or url_for("admin_entry"))
 
 # ==== 追加（Flask設定の近くでOK）====
 ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on","yes"}
@@ -1670,12 +1669,30 @@ def generate_unhit_report(n=7):
     return counter.most_common()
 
 
+# --- 簡易正規化（NFKC + 連続空白を1つに + lower）---
+def _n(s: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", (s or "").strip())).lower()
+
 def find_tags_by_synonym(question, synonyms):
+    """
+    質問文とタグ/類義語を NFKC + 空白圧縮 + 小文字化 で正規化して部分一致判定。
+    例: if _n(syn) in _n(question): ...
+    """
+    qn = _n(question)
     tags = set()
-    for tag, synlist in synonyms.items():
-        for syn in synlist + [tag]:
-            if syn and syn in question:
+
+    for tag, synlist in (synonyms or {}).items():
+        # タグ名自体のマッチ
+        if _n(tag) and _n(tag) in qn:
+            tags.add(tag)
+            continue
+        # 類義語のマッチ
+        for syn in (synlist or []):
+            sn = _n(syn)
+            if sn and sn in qn:
                 tags.add(tag)
+                break
+
     return list(tags)
 
 
@@ -3344,30 +3361,51 @@ def _format_entry_text(e: dict) -> str:
 
 def _format_entry_messages(e: dict):
     """
-    画像があれば先に画像、その後テキストという並びで LINE メッセージ配列を返す。
+    画像があれば先に画像、続けて仕様どおりのテキストを送るための
+    LINEメッセージ配列を返すユーティリティ。
+
+    戻り値: list[TextSendMessage | ImageSendMessage]
     """
     msgs = []
-    # 画像
+
+    # 画像（image_file 優先 / 後方互換で image も見る）
     img_name = (e.get("image_file") or e.get("image") or "").strip()
     if img_name:
+        img_url = ""
         try:
+            # 可能なら絶対URLを生成（LINEは絶対URL推奨）
             img_url = url_for("serve_image", filename=img_name, _external=True)
-            # LINE は HTTPS 必須。開発時に http の場合はスキップ
-            if img_url.startswith("https://"):
-                msgs.append(ImageSendMessage(original_content_url=img_url, preview_image_url=img_url))
         except Exception:
-            app.logger.exception("build ImageSendMessage failed")
+            # リクエストコンテキスト外などで失敗した場合のフォールバック
+            try:
+                base = (request.url_root or "").rstrip("/")
+                img_url = f"{base}{MEDIA_URL_PREFIX}/{img_name}" if base else f"{MEDIA_URL_PREFIX}/{img_name}"
+            except Exception:
+                img_url = ""
 
-    # テキスト
+        if img_url:
+            try:
+                msgs.append(ImageSendMessage(
+                    original_content_url=img_url,
+                    preview_image_url=img_url
+                ))
+            except Exception:
+                # LINE SDKの型エラー等は握りつぶしてテキストのみ送る
+                app.logger.exception("failed to build ImageSendMessage")
+
+    # 本文テキスト（長文は安全分割）
     text = _format_entry_text(e)
-    if text:
-        # 長文分割（既存ユーティリティ）
-        for p in _split_for_line(text, LINE_SAFE_CHARS):
-            msgs.append(TextSendMessage(text=p))
+    parts = _split_for_line(text, LINE_SAFE_CHARS)
+    if not parts:
+        parts = ["（表示できる内容がありませんでした）"]
 
-    # フォールバック
-    if not msgs:
-        msgs = [TextSendMessage(text="情報を取得できませんでした。")]
+    for p in parts:
+        try:
+            msgs.append(TextSendMessage(text=p))
+        except Exception:
+            app.logger.exception("failed to build TextSendMessage; falling back to plain string")
+            # 最悪、プレーンな辞書にしても LINE SDK は受け取らないのでログのみ
+            # 呼び出し側で TextSendMessage を期待しているためここでは append しない
 
     return msgs
 
