@@ -317,10 +317,12 @@
                 <div class="mt-2">
                   <div>現在の画像:</div>
                   <img
-                    src="{{ safe_url_for('serve_image', filename=(entry_edit.image_file or entry_edit.image)) }}"
+                    src="{{ signed_image_url(entry_edit.image_file or entry_edit.image, wm=False) }}"
                     alt="現在の画像"
                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
-                  >
+                    referrerpolicy="no-referrer"
+                    loading="lazy"
+                  />
                   <div class="form-check mt-2">
                     <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
                     <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
@@ -398,10 +400,12 @@ https://instagram.com/xxx">
                 <div class="mt-2">
                   <div>現在の画像:</div>
                   <img
-                    src="{{ safe_url_for('serve_image', filename=(entry_edit.image_file or entry_edit.image)) }}"
+                    src="{{ signed_image_url(entry_edit.image_file or entry_edit.image, wm=False) }}"
                     alt="現在の画像"
                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
-                  >
+                    referrerpolicy="no-referrer"
+                    loading="lazy"
+                  />
                   <div class="form-check mt-2">
                     <input class="form-check-input" type="checkbox" id="image_delete_s" name="image_delete" value="1">
                     <label class="form-check-label" for="image_delete_s">この画像を削除する</label>
@@ -540,7 +544,7 @@ https://instagram.com/xxx">
                   else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
         {% set _pay   = e.payment if e.payment is defined and e.payment is not string else (e.payment.split(',') if e.payment else []) %}
 
-        {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ ((e.links or []) | join(' ')) ~ ' ' ~ (e.extras | tojson)) | lower %}
+        {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ (_links | join(' ')) ~ ' ' ~ (e.extras | tojson)) | lower %}
         <div class="entry-card"
             data-title="{{ e.title or '' }}"
             data-category="{{ e.category or '' }}"
@@ -548,90 +552,88 @@ https://instagram.com/xxx">
             data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
             data-text="{{ all_text }}">
 
-            {# ▼ 追加: サムネイル + 容量/サイズ表示（右上に配置） #}
-            {% if e.__image %}
-              <div style="float:right; text-align:center; margin:2px 0 8px 12px;">
-                {% if e.__image.url %}
-                  <a href="{{ e.__image.url }}" target="_blank" rel="noopener">
-                    <img class="thumb" src="{{ e.__image.url }}" alt="thumb">
-                  </a>
-                {% endif %}
-                <div class="imgmeta">
-                  {% if e.__image.exists %}
-                    {{ e.__image.width }}×{{ e.__image.height }} px / {{ e.__image.kb }} KB
-                  {% else %}
-                    <span style="color:#c33;">画像ファイル未検出</span>
-                  {% endif %}
-                </div>
-              </div>
+          {% set _img = e.image_file or e.image %}
+          <div style="display:flex; gap:12px; align-items:flex-start;">
+            {% if _img %}
+              <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True) }}"
+                target="_blank" rel="noopener noreferrer" style="flex:0 0 auto;">
+                <img
+                  src="{{ safe_url_for('serve_image', filename=_img, wm=1) }}"
+                  alt="{{ e.title }} の画像"
+                  style="width:120px; height:90px; object-fit:cover; border-radius:6px;
+                        border:1px solid #e2e8f0; background:#fff;"
+                  loading="lazy" decoding="async" referrerpolicy="no-referrer">
+              </a>
             {% endif %}
 
-            <span class="card-label">タイトル：</span>{{ e.title }}<br>
-            <span class="card-label">説明：</span>{{ e.desc }}<br>
-            <span class="card-label">住所：</span>{{ e.address }}<br>
-            <span class="card-label">地図：</span>
-            {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
-            <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
-            <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
+            <div style="flex:1 1 auto;">
+              <span class="card-label">タイトル：</span>{{ e.title }}<br>
+              <span class="card-label">説明：</span>{{ e.desc }}<br>
+              <span class="card-label">住所：</span>{{ e.address }}<br>
+              <span class="card-label">地図：</span>
+              {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
+              <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
+              <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
 
-            {% if e.category and e.category != "観光" %}
+              {% if e.category and e.category != "観光" %}
                 <span class="card-label">電話：</span>{{ e.tel or "" }}<br>
                 <span class="card-label">休み：</span>{{ e.holiday or "" }}<br>
                 <span class="card-label">営業時間：</span>{{ e.open_hours or "" }}<br>
-                <span class="card-label">駐車場：</span>{{ e.parking or "" }}（{{ e.parking_num or "" }}台）<br>
+                <span class="card-label">駐車場：</span>{{ e.parking or "" }}{% if e.parking_num %}（{{ e.parking_num }}台）{% endif %}<br>
                 <span class="card-label">支払方法：</span>{{ _pay|join(', ') }}<br>
                 <span class="card-label">備考：</span>{{ e.remark or "" }}<br>
-            {% endif %}
+              {% endif %}
 
-            {% if _links %}
-              <span class="card-label">リンク：</span>
-              <ul class="compact">
-                {% for u in _links %}
-                  {% set u2 = (u ~ '') | trim %}
-                  {% if u2 %}<li><a href="{{ u2 }}" target="_blank" rel="noopener noreferrer">{{ u2 }}</a></li>{% endif %}
-                {% endfor %}
-              </ul>
-            {% endif %}
-
-            {% if e.extras is defined and e.extras %}
-              <span class="card-label">追加情報：</span>
-              <table class="kv">
-                {% if e.extras.items is defined %}
-                  {% for k, v in e.extras.items() %}
-                    <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+              {% if _links %}
+                <span class="card-label">リンク：</span>
+                <ul class="compact">
+                  {% for u in _links %}
+                    {% set u2 = (u ~ '') | trim %}
+                    {% if u2 %}<li><a href="{{ u2 }}" target="_blank" rel="noopener noreferrer">{{ u2 }}</a></li>{% endif %}
                   {% endfor %}
-                {% elif e.extras is iterable and e.extras is not string %}
-                  {% for it in e.extras %}
-                    {% if it.items is defined %}
-                      {% for k,v in it.items() %}
-                        <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
-                      {% endfor %}
-                    {% else %}
-                      <tr><td class="k">{{ it[0] if it|length>0 else '' }}</td><td>{{ it[1] if it|length>1 else '' }}</td></tr>
-                    {% endif %}
-                  {% endfor %}
-                {% else %}
-                  <tr><td class="k">備考</td><td>{{ e.extras }}</td></tr>
-                {% endif %}
-              </table>
-            {% endif %}
+                </ul>
+              {% endif %}
 
-            <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
+              {% if e.extras %}
+                <span class="card-label">追加情報：</span>
+                <table class="kv">
+                  {% if e.extras.items is defined %}
+                    {% for k, v in e.extras.items() %}
+                      <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                    {% endfor %}
+                  {% elif e.extras is iterable and e.extras is not string %}
+                    {% for it in e.extras %}
+                      {% if it.items is defined %}
+                        {% for k,v in it.items() %}
+                          <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                        {% endfor %}
+                      {% else %}
+                        <tr><td class="k">{{ it[0] if it|length>0 else '' }}</td><td>{{ it[1] if it|length>1 else '' }}</td></tr>
+                      {% endif %}
+                    {% endfor %}
+                  {% else %}
+                    <tr><td class="k">備考</td><td>{{ e.extras }}</td></tr>
+                  {% endif %}
+                </table>
+              {% endif %}
 
-            <div style="clear:both;"></div>  {# ← サムネのfloat解除 #}
+              <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
 
-            <div class="entry-actions">
+              <div class="entry-actions" style="margin-top:8px;">
                 <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
-                    <input type="hidden" name="edit" value="{{ loop.index0 }}">
-                    <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
+                  <input type="hidden" name="edit" value="{{ loop.index0 }}">
+                  <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
                 </form>
                 {% if role == "admin" %}
-                <form method="post" action="{{ url_for('delete_entry') }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
+                  <form method="post" action="{{ url_for('delete_entry') }}" style="display:inline;"
+                        onsubmit="return confirm('本当に削除しますか？');">
                     <input type="hidden" name="idx" value="{{ loop.index0 }}">
                     <button type="submit" class="del-btn">削除</button>
-                </form>
+                  </form>
                 {% endif %}
+              </div>
             </div>
+          </div>
         </div>
     {% endfor %}
     </div>
