@@ -702,6 +702,36 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
         app.logger.exception("image normalize & save failed")
         return None
 
+def _get_image_meta(filename: str):
+    """画像ファイルの URL / バイト数 / 幅高さ(px) / KB を返す（なければ None）"""
+    if not filename:
+        return None
+    try:
+        path = os.path.join(IMAGES_DIR, filename)
+        size_b = os.path.getsize(path)
+    except Exception:
+        return None
+
+    w = h = None
+    try:
+        with Image.open(path) as im:
+            w, h = im.size
+    except Exception:
+        pass
+
+    try:
+        url = url_for("serve_image", filename=filename, _external=True)
+    except Exception:
+        url = f"{MEDIA_URL_PREFIX}/{filename}"
+
+    return {
+        "name": filename,
+        "bytes": size_b,
+        "kb": round(size_b / 1024, 1),
+        "w": w,
+        "h": h,
+        "url": url,
+    }
 
 # --- LINE安全対策（ミュート＆全体一時停止）---
 MUTES_FILE = os.path.join(BASE_DIR, "line_mutes.json")          # 会話単位のミュート管理
@@ -1851,6 +1881,59 @@ def admin_entry():
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
 
+    # ---- 画像メタ情報を取得する小ヘルパ（この関数内だけで完結） ----
+    def _image_meta(img_name: str | None):
+        """
+        画像ファイルの存在/サイズ/解像度とURLを返す。
+        戻り値例:
+        {
+          "name": "abcd.jpg",
+          "exists": True/False,
+          "url": "https://.../media/img/abcd.jpg",
+          "bytes": 123456,
+          "kb": 121,               # 端数切り上げ
+          "width": 1080,
+          "height": 720
+        }
+        """
+        if not img_name:
+            return None
+        try:
+            # 画像URL（存在しなくてもURLは生成しておく）
+            try:
+                url = url_for("serve_image", filename=img_name, _external=True)
+            except Exception:
+                url = ""
+
+            path = os.path.join(IMAGES_DIR, img_name)
+            if not os.path.isfile(path):
+                return {
+                    "name": img_name, "exists": False, "url": url,
+                    "bytes": None, "kb": None, "width": None, "height": None
+                }
+
+            size_b = os.path.getsize(path)
+            kb = (size_b + 1023) // 1024  # 切り上げKB
+
+            w = h = None
+            try:
+                with Image.open(path) as im:
+                    w, h = im.size
+            except Exception:
+                pass
+
+            return {
+                "name": img_name, "exists": True, "url": url,
+                "bytes": size_b, "kb": kb, "width": w, "height": h
+            }
+        except Exception:
+            # 何かあっても画面は壊さない
+            return {
+                "name": img_name or "", "exists": False, "url": "",
+                "bytes": None, "kb": None, "width": None, "height": None
+            }
+
+    # ---- ここから従来どおり ----
     entries = [_norm_entry(x) for x in load_entries()]  # 表示前にも正規化
 
     edit_id = request.values.get("edit")
@@ -1969,9 +2052,17 @@ def admin_entry():
         save_entries(entries)
         return redirect(url_for("admin_entry"))
 
+    # ---- ここで “サムネ/容量/サイズ” を各エントリに付加してテンプレへ渡す ----
+    entries_view = []
+    for e in entries:
+        e2 = dict(e)  # テンプレ用にコピー（元データは変更しない）
+        img_name = e.get("image_file") or e.get("image")
+        e2["__image"] = _image_meta(img_name) if img_name else None
+        entries_view.append(e2)
+
     return render_template(
         "admin_entry.html",
-        entries=entries,
+        entries=entries_view,
         entry_edit=entry_edit,
         edit_id=edit_id if edit_id not in (None, "", "None") else None,
         role=session.get("role", ""),
@@ -2574,6 +2665,45 @@ def admin_backup():
         "logs_count": logs_count,
     }
     return render_template("admin_backup.html", stats=stats)
+
+@app.route("/admin/storage_stats")
+@login_required
+def admin_storage_stats():
+    if session.get("role") != "admin":
+        abort(403)
+    import os
+    base = BASE_DIR
+    out = {"base_dir": base, "dirs": {}, "files": {}}
+
+    def dir_stats(path):
+        total = 0
+        count = 0
+        for root, _, files in os.walk(path):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    total += os.path.getsize(fp)
+                    count += 1
+                except Exception:
+                    pass
+        return {"bytes": total, "files": count}
+
+    # 主要ディレクトリの統計
+    for d in ["data", "data/images", "logs", "manual_backups", "auto_backups"]:
+        p = os.path.join(base, d)
+        if os.path.isdir(p):
+            out["dirs"][d] = dir_stats(p)
+
+    # 主要ファイルのサイズだけ
+    def add_file(relpath):
+        p = os.path.join(base, relpath)
+        if os.path.isfile(p):
+            out["files"][relpath] = {"bytes": os.path.getsize(p)}
+
+    for f in ["entries.json", "synonyms.json", "notices.json", "shop_infos.json", "logs/questions_log.jsonl"]:
+        add_file(f)
+
+    return jsonify(out)
 
 @app.route("/admin/restore", methods=["POST"])
 @login_required
