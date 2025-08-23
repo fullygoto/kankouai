@@ -8,10 +8,9 @@ import threading
 import ipaddress
 import logging
 import uuid
-
-
+import hmac, hashlib, base64
+from PIL import ImageDraw, ImageFont
 from PIL import Image, ImageOps  # ← 追加
-
 
 # 追加:
 import warnings
@@ -403,13 +402,59 @@ def login_required(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+def _boolish(x) -> bool:
+    return str(x).lower() in {"1","true","on","yes"}
+
 def safe_url_for(endpoint, **values):
+    """
+    既存の url_for を安全化 + 画像エンドポイントだけ“おまかせ署名”対応。
+    - endpoint == "serve_image" のとき：
+        * デフォルトで、未ログインの外部アクセス時は署名URLを返す（IMAGE_PROTECT 有効時）
+        * _sign=True で強制的に署名、_sign=False で署名しない
+        * wm=1（または _wm=True）で透かし付きURL
+        * _external=True で絶対URLに
+    - それ以外は通常の url_for。BuildError は "#" を返す
+    """
     try:
+        if endpoint == "serve_image":
+            filename = values.get("filename")
+            if not filename:
+                return "#"
+
+            # url_for と衝突しないよう先に吸い出す
+            external = bool(values.pop("_external", False))
+            wm_val   = values.pop("wm", values.pop("_wm", None))
+            want_wm  = WATERMARK_ENABLE and (_boolish(wm_val) if wm_val is not None else False)
+
+            # 署名するか判断
+            must_sign = IMAGE_PROTECT and not session.get("user_id")
+            sign      = _boolish(values.pop("_sign", must_sign))
+
+            if sign:
+                return build_signed_image_url(filename, wm=want_wm, external=external)
+
+            # 署名しない（＝管理画面など）。wm 指定があればクエリとして付与
+            if want_wm:
+                values["wm"] = "1"
+            values["_external"] = external
+            return url_for(endpoint, **values)
+
+        # 通常のエンドポイント
         return url_for(endpoint, **values)
+
     except BuildError:
         return "#"  # 未実装リンクはダミーへ
+    except Exception:
+        # 念のためのフォールバック
+        try:
+            return url_for(endpoint, **values)
+        except Exception:
+            return "#"
 
+# Jinja から直接呼べるように（既に設定済ならこの行で上書きされます）
 app.jinja_env.globals["safe_url_for"] = safe_url_for
+# 明示的に署名URLを作りたいときはこれも使えます（任意）
+app.jinja_env.globals["signed_image_url"] = lambda fn, wm=False: build_signed_image_url(fn, wm=wm, external=False)
 
 # =========================
 #  環境変数 / モデル
@@ -538,13 +583,132 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 # 入力として受け付ける拡張子（出力は常に .jpg）
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
-@app.route(f"{MEDIA_URL_PREFIX}/<path:filename>")
+# ---- 画像アクセス保護（署名付きURL + 透かし）----
+IMAGE_PROTECT = os.getenv("IMAGE_PROTECT","1").lower() in {"1","true","on","yes"}
+IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or app.secret_key or "change-me").encode("utf-8")
+SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
+
+WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE","1").lower() in {"1","true","on","yes"}
+WATERMARK_TEXT = os.getenv("WATERMARK_TEXT","© GOTOKANKO")
+WATERMARK_OPACITY = int(os.getenv("WATERMARK_OPACITY","160"))   # 0-255
+WATERMARK_SCALE = float(os.getenv("WATERMARK_SCALE","0.035"))   # 画像幅に対する割合（文字サイズ）
+
+def _img_sig(filename: str, exp: int) -> str:
+    msg = f"{filename}|{exp}".encode("utf-8")
+    return base64.urlsafe_b64encode(
+        hmac.new(IMAGES_SIGNING_KEY, msg, hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+
+def build_signed_image_url(filename: str, *, ttl_sec: int|None=None, wm: bool=True, external: bool=True) -> str:
+    """
+    署名付きURLを生成（wm=Trueで透かし画像を配信）
+    """
+    if not filename:
+        return ""
+    if not IMAGE_PROTECT:
+        try:
+            return url_for("serve_image", filename=filename, _external=external)
+        except Exception:
+            return f"{MEDIA_URL_PREFIX}/{filename}"
+    ttl = int(ttl_sec or SIGNED_IMAGE_TTL_SEC)
+    exp = int(time.time()) + max(60, ttl)
+    sig = _img_sig(filename, exp)
+    try:
+        return url_for(
+            "serve_image",
+            filename=filename, sig=sig, exp=exp, wm=int(bool(wm)),
+            _external=external
+        )
+    except Exception:
+        # 異常時フォールバック（外部URL組み立てが失敗したとき）
+        return f"{MEDIA_URL_PREFIX}/{filename}?sig={sig}&exp={exp}&wm={1 if wm else 0}"
+
+app.jinja_env.globals["signed_image_url"] = build_signed_image_url  # Jinjaからも使える
+
+
+def _apply_text_watermark(im: Image.Image, text: str) -> Image.Image:
+    if not text:
+        return im
+    im = im.convert("RGBA")
+    W, H = im.size
+    # 文字サイズ（画像幅の一定割合）
+    size = max(12, int(W * WATERMARK_SCALE))
+    try:
+        font = ImageFont.truetype("arial.ttf", size)
+    except Exception:
+        font = ImageFont.load_default()
+    draw = ImageDraw.Draw(im)
+    # bbox（textsizeより新しめ。なければ代替）
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = (bbox[2]-bbox[0], bbox[3]-bbox[1])
+    except Exception:
+        tw, th = draw.textsize(text, font=font)
+
+    pad = max(6, size//3)
+    x = max(0, W - tw - pad*2)
+    y = max(0, H - th - pad*2)
+
+    # 半透明の下地
+    bg = Image.new("RGBA", (tw+pad*2, th+pad*2), (0, 0, 0, int(WATERMARK_OPACITY*0.45)))
+    im.alpha_composite(bg, (x, y))
+
+    # 文字（白）
+    draw = ImageDraw.Draw(im)
+    draw.text((x+pad, y+pad), text, fill=(255, 255, 255, WATERMARK_OPACITY), font=font)
+    return im.convert("RGB")
+
+
+@app.route(f"{MEDIA_URL_PREFIX}/<path:filename>", methods=["GET","HEAD"])
 def serve_image(filename):
     _, ext = os.path.splitext(filename.lower())
-    # 既存データの互換のため、移行期間は png/webp も許可（全部jpg化できたら {".jpg",".jpeg"} に戻してOK）
+    # 互換のため jpeg/png/webp を許容（保存は常にjpgの想定）
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
         abort(404)
-    return send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+
+    # 署名チェック（管理画面ログイン中は通す／外部は必須）
+    if IMAGE_PROTECT:
+        is_admin_view = bool(session.get("user_id"))
+        if not is_admin_view:
+            sig = request.args.get("sig","")
+            try:
+                exp = int(request.args.get("exp","0"))
+            except Exception:
+                exp = 0
+            now = int(time.time())
+            if (not sig) or (now > exp) or (not hmac.compare_digest(sig, _img_sig(filename, exp))):
+                # 存在漏えいを避けるため 404 にする
+                abort(404)
+
+    path = os.path.join(IMAGES_DIR, filename)
+    if not os.path.isfile(path):
+        abort(404)
+
+    want_wm = (request.args.get("wm") in {"1","true","on","yes"}) and WATERMARK_ENABLE
+
+    # HEAD は中身を読まずに返す
+    if request.method == "HEAD" and not want_wm:
+        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+    else:
+        if want_wm:
+            try:
+                im = Image.open(path)
+                im = ImageOps.exif_transpose(im)
+                im = _apply_text_watermark(im, WATERMARK_TEXT)
+                buf = io.BytesIO()
+                im.save(buf, format="JPEG", quality=85, optimize=True, progressive=True, subsampling=2)
+                buf.seek(0)
+                resp = send_file(buf, mimetype="image/jpeg", max_age=3600)
+            except Exception:
+                # 透かし失敗時は素の画像にフォールバック
+                resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+        else:
+            resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+
+    # 追加ヘッダ（検索避け & キャッシュ）
+    resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
 
 # 1080px / 350KBに正規化してJPEG保存（出力は常に .jpg）
 TARGET_JPEG_MAX_W      = 1080
@@ -3305,7 +3469,7 @@ def _answer_from_entries_min(question: str):
         img_name = e.get("image_file") or e.get("image") or ""
         if img_name:
             try:
-                img_url = url_for("serve_image", filename=img_name, _external=True)
+                img_url = build_signed_image_url(img_name, wm=True, external=True)
             except Exception:
                 img_url = ""
 
@@ -3514,7 +3678,7 @@ def _format_entry_messages(e: dict):
         img_url = ""
         try:
             # 可能なら絶対URLを生成（LINEは絶対URL推奨）
-            img_url = url_for("serve_image", filename=img_name, _external=True)
+            img_url = build_signed_image_url(img_name, wm=True, external=True)
         except Exception:
             # リクエストコンテキスト外などで失敗した場合のフォールバック
             try:
