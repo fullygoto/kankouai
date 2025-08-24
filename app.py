@@ -2410,6 +2410,7 @@ def build_refine_suggestions(question):
 @app.route("/admin/entry", methods=["GET", "POST"])
 @login_required
 def admin_entry():
+    import os  # ローカルimportで安全に
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
 
@@ -2466,7 +2467,7 @@ def admin_entry():
                 "bytes": None, "kb": None, "width": None, "height": None
             }
 
-    # ---- 座標ユーティリティ（全角/URL/DMSなど何でも受ける） ----
+    # ---- 座標ユーティリティ（全角/URL/DMSなど何でも受ける）----
     import re as _re
 
     def _zen2han(s: str) -> str:
@@ -2474,7 +2475,7 @@ def admin_entry():
             return s
         table = str.maketrans({
             "０":"0","１":"1","２":"2","３":"3","４":"4","５":"5","６":"6","７":"7","８":"8","９":"9",
-            "，":",","、":",","．":".","。":".","＋":"+","－":"-","−":"-",  # マイナスは両方
+            "，":",","、":",","．":".","。":".","＋":"+","－":"-","−":"-",
         })
         return s.translate(table)
 
