@@ -414,6 +414,13 @@
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
 
+            <!-- ★ 出典（観光サイト・パンフ等） -->
+            <label>出典</label><br>
+            <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+            <label>出典URL</label><br>
+            <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
+            <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
+
             <!-- ★ 座標コピペ欄（なんでもOK） -->
             <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
             <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
@@ -564,6 +571,13 @@ https://instagram.com/xxx">
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
 
+            <!-- ★ 出典（観光サイト・パンフ等） -->
+            <label>出典</label><br>
+            <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+            <label>出典URL</label><br>
+            <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
+            <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
+
             <!-- ★ 座標コピペ欄（なんでもOK） -->
             <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
             <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
@@ -622,7 +636,7 @@ https://instagram.com/xxx">
     <h2 style="margin-bottom:8px;">登録済みデータ</h2>
 
     <div class="filterbar">
-      <input type="text" id="f_q" placeholder="キーワード（タイトル/説明/住所/タグ/追加情報/リンク）" oninput="filterCards()">
+      <input type="text" id="f_q" placeholder="キーワード（タイトル/説明/住所/タグ/追加情報/リンク/出典）" oninput="filterCards()">
       <select id="f_cat" onchange="filterCards()">
         <option value="">カテゴリー：すべて</option>
         {% for c in cat_list %}
@@ -685,7 +699,7 @@ https://instagram.com/xxx">
         {% set _links = e.links if e.links is defined and e.links is not string
                   else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
         {% set _pay   = e.payment if e.payment is defined and e.payment is not string else (e.payment.split(',') if e.payment else []) %}
-        {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ (_links | join(' ')) ~ ' ' ~ (e.extras | tojson)) | lower %}
+        {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ (_links | join(' ')) ~ ' ' ~ (e.extras | tojson) ~ ' ' ~ (e.source or '') ~ ' ' ~ (e.source_url or '')) | lower %}
 
         <div class="entry-card"
             data-title="{{ e.title or '' }}"
@@ -723,6 +737,18 @@ https://instagram.com/xxx">
               <span class="card-label">住所：</span>{{ e.address }}<br>
               <span class="card-label">地図：</span>
               {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
+
+              <span class="card-label">出典：</span>
+              {% if e.source and e.source_url %}
+                <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source }}</a>
+              {% elif e.source %}
+                {{ e.source }}
+              {% elif e.source_url %}
+                <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source_url }}</a>
+              {% else %}
+                （未入力）
+              {% endif %}<br>
+
               <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
               <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
 
