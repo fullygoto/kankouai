@@ -25,7 +25,7 @@ from werkzeug.routing import BuildError
 
 
 
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort, send_from_directory
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort, send_from_directory, render_template_string
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -50,7 +50,6 @@ from functools import wraps
 
 # ==== Nearby (現在地から近いスポット検索) ======================================
 import re, math, json, urllib.parse as _u
-from flask import jsonify, render_template_string, request
 
 # =========================
 #  Flask / 設定
@@ -256,6 +255,126 @@ def _split_for_line(text: str, limit: int = None, max_len: int = None, **_ignore
     if buf or not out:
         out.append((buf or s).rstrip("\n"))
     return out
+
+
+# === 緯度経度：コピペ用のパーサ ===
+import re as _re2
+
+def _parse_dms_block(s: str):
+    """
+    DMS（度分秒）1ブロックを小数に変換（例: 35°41'6.6"N / 北緯35度41分6.6秒 / 139°41'30"E）
+    戻り値: (value, axis)  axis は 'lat' / 'lng' / None
+    """
+    s = s.strip()
+    hemi = None
+    if _re2.search(r'[N北]', s, _re2.I): hemi = 'N'
+    if _re2.search(r'[S南]', s, _re2.I): hemi = 'S'
+    if _re2.search(r'[E東]', s, _re2.I): hemi = 'E'
+    if _re2.search(r'[W西]', s, _re2.I): hemi = 'W'
+
+    m = _re2.search(
+        r'(\d+(?:\.\d+)?)\s*[°度]\s*(\d+(?:\.\d+)?)?\s*[\'’′分]?\s*(\d+(?:\.\d+)?)?\s*["”″秒]?',
+        s
+    )
+    if not m:
+        return None, None
+
+    deg = float(m.group(1))
+    minutes = float(m.group(2) or 0.0)
+    seconds = float(m.group(3) or 0.0)
+    val = deg + minutes/60.0 + seconds/3600.0
+    if hemi in ('S','W'):
+        val = -val
+
+    axis = None
+    if hemi in ('N','S'):
+        axis = 'lat'
+    elif hemi in ('E','W'):
+        axis = 'lng'
+    return val, axis
+
+
+def parse_latlng_any(text: str):
+    """
+    Googleマップのコピペ（URL/小数/DMS/日本語表記）を (lat, lng) へ正規化。
+    例:
+      35.681236, 139.767125
+      https://www.google.com/maps?q=35.681236,139.767125
+      https://www.google.com/maps/@35.681236,139.767125,17z
+      35°41'6.6"N 139°41'30"E
+      北緯35度41分6.6秒 東経139度41分30秒
+    """
+    if not text:
+        return None
+    s = text.strip().replace('，', ',').replace('、', ',')
+    s = _re2.sub(r'\s+', ' ', s)
+
+    # URL ?q=lat,lng / ?query=lat,lng
+    m = _re2.search(r'[?&](?:q|query)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # URL /@lat,lng,...
+    m = _re2.search(r'/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:[,/?]|$)', s)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+
+    # 純粋な「lat,lng」
+    m = _re2.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', s)
+    if m:
+        a, b = float(m.group(1)), float(m.group(2))
+        if abs(a) > 90 and abs(b) <= 90:
+            a, b = b, a
+        return a, b
+
+    # DMS ブロック2つ拾う
+    dms_blocks = _re2.findall(
+        r'(\d+(?:\.\d+)?\s*[°度]\s*\d*(?:\.\d+)?\s*[\'’′分]?\s*\d*(?:\.\d+)?\s*["”″秒]?\s*[NSEW北南東西]?)',
+        s, flags=_re2.I
+    )
+    if len(dms_blocks) >= 2:
+        v1, a1 = _parse_dms_block(dms_blocks[0])
+        v2, a2 = _parse_dms_block(dms_blocks[1])
+        if v1 is not None and v2 is not None:
+            if not a1 and not a2:
+                cand = sorted([v1, v2], key=lambda x: abs(x))
+                return cand[0], cand[1]
+            lat = v1 if (a1 == 'lat' or (a1 is None and abs(v1) <= 90)) else v2
+            lng = v2 if lat == v1 else v1
+            return lat, lng
+
+    # 「緯度: xx / 経度: yy」
+    mlat = _re2.search(r'緯度[:：]\s*(-?\d+(?:\.\d+)?)', s)
+    mlng = _re2.search(r'経度[:：]\s*(-?\d+(?:\.\d+)?)', s)
+    if mlat and mlng:
+        return float(mlat.group(1)), float(mlng.group(1))
+
+    return None
+
+
+def normalize_latlng(raw_coords: str, lat_str: str, lng_str: str):
+    """
+    3入力（rawコピペ / lat / lng）から最終 (lat, lng) を決める。小数6桁へ丸め。
+    """
+    lat = lng = None
+    try:
+        if lat_str: lat = float(lat_str)
+        if lng_str: lng = float(lng_str)
+    except ValueError:
+        pass
+
+    if (lat is None or lng is None) and raw_coords:
+        pair = parse_latlng_any(raw_coords)
+        if pair:
+            lat, lng = pair
+
+    if lat is not None and not (-90 <= lat <= 90): lat = None
+    if lng is not None and not (-180 <= lng <= 180): lng = None
+
+    if lat is not None and lng is not None:
+        lat = round(lat, 6); lng = round(lng, 6)
+    return lat, lng
+
 
 
 def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
@@ -2367,20 +2486,116 @@ def admin_entry():
         address  = (request.form.get("address") or "").strip()
         map_url  = (request.form.get("map") or "").strip()
 
-        # ★ 緯度・経度（任意）
-        lat_raw = (request.form.get("lat") or "").strip()
-        lng_raw = (request.form.get("lng") or "").strip()
-        lat = None
-        lng = None
-        if lat_raw != "" or lng_raw != "":
+        # ===★ 追加: 緯度経度の何でもパーサ（この関数内ローカル） =================
+        import re as _re
+
+        def _parse_dms_block_local(s: str):
+            """DMS 1ブロックを小数へ。例: 35°41'6.6\"N / 北緯35度41分6.6秒"""
+            s = (s or "").strip()
+            hemi = None
+            if _re.search(r'[N北]', s, _re.I): hemi = 'N'
+            if _re.search(r'[S南]', s, _re.I): hemi = 'S'
+            if _re.search(r'[E東]', s, _re.I): hemi = 'E'
+            if _re.search(r'[W西]', s, _re.I): hemi = 'W'
+            m = _re.search(
+                r'(\d+(?:\.\d+)?)\s*[°度]\s*(\d+(?:\.\d+)?)?\s*[\'’′分]?\s*(\d+(?:\.\d+)?)?\s*["”″秒]?',
+                s
+            )
+            if not m:
+                return None, None
+            deg = float(m.group(1))
+            minutes = float(m.group(2) or 0.0)
+            seconds = float(m.group(3) or 0.0)
+            val = deg + minutes/60.0 + seconds/3600.0
+            if hemi in ('S','W'):
+                val = -val
+            axis = None
+            if hemi in ('N','S'):
+                axis = 'lat'
+            elif hemi in ('E','W'):
+                axis = 'lng'
+            return val, axis
+
+        def _parse_latlng_any_local(text: str):
+            """URL/小数/DMS/日本語表記 → (lat,lng)"""
+            if not text: return None
+            s = text.strip().replace('，', ',').replace('、', ',')
+            s = _re.sub(r'\s+', ' ', s)
+
+            # URL ?q=lat,lng / ?query=lat,lng
+            m = _re.search(r'[?&](?:q|query)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', s)
+            if m: return float(m.group(1)), float(m.group(2))
+
+            # URL /@lat,lng,...
+            m = _re.search(r'/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:[,/?]|$)', s)
+            if m: return float(m.group(1)), float(m.group(2))
+
+            # 純粋な「lat,lng」
+            m = _re.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', s)
+            if m:
+                a, b = float(m.group(1)), float(m.group(2))
+                if abs(a) > 90 and abs(b) <= 90:
+                    a, b = b, a
+                return a, b
+
+            # DMS ブロック×2
+            dms_blocks = _re.findall(
+                r'(\d+(?:\.\d+)?\s*[°度]\s*\d*(?:\.\d+)?\s*[\'’′分]?\s*\d*(?:\.\d+)?\s*["”″秒]?\s*[NSEW北南東西]?)',
+                s, flags=_re.I
+            )
+            if len(dms_blocks) >= 2:
+                v1, a1 = _parse_dms_block_local(dms_blocks[0])
+                v2, a2 = _parse_dms_block_local(dms_blocks[1])
+                if v1 is not None and v2 is not None:
+                    if not a1 and not a2:
+                        cand = sorted([v1, v2], key=lambda x: abs(x))
+                        return cand[0], cand[1]
+                    lat = v1 if (a1 == 'lat' or (a1 is None and abs(v1) <= 90)) else v2
+                    lng = v2 if lat == v1 else v1
+                    return lat, lng
+
+            # 「緯度: xx / 経度: yy」
+            mlat = _re.search(r'緯度[:：]\s*(-?\d+(?:\.\d+)?)', s)
+            mlng = _re.search(r'経度[:：]\s*(-?\d+(?:\.\d+)?)', s)
+            if mlat and mlng:
+                return float(mlat.group(1)), float(mlng.group(1))
+            return None
+
+        def _normalize_latlng_local(raw_coords: str, lat_str: str, lng_str: str):
+            """3入力（raw/lat/lng）から最終 (lat,lng) を決定し、6桁丸め"""
+            lat = lng = None
             try:
-                lat = float(lat_raw) if lat_raw != "" else None
-            except Exception:
+                if lat_str: lat = float(lat_str)
+            except ValueError:
                 lat = None
             try:
-                lng = float(lng_raw) if lng_raw != "" else None
-            except Exception:
+                if lng_str: lng = float(lng_str)
+            except ValueError:
                 lng = None
+            if (lat is None or lng is None) and raw_coords:
+                pair = _parse_latlng_any_local(raw_coords)
+                if pair:
+                    lat, lng = pair
+            if lat is not None and not (-90 <= lat <= 90): lat = None
+            if lng is not None and not (-180 <= lng <= 180): lng = None
+            if lat is not None and lng is not None:
+                lat = round(lat, 6); lng = round(lng, 6)
+            return lat, lng
+        # ====================================================================
+
+        # ★ 置換: 緯度・経度の取り出しロジック（コピペ許容 + 小数/DMS/URL）
+        coords_raw = (request.form.get("coords") or "").strip()   # ← 任意のコピペ用（無ければ空でOK）
+        lat, lng = _normalize_latlng_local(
+            coords_raw,
+            (request.form.get("lat") or "").strip(),
+            (request.form.get("lng") or "").strip()
+        )
+
+        # map URL からのフォールバック（coords/lat/lng で揃わない場合の補完）
+        if (lat is None or lng is None) and map_url:
+            lat2, lng2 = _extract_latlng_from_map(map_url)
+            if lat is None: lat = lat2
+            if lng is None: lng = lng2
 
         # リスト系（改行/カンマ両対応）
         tags   = _split_lines_commas(request.form.get("tags", ""))
@@ -2395,9 +2610,6 @@ def admin_entry():
         parking     = (request.form.get("parking") or "").strip()
         parking_num = (request.form.get("parking_num") or "").strip()
         remark      = (request.form.get("remark") or "").strip()
-
-        # ★ 透かしON/OFF（任意）
-        wm_on = (request.form.get("wm_on") in ("1", "on", "true", "True"))
 
         # 追加情報
         extras_keys = request.form.getlist("extras_key[]")
@@ -2471,7 +2683,7 @@ def admin_entry():
                 # 新規 or 置換
                 new_entry["image_file"] = result
 
-        # === 緯度・経度・透かしフラグの反映 ===
+        # === 緯度・経度・透かしフラグの反映（従来仕様を完全維持） ===
         if lat is not None: new_entry["lat"] = lat
         if lng is not None: new_entry["lng"] = lng
         if (lat is None and lng is None) and prev_entry:
@@ -2515,22 +2727,6 @@ def admin_entry():
         global_paused=_is_global_paused(),
     )
 
-    # ---- “サムネ/容量/サイズ” を各エントリに付加してテンプレへ渡す ----
-    entries_view = []
-    for e in entries:
-        e2 = dict(e)  # テンプレ用にコピー（元データは変更しない）
-        img_name = e.get("image_file") or e.get("image")
-        e2["__image"] = _image_meta(img_name) if img_name else None
-        entries_view.append(e2)
-
-    return render_template(
-        "admin_entry.html",
-        entries=entries_view,
-        entry_edit=entry_edit,
-        edit_id=edit_id if edit_id not in (None, "", "None") else None,
-        role=session.get("role", ""),
-        global_paused=_is_global_paused(),
-    )
 
 @app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
 @app.route("/admin/entry/delete/<int:idx>", methods=["POST"])
