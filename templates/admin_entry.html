@@ -22,8 +22,6 @@
         .extra-row {margin:6px 0;}
         .mini-note {font-size:0.92em; color:#888;}
         hr {border: 1px solid #e7eef5;}
-
-        /* --- フィルター & ページネーション UI --- */
         .filterbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 14px}
         .filterbar input[type=text], .filterbar select{width:auto;min-width:160px}
         .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef6ff;color:#2a8ed8;font-size:.9em}
@@ -40,7 +38,8 @@
         .muted{color:#789;font-size:.92em}
         .thumb{max-width:160px;height:auto;border:1px solid #ddd;border-radius:8px}
         .imgmeta{font-size:.88em;color:#567;margin-top:4px}
-
+        .nearby-ctl {display:flex;gap:8px;align-items:center}
+        .nearby-ctl .muted{margin-left:-4px}
         @media (max-width: 700px) {
             .container {padding:10px;}
             input[type=text], textarea {width:96%;}
@@ -83,8 +82,69 @@
 
     // ====== フィルタ & ソート & ページネーション ======
     let PAGING = {page:1, size:20, totalFiltered:0, totalAll:0};
+    let GEO = {active:false, lat:null, lng:null, radiusKm:3}; // 追加: 現在地フィルタ状態
 
     function _norm(s){ return (s||'').toString().toLowerCase(); }
+
+    function haversine(lat1, lon1, lat2, lon2){
+      const R = 6371; // km
+      const toRad = d => d * Math.PI / 180;
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      return R * c;
+    }
+
+    function formatDistance(km){
+      if(!isFinite(km)) return '';
+      if(km < 1) return `${Math.round(km*1000)} m`;
+      if(km < 10) return `${km.toFixed(2)} km`;
+      return `${km.toFixed(1)} km`;
+    }
+
+    function startNearby(){
+      if(!navigator.geolocation){
+        alert('この端末は位置情報に対応していません。');
+        return;
+      }
+      const r = parseFloat(document.getElementById('near_radius').value || '3');
+      navigator.geolocation.getCurrentPosition(pos=>{
+        GEO.active = true;
+        GEO.lat = pos.coords.latitude;
+        GEO.lng = pos.coords.longitude;
+        GEO.radiusKm = r;
+        filterCards(); // 現在地で即絞り込み
+      }, err=>{
+        alert('現在地を取得できませんでした: ' + err.message);
+      }, {enableHighAccuracy:true, timeout:10000, maximumAge:30000});
+    }
+
+    function clearNearby(){
+      GEO = {active:false, lat:null, lng:null, radiusKm:3};
+      document.querySelectorAll('.dist-badge').forEach(n=>n.remove());
+      filterCards(false);
+    }
+
+    function updateDistanceBadges(){
+      const cards = Array.from(document.querySelectorAll('.entry-card'));
+      cards.forEach(card=>{
+        // cleanup first
+        const old = card.querySelector('.dist-badge');
+        if(old) old.remove();
+        if(!(GEO.active && card.style.display !== 'none')) return;
+        const d = parseFloat(card.dataset.distance || 'NaN');
+        if(!isFinite(d)) return;
+        const host = card.querySelector('.entry-actions')?.parentNode || card;
+        const badge = document.createElement('div');
+        badge.className = 'muted dist-badge';
+        badge.style.margin = '6px 0';
+        badge.textContent = '現在地から約 ' + formatDistance(d);
+        const actions = card.querySelector('.entry-actions');
+        if(actions) host.insertBefore(badge, actions);
+        else host.appendChild(badge);
+      });
+    }
 
     function filterCards(resetPage=true){
       const q = _norm(document.getElementById('f_q').value);
@@ -97,13 +157,13 @@
       const list = Array.from(document.querySelectorAll('.entry-card'));
       let filtered = [];
 
+      // 絞り込み（テキスト/カテゴリ/エリア/タグ）
       list.forEach(card=>{
         const txt = card.dataset.text;
         const dcat = card.dataset.category;
         const dtags = (card.dataset.tags||'').split(',').map(_norm);
         const dareas = (card.dataset.areas||'').split(',').map(s=>s.trim());
         let ok = true;
-
         if(q && !txt.includes(q)) ok = false;
         if(cat && dcat !== cat) ok = false;
         if(area && !dareas.includes(area)) ok = false;
@@ -116,6 +176,24 @@
         if(ok) filtered.push(card);
       });
 
+      // 追加: 現在地フィルタ（距離計算 & 半径内抽出）
+      if(GEO.active && GEO.lat!=null && GEO.lng!=null){
+        const picked = [];
+        filtered.forEach(card=>{
+          const la = parseFloat(card.dataset.lat || 'NaN');
+          const lo = parseFloat(card.dataset.lng || 'NaN');
+          if(!isFinite(la) || !isFinite(lo)) return;
+          const d = haversine(GEO.lat, GEO.lng, la, lo);
+          card.dataset.distance = d.toFixed(6);
+          if(d <= GEO.radiusKm) picked.push(card);
+        });
+        filtered = picked;
+      }else{
+        // 距離未使用時は距離データをクリアしておく
+        filtered.forEach(card=>{ delete card.dataset.distance; });
+      }
+
+      // 並び替え
       filtered.sort((a,b)=>{
         if(sort==='title_asc')  return a.dataset.title.localeCompare(b.dataset.title, 'ja');
         if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
@@ -129,13 +207,20 @@
           if(c!==0) return c;
           return a.dataset.title.localeCompare(b.dataset.title, 'ja');
         }
+        if(sort==='dist_asc'){
+          const da = parseFloat(a.dataset.distance || '1e9');
+          const db = parseFloat(b.dataset.distance || '1e9');
+          return da - db;
+        }
         return 0;
       });
 
+      // 件数更新
       PAGING.totalFiltered = filtered.length;
       PAGING.totalAll = list.length;
       if(resetPage) PAGING.page = 1;
       applyPagination(filtered);
+      updateDistanceBadges(); // 表示中カードに距離を表示
     }
 
     function applyPagination(filtered){
@@ -169,6 +254,7 @@
       document.getElementById('f_area').value='';
       document.getElementById('f_tag').value='';
       document.getElementById('f_sort').value='title_asc';
+      clearNearby(); // 現在地条件も解除して初期化
       PAGING.page = 1;
       filterCards(false);
     }
@@ -555,6 +641,7 @@ https://instagram.com/xxx">
         <option value="title_desc">並び替え：タイトル↓</option>
         <option value="cat_asc">並び替え：カテゴリ↑</option>
         <option value="cat_desc">並び替え：カテゴリ↓</option>
+        <option value="dist_asc">並び替え：距離↑（現在地）</option> <!-- 追加 -->
       </select>
 
       <span class="badge">表示：<span id="f_count">0</span> / <span id="f_total">0</span></span>
@@ -564,6 +651,19 @@ https://instagram.com/xxx">
         <option value="30">1ページ 30件</option>
         <option value="50">1ページ 50件</option>
       </select>
+
+      <!-- 追加: 現在地コントロール -->
+      <div class="nearby-ctl">
+        <button class="btn" type="button" onclick="startNearby()">現在地から</button>
+        <select id="near_radius">
+          <option value="1">1</option>
+          <option value="3" selected>3</option>
+          <option value="5">5</option>
+          <option value="10">10</option>
+        </select>
+        <span class="muted">km 以内</span>
+        <button class="btn ghost" type="button" onclick="clearNearby()">解除</button>
+      </div>
 
       <button class="btn ghost" type="button" onclick="resetFilters()">リセット</button>
     </div>
