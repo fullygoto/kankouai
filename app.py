@@ -82,6 +82,36 @@ def mymap_view_url(*, lat:float|None=None, lng:float|None=None, zoom:int=13) -> 
 
 # entries の 1件から lat/lng を安全に取り出す（lat/lngが無ければ map URL から推定）
 _float = lambda x: (float(x) if x not in (None, "", "None") else None)
+
+# 追加: “開く用”の最適URLを決める
+_MAP_HOST_RE = re.compile(
+    r'^https?://(?:www\.)?(?:google\.[^/]+/maps|maps\.app\.goo\.gl|goo\.gl/maps|g\.page|g\.co/kgs)',
+    re.I
+)
+
+def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -> str:
+    """
+    1) エントリの map フィールドが Google系の共有URLならそれを優先（店名が出やすい）
+    2) place_id があれば API1 の query_place_id で “店名つき”で開く
+    3) どちらも無ければ、名前/住所または緯度経度で検索URLを作る（従来どおり）
+    """
+    m = (e.get("map") or "").strip()
+    if m and _MAP_HOST_RE.match(m):
+        return m
+
+    pid = (e.get("place_id") or "").strip()
+    if pid:
+        base = "https://www.google.com/maps/search/?api=1"
+        q = _u.quote((e.get("title") or e.get("address") or "").strip())
+        return f"{base}&query={q}&query_place_id={_u.quote(pid)}"
+
+    # フォールバック（従来の生成）
+    return gmaps_url(
+        name=e.get("title",""),
+        address=e.get("address",""),
+        lat=lat, lng=lng
+    )
+
 def _extract_latlng_from_map(map_url: str|None):
     if not map_url:
         return (None, None)
@@ -178,7 +208,7 @@ def _nearby_core(lat: float, lng: float, *, radius_m:int=1500, cat_filter:set[st
             "tags": e.get("tags") or [],
             "lat": elat, "lng": elng,
             "distance_m": int(round(d_km*1000)),
-            "google_url": gmaps_url(name=e.get("title",""), address=e.get("address",""), lat=elat, lng=elng, place_id=e.get("place_id")),
+            "google_url": entry_open_map_url(e, lat=elat, lng=elng),
             "mymap_url": mymap_view_url(lat=elat, lng=elng) if MYMAP_MID else "",
             "image_thumb": imgs["thumb"],
             "image_url": imgs["image"],
