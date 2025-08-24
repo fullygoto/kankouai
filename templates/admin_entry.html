@@ -42,7 +42,6 @@
         .thumb{max-width:160px;height:auto;border:1px solid #ddd;border-radius:8px}
         .imgmeta{font-size:.88em;color:#567;margin-top:4px}
 
-
         @media (max-width: 700px) {
             .container {padding:10px;}
             input[type=text], textarea {width:96%;}
@@ -52,7 +51,7 @@
     <script>
     function toggleSection(id, enable){
       const sec = document.getElementById(id);
-      if(!sec) return; // 念のためのnullガード
+      if(!sec) return;
       sec.style.display = enable ? 'block' : 'none';
       sec.querySelectorAll('input,select,textarea').forEach(el => { el.disabled = !enable; });
     }
@@ -101,8 +100,8 @@
 
       // 絞り込み
       list.forEach(card=>{
-        const txt = card.dataset.text;      // title/desc/address/tags/links/extras
-        const dcat = card.dataset.category; // カテゴリ
+        const txt = card.dataset.text;
+        const dcat = card.dataset.category;
         const dtags = (card.dataset.tags||'').split(',').map(_norm);
         const dareas = (card.dataset.areas||'').split(',').map(s=>s.trim());
         let ok = true;
@@ -115,22 +114,21 @@
             if(!dtags.includes(t)){ ok = false; break; }
           }
         }
-        // いったん全て非表示、OKなものは配列へ（表示制御は後段のページネーションで）
         card.style.display = 'none';
         if(ok) filtered.push(card);
       });
 
-      // 並び替え（フィルタ適用後）
+      // 並び替え
       filtered.sort((a,b)=>{
         if(sort==='title_asc')  return a.dataset.title.localeCompare(b.dataset.title, 'ja');
         if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
         if(sort==='cat_asc'){
-          const c = a.dataset.category.localeCompare(b.dataset.category, 'ja'); 
+          const c = a.dataset.category.localeCompare(b.dataset.category, 'ja');
           if(c!==0) return c;
           return a.dataset.title.localeCompare(b.dataset.title, 'ja');
         }
         if(sort==='cat_desc'){
-          const c = b.dataset.category.localeCompare(a.dataset.category, 'ja'); 
+          const c = b.dataset.category.localeCompare(a.dataset.category, 'ja');
           if(c!==0) return c;
           return a.dataset.title.localeCompare(b.dataset.title, 'ja');
         }
@@ -140,10 +138,7 @@
       // 件数更新
       PAGING.totalFiltered = filtered.length;
       PAGING.totalAll = list.length;
-
       if(resetPage) PAGING.page = 1;
-
-      // ページネーション適用
       applyPagination(filtered);
     }
 
@@ -155,18 +150,15 @@
       const start = (PAGING.page - 1) * size;
       const end = Math.min(start + size, filtered.length);
 
-      // 表示制御
       for(let i=0;i<filtered.length;i++){
         filtered[i].style.display = (i>=start && i<end) ? '' : 'none';
       }
 
-      // カウンタ/ページ情報
       document.getElementById('f_count').textContent = PAGING.totalFiltered;
       document.getElementById('f_total').textContent = PAGING.totalAll;
       const info = `ページ ${PAGING.page} / ${totalPages}（1ページ ${size}件）`;
       document.querySelectorAll('.pager .info').forEach(el=>el.textContent = info);
 
-      // ページャーボタンの活性/非活性
       document.querySelectorAll('.pager').forEach(pg=>{
         pg.querySelector('.prev').disabled = (PAGING.page<=1);
         pg.querySelector('.next').disabled = (PAGING.page>=totalPages);
@@ -204,8 +196,8 @@
     }
 
     window.onload = function(){
-      onCategoryChange();   // 初期表示時に正しく有効/無効化
-      filterCards();        // 一覧の初期フィルタ
+      onCategoryChange();
+      filterCards();
     };
     </script>
 </head>
@@ -218,7 +210,6 @@
     {% set _fg_cats = (fg_cat_list if fg_cat_list is defined
       else ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"]) %}
 
-    {# 既存順序を優先しつつ fullyGOTO で未収のものだけ末尾に追加 #}
     {% set _ns = namespace(cats=_base_cats[:]) %}
     {% for c in _fg_cats %}
       {% if c not in _ns.cats %}
@@ -227,7 +218,6 @@
     {% endfor %}
     {% set cat_list = _ns.cats %}
 
-    {# --- 既存のエリア・データのフォールバックはそのまま --- #}
     {% if area_opts is not defined %}
       {% set area_opts = ["五島市","新上五島町","宇久町","小値賀町"] %}
     {% endif %}
@@ -279,7 +269,6 @@
       {% endif %}
     {% endwith %}
 
-    {# entry_edit 用の安全な下準備 #}
     {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is defined and entry_edit.areas is not string
                           else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
 
@@ -333,6 +322,7 @@
                 JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
               </small>
             </div>
+
             <!-- ★ 透かしON/OFF -->
             {% set _wm_on_edit = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             <div class="mt-2">
@@ -342,10 +332,39 @@
               </label>
               <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
             </div>
+
+            <!-- ★ 緯度・経度（任意） -->
+            <label>緯度・経度（任意）</label><br>
+            <div class="row" style="display:flex; gap:10px; align-items:center;">
+              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                     placeholder="緯度 例: 32.695"
+                     value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
+                     style="width:48%;">
+              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                     placeholder="経度 例: 128.845"
+                     value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
+                     style="width:48%;">
+            </div>
+            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
+
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+            <!-- ★ ここから追記：緯度・経度（任意） -->
+            <label>緯度・経度（任意）</label><br>
+            <div class="row" style="display:flex; gap:10px; align-items:center;">
+              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                    placeholder="緯度 例: 32.695123"
+                    value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
+                    style="width:48%;">
+              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                    placeholder="経度 例: 128.845678"
+                    value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
+                    style="width:48%;">
+            </div>
+            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
+            <!-- ★ ここまで追記 -->
             <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
             <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
@@ -358,7 +377,7 @@
               </label>
             {% endfor %}
             </div>
-            <!-- ▼ 追加: リンク（複数） -->
+            <!-- ▼ リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
             <textarea name="links" rows="3" placeholder="https://example.com
 https://instagram.com/xxx">
@@ -366,7 +385,7 @@ https://instagram.com/xxx">
 {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
 {% endif %}</textarea><br>
 
-            <!-- ▼ 追加: 追加情報（項目＝内容） -->
+            <!-- ▼ 追加情報（項目＝内容） -->
             <label>追加情報（項目＝内容）</label>
             <div id="extras-list-tourism">
               {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
@@ -425,6 +444,7 @@ https://instagram.com/xxx">
                 JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
               </small>
             </div>
+
             <!-- ★ 透かしON/OFF -->
             {% set _wm_on_edit = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             <div class="mt-2">
@@ -434,6 +454,21 @@ https://instagram.com/xxx">
               </label>
               <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
             </div>
+
+            <!-- ★ 緯度・経度（任意） -->
+            <label>緯度・経度（任意）</label><br>
+            <div class="row" style="display:flex; gap:10px; align-items:center;">
+              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                     placeholder="緯度 例: 32.695"
+                     value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
+                     style="width:48%;">
+              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                     placeholder="経度 例: 128.845"
+                     value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
+                     style="width:48%;">
+            </div>
+            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
+
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
             <label>電話番号</label><br>
@@ -470,8 +505,21 @@ https://instagram.com/xxx">
             </div>
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
-
-            <!-- ▼ 追加: リンク（複数） -->
+            <!-- ★ ここから追記：緯度・経度（任意） -->
+            <label>緯度・経度（任意）</label><br>
+            <div class="row" style="display:flex; gap:10px; align-items:center;">
+              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                    placeholder="緯度 例: 32.695123"
+                    value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
+                    style="width:48%;">
+              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+                    placeholder="経度 例: 128.845678"
+                    value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
+                    style="width:48%;">
+            </div>
+            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
+            <!-- ★ ここまで追記 -->
+            <!-- ▼ リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
             <textarea name="links" rows="3" placeholder="https://example.com
 https://instagram.com/xxx">
@@ -479,7 +527,7 @@ https://instagram.com/xxx">
 {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
 {% endif %}</textarea><br>
 
-            <!-- ▼ 追加: 追加情報（項目＝内容） -->
+            <!-- ▼ 追加情報（項目＝内容） -->
             <label>追加情報（項目＝内容）</label>
             <div id="extras-list-shop">
               {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
@@ -531,7 +579,6 @@ https://instagram.com/xxx">
         <option value="cat_desc">並び替え：カテゴリ↓</option>
       </select>
 
-      <!-- 件数とページサイズ -->
       <span class="badge">表示：<span id="f_count">0</span> / <span id="f_total">0</span></span>
       <select id="f_page_size" onchange="onChangePageSize(this)">
         <option value="10">1ページ 10件</option>
@@ -554,21 +601,22 @@ https://instagram.com/xxx">
 
     <div id="cards">
     {% for e in entries %}
-        {# 型ゆれに強い正規化 #}
         {% set _tags = e.tags if e.tags is defined and e.tags is not string
                 else (e.tags | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
         {% set _areas = e.areas if e.areas is defined and e.areas is not string else (e.areas.split(',') if e.areas else []) %}
         {% set _links = e.links if e.links is defined and e.links is not string
                   else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
         {% set _pay   = e.payment if e.payment is defined and e.payment is not string else (e.payment.split(',') if e.payment else []) %}
-
         {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ (_links | join(' ')) ~ ' ' ~ (e.extras | tojson)) | lower %}
+
         <div class="entry-card"
             data-title="{{ e.title or '' }}"
             data-category="{{ e.category or '' }}"
             data-areas="{{ _areas|join(', ') }}"
             data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
-            data-text="{{ all_text }}">
+            data-text="{{ all_text }}"
+            data-lat="{{ e.lat if e.lat is defined else '' }}"
+            data-lng="{{ e.lng if e.lng is defined else '' }}">
 
           {% set _img = e.image_file or e.image %}
           {% set _wm = (e.wm_on if e.wm_on is defined else True) %}
@@ -584,9 +632,16 @@ https://instagram.com/xxx">
                   loading="lazy" decoding="async" referrerpolicy="no-referrer">
               </a>
             {% endif %}
+
             <div style="flex:1 1 auto;">
               <span class="card-label">タイトル：</span>{{ e.title }}<br>
               <span class="card-label">説明：</span>{{ e.desc }}<br>
+
+              {% if e.lat is not none and e.lng is not none %}
+                <span class="card-label">緯度・経度：</span>{{ e.lat }}, {{ e.lng }}
+                （<a href="https://maps.google.com/?q={{ e.lat }},{{ e.lng }}" target="_blank" rel="noopener">地図</a>）<br>
+              {% endif %}
+
               <span class="card-label">住所：</span>{{ e.address }}<br>
               <span class="card-label">地図：</span>
               {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
