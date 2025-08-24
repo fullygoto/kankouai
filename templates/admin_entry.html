@@ -38,7 +38,6 @@
         table.kv td {border:1px solid #e3e9ee; padding:4px 6px; font-size:0.92em}
         table.kv td.k {background:#f6f9fb; min-width:120px; font-weight:500; color:#345;}
         .muted{color:#789;font-size:.92em}
-        /* 画像サムネとメタ表示 */
         .thumb{max-width:160px;height:auto;border:1px solid #ddd;border-radius:8px}
         .imgmeta{font-size:.88em;color:#567;margin-top:4px}
 
@@ -98,7 +97,6 @@
       const list = Array.from(document.querySelectorAll('.entry-card'));
       let filtered = [];
 
-      // 絞り込み
       list.forEach(card=>{
         const txt = card.dataset.text;
         const dcat = card.dataset.category;
@@ -118,7 +116,6 @@
         if(ok) filtered.push(card);
       });
 
-      // 並び替え
       filtered.sort((a,b)=>{
         if(sort==='title_asc')  return a.dataset.title.localeCompare(b.dataset.title, 'ja');
         if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
@@ -135,7 +132,6 @@
         return 0;
       });
 
-      // 件数更新
       PAGING.totalFiltered = filtered.length;
       PAGING.totalAll = list.length;
       if(resetPage) PAGING.page = 1;
@@ -292,16 +288,11 @@
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+
             <!-- 画像アップロード（観光地） -->
             <div class="mb-3">
               <label for="image_file_t" class="form-label">画像アップロード</label>
-              <input
-                type="file"
-                class="form-control"
-                id="image_file_t"
-                name="image_file"
-                accept="image/*"
-              >
+              <input type="file" class="form-control" id="image_file_t" name="image_file" accept="image/*">
               {% if entry_edit and (entry_edit.image_file or entry_edit.image) %}
                 <div class="mt-2">
                   <div>現在の画像:</div>
@@ -318,12 +309,10 @@
                   </div>
                 </div>
               {% endif %}
-              <small class="text-muted d-block mt-1">
-                JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
-              </small>
+              <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            <!-- ★ 透かしON/OFF -->
+            <!-- 透かしON/OFF -->
             {% set _wm_on_edit = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             <div class="mt-2">
               <label style="display:inline-flex;align-items:center;gap:.4em;">
@@ -333,40 +322,35 @@
               <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
             </div>
 
-            <!-- ★ 緯度・経度（任意） -->
+            <label>住所</label><br>
+            <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+
+            <label>地図URL</label><br>
+            <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+
+            <!-- ★ 座標コピペ欄（なんでもOK） -->
+            <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
+            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分"
+                   value=""><br>
+            <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
+
+            <!-- 緯度・経度（小数、任意） -->
             <label>緯度・経度（任意）</label><br>
             <div class="row" style="display:flex; gap:10px; align-items:center;">
               <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                     placeholder="緯度 例: 32.695"
+                     placeholder="緯度 例: 32.695123"
                      value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
                      style="width:48%;">
               <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                     placeholder="経度 例: 128.845"
+                     placeholder="経度 例: 128.845678"
                      value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
                      style="width:48%;">
             </div>
-            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
+            <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
 
-            <label>住所</label><br>
-            <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
-            <label>地図URL</label><br>
-            <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
-            <!-- ★ ここから追記：緯度・経度（任意） -->
-            <label>緯度・経度（任意）</label><br>
-            <div class="row" style="display:flex; gap:10px; align-items:center;">
-              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                    placeholder="緯度 例: 32.695123"
-                    value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
-                    style="width:48%;">
-              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                    placeholder="経度 例: 128.845678"
-                    value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
-                    style="width:48%;">
-            </div>
-            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
-            <!-- ★ ここまで追記 -->
             <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
             <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
+
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
             <div class="row">
             {% for area in area_opts %}
@@ -377,6 +361,7 @@
               </label>
             {% endfor %}
             </div>
+
             <!-- ▼ リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
             <textarea name="links" rows="3" placeholder="https://example.com
@@ -414,16 +399,11 @@ https://instagram.com/xxx">
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+
             <!-- 画像アップロード（店舗） -->
             <div class="mb-3">
               <label for="image_file_s" class="form-label">画像アップロード</label>
-              <input
-                type="file"
-                class="form-control"
-                id="image_file_s"
-                name="image_file"
-                accept="image/*"
-              >
+              <input type="file" class="form-control" id="image_file_s" name="image_file" accept="image/*">
               {% if entry_edit and (entry_edit.image_file or entry_edit.image) %}
                 <div class="mt-2">
                   <div>現在の画像:</div>
@@ -440,59 +420,51 @@ https://instagram.com/xxx">
                   </div>
                 </div>
               {% endif %}
-              <small class="text-muted d-block mt-1">
-                JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。
-              </small>
+              <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            <!-- ★ 透かしON/OFF -->
-            {% set _wm_on_edit = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+            <!-- 透かしON/OFF -->
+            {% set _wm_on_edit2 = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             <div class="mt-2">
               <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="checkbox" name="wm_on" value="1" {% if _wm_on_edit %}checked{% endif %}>
+                <input type="checkbox" name="wm_on" value="1" {% if _wm_on_edit2 %}checked{% endif %}>
                 外部公開URLに透かし（＠fullyGOTO）を付ける
               </label>
               <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
             </div>
 
-            <!-- ★ 緯度・経度（任意） -->
-            <label>緯度・経度（任意）</label><br>
-            <div class="row" style="display:flex; gap:10px; align-items:center;">
-              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                     placeholder="緯度 例: 32.695"
-                     value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
-                     style="width:48%;">
-              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                     placeholder="経度 例: 128.845"
-                     value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
-                     style="width:48%;">
-            </div>
-            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
-
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+
             <label>電話番号</label><br>
             <input type="text" name="tel" value="{{ entry_edit.tel if entry_edit else '' }}"><br>
+
             <label>休み</label><br>
             <input type="text" name="holiday" value="{{ entry_edit.holiday if entry_edit else '' }}"><br>
+
             <label>営業時間</label><br>
             <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
+
             <label>駐車場</label>
             <select name="parking">
                 <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
                 <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
             </select>
             台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
+
             <label>支払方法</label><br>
             {% set _pay_edit = (entry_edit.payment if entry_edit and entry_edit.payment is defined and entry_edit.payment is not string
                                  else (entry_edit.payment.split(',') if entry_edit and entry_edit.payment else [])) %}
             <input type="checkbox" name="payment" value="現金" {% if '現金' in _pay_edit %}checked{% endif %}>現金
             <input type="checkbox" name="payment" value="カード" {% if 'カード' in _pay_edit %}checked{% endif %}>カード
             <input type="checkbox" name="payment" value="その他" {% if 'その他' in _pay_edit %}checked{% endif %}>その他<br>
+
             <label>備考（自由記述）</label><br>
             <textarea name="remark" rows="2">{{ entry_edit.remark if entry_edit else '' }}</textarea><br>
+
             <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
             <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
+
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
             <div class="row">
             {% for area in area_opts %}
@@ -503,22 +475,30 @@ https://instagram.com/xxx">
               </label>
             {% endfor %}
             </div>
+
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
-            <!-- ★ ここから追記：緯度・経度（任意） -->
+
+            <!-- ★ 座標コピペ欄（なんでもOK） -->
+            <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
+            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分"
+                   value=""><br>
+            <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
+
+            <!-- 緯度・経度（小数、任意） -->
             <label>緯度・経度（任意）</label><br>
             <div class="row" style="display:flex; gap:10px; align-items:center;">
               <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                    placeholder="緯度 例: 32.695123"
-                    value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
-                    style="width:48%;">
+                     placeholder="緯度 例: 32.695123"
+                     value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
+                     style="width:48%;">
               <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
-                    placeholder="経度 例: 128.845678"
-                    value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
-                    style="width:48%;">
+                     placeholder="経度 例: 128.845678"
+                     value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
+                     style="width:48%;">
             </div>
-            <div class="mini-note">Googleマップで地点を長押し→座標をコピーして貼り付け。どちらか片方だけでは検索に使えません。</div>
-            <!-- ★ ここまで追記 -->
+            <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
+
             <!-- ▼ リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
             <textarea name="links" rows="3" placeholder="https://example.com
