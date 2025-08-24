@@ -1090,6 +1090,78 @@ except Exception as e:
     handler = None
     app.logger.exception("LINE init failed: %s", e)
 
+# === 出典フッター強制付与ラッパ（すべての reply/push を横取り） ===
+
+def _messages_with_sources_footer(messages):
+    """
+    どんな送信形でも、最後のテキストの末尾に — 出典 — を付ける。
+    テキストが無い場合は出典だけの1通を末尾に追加。
+    出典が未登録なら何もしない。
+    """
+    # list へ正規化
+    if messages is None:
+        return messages
+    msgs = list(messages) if isinstance(messages, (list, tuple)) else [messages]
+
+    # 既に登録されている出典を取得
+    foot = _sources_footer_text()
+
+    # 出典が未登録のままなら、最後のテキスト1行目をタイトルとして
+    # entries.json から推定→record_source_from_entry で登録を試みる
+    if not foot:
+        try:
+            last_txt = None
+            for m in reversed(msgs):
+                # TextSendMessage だけ拾う
+                if isinstance(m, TextSendMessage):
+                    last_txt = (m.text or "")
+                    break
+            if last_txt:
+                first = next((ln.strip() for ln in last_txt.splitlines() if ln.strip()), "")
+                if first:
+                    key = _title_key(first)
+                    if key:
+                        for e in load_entries():
+                            if _title_key(e.get("title","")) == key:
+                                # フォームの「出典」テキストだけ採用（空なら登録されない）
+                                record_source_from_entry(e)
+                                break
+            foot = _sources_footer_text()
+        except Exception:
+            pass
+
+    # まだ出典なしならそのまま返す
+    if not foot:
+        return messages
+
+    # 最後の TextSendMessage を探して末尾に追記（重複回避）
+    for i in range(len(msgs)-1, -1, -1):
+        m = msgs[i]
+        if isinstance(m, TextSendMessage):
+            t = m.text or ""
+            if "— 出典 —" not in t:
+                m.text = (t.rstrip() + "\n\n" + foot)
+            return msgs
+
+    # テキストが1通も無ければ、出典だけを末尾に追加
+    msgs.append(TextSendMessage(text=foot))
+    return msgs
+
+class _LineApiWithSources:
+    """line_bot_api の reply/push を横取りして出典フッターを必ず付けるプロキシ"""
+    def __init__(self, impl):
+        self._impl = impl
+    def reply_message(self, reply_token, messages, *args, **kwargs):
+        return self._impl.reply_message(reply_token, _messages_with_sources_footer(messages), *args, **kwargs)
+    def push_message(self, to, messages, *args, **kwargs):
+        return self._impl.push_message(to, _messages_with_sources_footer(messages), *args, **kwargs)
+    def __getattr__(self, name):
+        return getattr(self._impl, name)
+
+# ここで元の line_bot_api を差し替え
+if line_bot_api is not None:
+    line_bot_api = _LineApiWithSources(line_bot_api)
+
 
 # =========================
 #  LINE: Webhook とハンドラ
@@ -1172,12 +1244,6 @@ if _line_enabled() and handler:
                 FlexSendMessage(alt_text="近くのスポット", contents=flex)
             )
 
-            # ★ 近く検索で積んだ出典を“別送”する（Flexはテキスト末尾に付けられないため）
-            foot = _sources_footer_text()
-            if foot:
-                tid = _line_target_id(event)
-                if tid:
-                    line_bot_api.push_message(tid, TextSendMessage(text=foot))
 
         except Exception:
             lines = [f"近くのスポット（上位{min(10, len(rows))}件）:"]
