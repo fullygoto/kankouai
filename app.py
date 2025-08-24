@@ -15,9 +15,9 @@ from PIL import Image, ImageOps  # ← 追加
 # 追加:
 import warnings
 from PIL import ImageFile, UnidentifiedImageError
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import RequestEntityTooLarge, NotFound
 
-from werkzeug.utils import secure_filename
+from werkzeug.utils import secure_filename, safe_join
 
 from collections import Counter
 from typing import Any, Dict, List
@@ -38,6 +38,8 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from linebot.models import QuickReply, QuickReplyButton, MessageAction
 from linebot.exceptions import LineBotApiError, InvalidSignatureError   
 from linebot.models import ImageSendMessage
+from linebot.models import LocationMessage, FlexSendMessage, LocationAction
+
 
 
 from openai import OpenAI
@@ -180,6 +182,54 @@ def _nearby_core(lat: float, lng: float, *, radius_m:int=1500, cat_filter:set[st
 
     rows.sort(key=lambda x: x["distance_m"])
     return rows[:max(1, int(limit))]
+
+
+def _nearby_flex(items: list[dict]):
+    bubbles = []
+    for it in items:
+        body = [
+            {"type":"text","text":it["title"] or "無題","weight":"bold","wrap":True},
+            {"type":"text","text":f'{it.get("distance_m",0)} m ・ {it.get("category","")}',"size":"sm","color":"#888888"},
+        ]
+        if it.get("address"):
+            body.append({"type":"text","text":it["address"],"size":"sm","wrap":True,"color":"#666666"})
+        footer = {"type":"box","layout":"vertical","spacing":"sm","contents":[
+            {"type":"button","style":"primary","action":{"type":"uri","label":"地図で開く","uri": it.get("google_url","")}},
+        ]}
+        if it.get("mymap_url"):
+            footer["contents"].append({"type":"button","style":"secondary","action":{"type":"uri","label":"周辺をマイマップ","uri": it["mymap_url"]}})
+        bubble = {
+            "type":"bubble",
+            **({"hero":{"type":"image","url":it.get("image_thumb",""),"size":"full","aspectMode":"cover","aspectRatio":"16:9"}} if it.get("image_thumb") else {}),
+            "body":{"type":"box","layout":"vertical","spacing":"sm","contents":body},
+            "footer":footer
+        }
+        bubbles.append(bubble)
+    return {"type":"carousel","contents":bubbles} if bubbles else None
+
+def _ask_location(text="現在地から近い順で探します。位置情報を送ってください。"):
+    return TextSendMessage(
+        text=text,
+        quick_reply=QuickReply(items=[QuickReplyButton(action=LocationAction(label="現在地を送る"))])
+    )
+
+
+def _classify_mode(text: str) -> str:
+    t = (text or "").lower()
+    if any(k in t for k in ["観光", "観る", "名所", "景勝", "スポット"]):
+        return "tourism"
+    if any(k in t for k in ["店", "お店", "飲食", "食べる", "呑む", "ショップ", "買い物", "カフェ", "レストラン", "宿泊", "ホテル", "旅館"]):
+        return "shop"
+    return "all"
+
+def _mode_to_cats(mode: str):
+    # あなたの CATEGORIES に合わせて調整してOK
+    if mode == "tourism":
+        return {"観光", "イベント", "癒し"}
+    if mode == "shop":
+        return {"食べる・呑む", "ショップ", "泊まる", "生活", "きれい"}
+    return None  # all
+
 
 @app.route("/api/nearby", methods=["GET"])
 def api_nearby():
@@ -696,7 +746,7 @@ def nearby_page():
     カテゴリ
     <select id="cat">
       <option value="">（指定なし）</option>
-      <option>観光</option><option>飲食</option><option>宿泊</option>
+      <option>観光</option><option>食べる・呑む</option><option>泊まる</option>
       <option>ショップ</option><option>イベント</option>
     </select>
     <button class="btn" id="btn">現在地から検索</button>
@@ -852,6 +902,11 @@ try:
     if _line_enabled():
         line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
         handler = WebhookHandler(LINE_CHANNEL_SECRET)
+        # 近く検索の直近状態（超軽量メモ）
+        _LAST = {
+            "mode": {},       # user_id -> 'all' | 'tourism' | 'shop'
+            "location": {},   # user_id -> (lat, lng, ts)
+        }
         # --- 送信の重複抑止 & リクエスト世代管理 -----------------------------------
         from collections import defaultdict, deque
         import re, time  # 念のため
@@ -926,7 +981,7 @@ def _reply_or_push(event, text: str):
             if tid:
                 line_bot_api.push_message(tid, messages)
     except LineBotApiError as e:
-        globals()["SEND_FAIL_COUNT"] = globals().get("SEND_FAIL_COUNT", 0) + 1
+        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
         app.logger.exception("LINE send failed: %s", e)
 
 
@@ -1029,8 +1084,8 @@ def _apply_text_watermark(im: Image.Image, text: str) -> Image.Image:
 
 @app.route(f"{MEDIA_URL_PREFIX}/<path:filename>", methods=["GET","HEAD"])
 def serve_image(filename):
-    _, ext = os.path.splitext(filename.lower())
     # 互換のため jpeg/png/webp を許容（保存は常にjpgの想定）
+    _, ext = os.path.splitext(filename.lower())
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
         abort(404)
 
@@ -1038,9 +1093,9 @@ def serve_image(filename):
     if IMAGE_PROTECT:
         is_admin_view = bool(session.get("user_id"))
         if not is_admin_view:
-            sig = request.args.get("sig","")
+            sig = request.args.get("sig", "")
             try:
-                exp = int(request.args.get("exp","0"))
+                exp = int(request.args.get("exp", "0"))
             except Exception:
                 exp = 0
             now = int(time.time())
@@ -1048,30 +1103,37 @@ def serve_image(filename):
                 # 存在漏えいを避けるため 404 にする
                 abort(404)
 
-    path = os.path.join(IMAGES_DIR, filename)
-    if not os.path.isfile(path):
+    # ★ IMAGES_DIR 配下に固定し、ディレクトリ・トラバーサルを遮断
+    try:
+        path = safe_join(IMAGES_DIR, filename)
+    except NotFound:
+        abort(404)
+    if (not path) or (not os.path.isfile(path)):
         abort(404)
 
-    want_wm = (request.args.get("wm") in {"1","true","on","yes"}) and WATERMARK_ENABLE
+    want_wm = (request.args.get("wm") in {"1", "true", "on", "yes"}) and WATERMARK_ENABLE
 
-    # HEAD は中身を読まずに返す
+    # HEAD はボディ不要（ただし wm=1 の場合は通常レスポンスと同様に扱っても可）
     if request.method == "HEAD" and not want_wm:
         resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
-    else:
-        if want_wm:
-            try:
-                im = Image.open(path)
+        resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+
+    if want_wm:
+        try:
+            with Image.open(path) as im:
                 im = ImageOps.exif_transpose(im)
                 im = _apply_text_watermark(im, WATERMARK_TEXT)
                 buf = io.BytesIO()
                 im.save(buf, format="JPEG", quality=85, optimize=True, progressive=True, subsampling=2)
                 buf.seek(0)
-                resp = send_file(buf, mimetype="image/jpeg", max_age=3600)
-            except Exception:
-                # 透かし失敗時は素の画像にフォールバック
-                resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
-        else:
+            resp = send_file(buf, mimetype="image/jpeg", max_age=3600)
+        except Exception:
+            # 透かし失敗時は素の画像にフォールバック
             resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+    else:
+        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
 
     # 追加ヘッダ（検索避け & キャッシュ）
     resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
@@ -1098,7 +1160,7 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
     - 極端に巨大なピクセル数の画像は 413 RequestEntityTooLarge を送出
     """
     # 関数内インポートでコピペ耐性を上げる（上位で import済みなら二重でもOK）
-    from werkzeug.exceptions import RequestEntityTooLarge
+    from werkzeug.exceptions import RequestEntityTooLarge, NotFound
     from PIL import UnidentifiedImageError
 
     try:
@@ -2947,44 +3009,59 @@ def admin_entries_dedupe():
 
     entries = load_entries()
 
-    # GET: プレビュー（detail=1 なら各グループの説明候補も返す）
-    if request.method == "GET":
-        detail = (request.args.get("detail") == "1")
-        _, stats, preview = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=True)
+    # 実行（保存）: POST
+    if request.method == "POST":
+        # フォーム/JSON どちらでも受ける
+        use_ai_param = request.form.get("use_ai")
+        if use_ai_param is None and request.is_json:
+            try:
+                use_ai_param = (request.get_json() or {}).get("use_ai")
+            except Exception:
+                use_ai_param = None
+        use_ai = DEDUPE_USE_AI if use_ai_param is None else _boolish(use_ai_param)
 
-        if not detail:
-            return jsonify({"ok": True, "stats": stats, "preview": preview})
+        new_entries, stats, preview = dedupe_entries_by_title(entries, use_ai=use_ai, dry_run=False)
+        save_entries(new_entries)
+        return jsonify({"ok": True, "saved": True, "stats": stats, "preview": preview})
 
-        # detail モード: 同一タイトルキーごとに要素の断片を返す
-        groups = {}
-        for e in entries:
-            k = _title_key(e.get("title",""))
-            if not k: 
-                continue
-            groups.setdefault(k, []).append(e)
+    # プレビュー: GET
+    detail = (request.args.get("detail") == "1")
+    _, stats, preview = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=True)
 
-        detail_list = []
-        for k, gs in groups.items():
-            if len(gs) <= 1: 
-                continue
-            item = {
-                "key": k,
-                "count": len(gs),
-                "titles": [g.get("title","") for g in gs],
-                "descs":  [g.get("desc","")  for g in gs if g.get("desc","").strip()],
-                "maps":   [g.get("map","")   for g in gs if g.get("map","").strip()],
-                "areas":  list(sorted({a for g in gs for a in (g.get("areas") or [])})),
-                "tags":   list(sorted({t for g in gs for t in (g.get("tags")  or [])})),
-            }
-            detail_list.append(item)
+    if not detail:
+        return jsonify({"ok": True, "stats": stats, "preview": preview})
 
-        return jsonify({"ok": True, "stats": stats, "groups": detail_list[:60]})  # 多すぎ防止に60件まで
+    # detail=1 のとき、重複グループの中身を返す
+    groups = {}
+    for e in entries:
+        k = _title_key(e.get("title", ""))
+        if not k:
+            continue
+        groups.setdefault(k, []).append(e)
 
-    # POST: 実行→保存（AI最適化あり）
-    merged, stats, _ = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=False)
-    _atomic_json_dump(ENTRIES_FILE, merged)
-    flash(f"統合完了：{stats['merged_groups']} グループ / 重複 {stats['removed']} 件解消（AI最適化あり）")
-    return redirect(url_for("admin_entries_edit"))
+    detail_list = []
+    for k, gs in groups.items():
+        if len(gs) <= 1:
+            continue
+        item = {
+            "key": k,
+            "count": len(gs),
+            "titles":     [g.get("title", "") for g in gs],
+            "descs":      [g.get("desc", "") for g in gs if (g.get("desc", "").strip())],
+            "maps":       [g.get("map", "") for g in gs if (g.get("map", "").strip())],
+            "addresses":  [g.get("address", "") for g in gs if (g.get("address", "").strip())],
+            "tags":       sorted({t for g in gs for t in (g.get("tags") or []) if t}),
+            "areas":      sorted({a for g in gs for a in (g.get("areas") or []) if a}),
+            "links":      sorted({l for g in gs for l in (g.get("links") or []) if l}),
+            "payments":   sorted({p for g in gs for p in (g.get("payment") or []) if p}),
+            "tel_list":       [g.get("tel", "") for g in gs if g.get("tel", "").strip()],
+            "holiday_list":   [g.get("holiday", "") for g in gs if g.get("holiday", "").strip()],
+            "open_hours_list":[g.get("open_hours", "") for g in gs if g.get("open_hours", "").strip()],
+        }
+        detail_list.append(item)
+
+    detail_list.sort(key=lambda x: x["count"], reverse=True)
+    return jsonify({"ok": True, "stats": stats, "groups": detail_list})
 
 # =========================
 #  CSV取り込み（既存に追加）
@@ -4312,6 +4389,143 @@ def _answer_from_entries_rich(question: str):
 # --- メッセージ受信 ---
 # === 修正版: LINEメッセージハンドラ（コピペで上書き） ===
 if handler:
+    # 追加の import（この if ブロックの先頭でOK）
+    from linebot.models import LocationMessage, FlexSendMessage, LocationAction
+
+    # 近く検索用の軽量メモ
+    _LAST = {
+        "mode": {},       # user_id -> 'all' | 'tourism' | 'shop'
+        "location": {},   # user_id -> (lat, lng, ts)
+    }
+
+    def _classify_mode(text):
+        t = (text or "").lower()
+        if any(k in t for k in ["観光", "観る", "名所", "景勝", "スポット"]):
+            return "tourism"
+        if any(k in t for k in ["店", "お店", "飲食", "食べる", "呑む", "ショップ", "買い物", "カフェ", "レストラン", "宿泊", "ホテル", "旅館"]):
+            return "shop"
+        return "all"
+
+    def _mode_to_cats(mode):
+        if mode == "tourism":
+            return {"観光", "イベント", "癒し"}
+        if mode == "shop":
+            return {"食べる・呑む", "ショップ", "泊まる", "生活", "きれい"}
+        return None  # all
+
+    def _nearby_flex(items):
+        """/api/nearby 相当の辞書配列から Flex carousel を作る"""
+        bubbles = []
+        for it in items[:10]:  # Flex の見やすさ的に最大10
+            body_contents = [
+                {"type": "text", "text": it.get("title") or "無題", "weight": "bold", "wrap": True},
+                {"type": "text", "text": f'{it.get("distance_m", 0)} m ・ {it.get("category","")}', "size": "sm", "color": "#888888"},
+            ]
+            if it.get("address"):
+                body_contents.append({"type": "text", "text": it["address"], "size": "sm", "wrap": True, "color": "#666666"})
+
+            bubble = {
+                "type": "bubble",
+                **({"hero": {
+                    "type": "image",
+                    "url": it.get("image_thumb",""),
+                    "size": "full",
+                    "aspectMode": "cover",
+                    "aspectRatio": "16:9"
+                }} if it.get("image_thumb") else {}),
+                "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body_contents},
+                "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
+                    {"type": "button", "style": "primary",
+                     "action": {"type": "uri", "label": "地図で開く", "uri": it.get("google_url","")}}
+                ]}
+            }
+            if it.get("mymap_url"):
+                bubble["footer"]["contents"].append(
+                    {"type": "button", "style": "secondary",
+                     "action": {"type": "uri", "label": "周辺をマイマップ", "uri": it["mymap_url"]}}
+                )
+            bubbles.append(bubble)
+        if not bubbles:
+            return None
+        return {"type": "carousel", "contents": bubbles}
+
+    def _ask_location(text="現在地から近い順で探します。位置情報を送ってください。"):
+        return TextSendMessage(
+            text=text,
+            quick_reply=QuickReply(items=[QuickReplyButton(action=LocationAction(label="現在地を送る"))])
+        )
+
+    def _handle_nearby_text(event, text):
+        """「近く」系テキストの早期処理。処理したら True を返す。"""
+        # 停止/再開・全体停止のガード
+        try:
+            if _line_mute_gate(event, text):
+                return True
+        except Exception:
+            app.logger.exception("_line_mute_gate failed")
+
+        t = (text or "").strip()
+        user_id = _line_target_id(event)
+
+        # 開発用ショートカット: "near 32.6977,128.8445"
+        if t.lower().startswith("near "):
+            try:
+                a, b = t[5:].replace("，", ",").split(",", 1)
+                lat, lng = float(a), float(b)
+            except Exception:
+                _reply_or_push(event, "書式: near 32.6977,128.8445")
+                return True
+            mode = _LAST["mode"].get(user_id, "all")
+            cats = _mode_to_cats(mode)
+            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
+            if not items:
+                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
+                return True
+            flex = _nearby_flex(items)
+            if flex:
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+            else:
+                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
+            try:
+                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
+            except Exception:
+                pass
+            return True
+
+        # 自然文（近く/周辺/付近）
+        if any(k in t for k in ["近く", "周辺", "付近"]):
+            mode = _classify_mode(t)
+            if user_id:
+                _LAST["mode"][user_id] = mode
+            last = _LAST["location"].get(user_id)
+            if not last:
+                # まずは位置情報をもらう
+                try:
+                    line_bot_api.reply_message(event.reply_token, _ask_location())
+                except Exception:
+                    _reply_or_push(event, "現在地を取得できませんでした。位置情報を送ってください。")
+                return True
+
+            lat, lng, _ts = last
+            cats = _mode_to_cats(mode)
+            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
+            if not items:
+                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
+                return True
+
+            flex = _nearby_flex(items)
+            if flex:
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+            else:
+                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
+            try:
+                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
+            except Exception:
+                pass
+            return True
+
+        return False
+
     @handler.add(MessageEvent, message=TextMessage)
     def handle_message(event):
         try:
@@ -4319,14 +4533,21 @@ if handler:
         except Exception:
             text = ""
 
-        # ミュート/一時停止ゲート
+        # ① 近く検索の早期処理（ここで完結したら以降へ進まない）
+        try:
+            if _handle_nearby_text(event, text):
+                return
+        except Exception:
+            app.logger.exception("nearby early handler failed")
+
+        # ② ミュート/一時停止ゲート
         try:
             if _line_mute_gate(event, text):
                 return
         except Exception:
             app.logger.exception("_line_mute_gate failed")
 
-        # 即答リンク（天気・交通）
+        # ③ 即答リンク（天気・交通）
         try:
             w, ok = get_weather_reply(text)
             app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
@@ -4344,7 +4565,7 @@ if handler:
         except Exception as e:
             app.logger.exception(f"quick link reply failed: {e}")
 
-        # スモールトーク/ヘルプ
+        # ④ スモールトーク/ヘルプ
         try:
             st = smalltalk_or_help_reply(text)
             if st:
@@ -4354,7 +4575,7 @@ if handler:
         except Exception:
             app.logger.exception("smalltalk failed")
 
-        # DB回答（画像→テキストの順で 1 回の reply にまとめて送信）
+        # ⑤ DB回答（画像→テキストの順で 1 回の reply にまとめて送信）
         try:
             ans, hit, img_url = _answer_from_entries_min(text)
 
@@ -4367,14 +4588,12 @@ if handler:
             for p in _split_for_line(ans, LINE_SAFE_CHARS):
                 msgs.append(TextSendMessage(text=p))
 
-            # ★ ここで一度に返信（_send_messages は使わない）
             line_bot_api.reply_message(event.reply_token, msgs)
 
             joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
             save_qa_log(text, joined, source="line", hit_db=hit)
 
         except LineBotApiError as e:
-            # 送信失敗を可視化
             global LAST_SEND_ERROR, SEND_ERROR_COUNT
             SEND_ERROR_COUNT += 1
             LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
@@ -4384,9 +4603,52 @@ if handler:
             fallback, _ = build_refine_suggestions(text)
             _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
             save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
+
+    # 位置情報メッセージを受け取ったら即検索
+    @handler.add(MessageEvent, message=LocationMessage)
+    def handle_location(event):
+        try:
+            if _line_mute_gate(event, "（location）"):
+                return
+        except Exception:
+            app.logger.exception("_line_mute_gate failed")
+
+        try:
+            user_id = _line_target_id(event)
+            lat = float(event.message.latitude)
+            lng = float(event.message.longitude)
+            ts = time.time()
+            if user_id:
+                _LAST["location"][user_id] = (lat, lng, ts)
+
+            mode = _LAST["mode"].get(user_id, "all")
+            cats = _mode_to_cats(mode)
+            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
+            if not items:
+                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
+                return
+
+            flex = _nearby_flex(items)
+            if flex:
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+            else:
+                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
+
+            try:
+                save_qa_log("LOCATION", "nearby-flex", source="line", hit_db=True,
+                            extra={"kind":"nearby", "mode":mode, "lat":lat, "lng":lng})
+            except Exception:
+                pass
+
+        except Exception as e:
+            app.logger.exception("location handler failed: %s", e)
+            _reply_or_push(event, "位置情報の処理に失敗しました。もう一度お試しください。")
+
 else:
     # LINE無効時のダミー（何もしない）
     def handle_message(event):
+        return
+    def handle_location(event):
         return
 
 @app.route("/admin/manual")
@@ -5172,8 +5434,9 @@ def _split_for_line(text: str, limit: int) -> List[str]:
 # =========================
 #  LINE Webhook
 # =========================
-from linebot.models import TextSendMessage
+from linebot.models import TextSendMessage, LocationMessage, FlexSendMessage, LocationAction
 from linebot.exceptions import LineBotApiError
+
 
 _LINE_THROTTLE = {}  # ループ暴走の最終安全弁（会話ごとの最短インターバル）
 
