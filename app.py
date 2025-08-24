@@ -174,7 +174,15 @@ def _build_image_urls(img_name: str | None):
 
     return {"thumb": thumb, "image": orig}
 
-def _nearby_core(lat: float, lng: float, *, radius_m:int=1500, cat_filter:set[str]|None=None, limit:int=20):
+def _nearby_core(
+    lat: float,
+    lng: float,
+    *,
+    radius_m:int = 1500,
+    cat_filter:set[str] | None = None,
+    limit:int = 20,
+    record_sources: bool = False,   # ← 追加
+):
     # entries 取得（既存のロード関数を使用）
     try:
         items = [_norm_entry(x) for x in load_entries()]
@@ -192,7 +200,7 @@ def _nearby_core(lat: float, lng: float, *, radius_m:int=1500, cat_filter:set[st
         if elat is None or elng is None:
             continue
         d_km = _haversine_km(lat, lng, elat, elng)
-        if d_km*1000 > radius_m:
+        if d_km * 1000 > radius_m:
             continue
 
         img = e.get("image_file") or e.get("image") or ""
@@ -213,6 +221,7 @@ def _nearby_core(lat: float, lng: float, *, radius_m:int=1500, cat_filter:set[st
             "image_thumb": imgs["thumb"],
             "image_url": imgs["image"],
         }
+        record_source_from_entry(e)
         rows.append(row)
 
     rows.sort(key=lambda x: x["distance_m"])
@@ -497,7 +506,9 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
         e["extras"] = {}
 
     # 型の下駄（無ければ空文字）
-    for k in ("category", "title", "desc", "address", "map", "tel", "holiday", "open_hours", "parking", "parking_num", "remark"):
+    for k in ("category","title","desc","address","map","tel","holiday",
+              "open_hours","parking","parking_num","remark",
+              "source","source_url"):                             # ← 追加
         if e.get(k) is None:
             e[k] = ""
 
@@ -658,6 +669,84 @@ def _too_large(e):
 # ==== 追加（Flask設定の近くでOK）====
 ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on","yes"}
 # ====================================
+# ==== 出典クレジット（回答末尾に自動付与） ==========================
+from flask import g
+
+def record_source(note: str, url: str = ""):
+    """
+    今回の返信に出典を追加登録する（同一リクエスト内）。
+    - note: 出典名（例：五島の島たび（五島市公式））
+    - url:  ページURLなど（任意）
+    """
+    try:
+        lst = getattr(g, "response_sources", [])
+        if note or url:
+            lst.append({"note": (note or "").strip(), "url": (url or "").strip()})
+        g.response_sources = lst
+    except RuntimeError:
+        # リクエスト外など
+        pass
+
+def record_source_from_entry(entry: dict | None):
+    """エントリに出典が入っていれば、今返信の出典に加える"""
+    if not entry:
+        return
+    note = (entry.get("source") or "").strip()
+    url  = (entry.get("source_url") or "").strip()
+    if note or url:
+        record_source(note, url)
+
+def record_source_from_path(path: str):
+    """
+    data/ 配下の“公的パンフ”起点を使ったときに呼ぶヘルパ。
+    例: record_source_from_path(actual_file_path)
+    """
+    try:
+        p = (path or "").replace("\\", "/")
+        if "/五島市公式パンフレット/" in p or p.endswith("/五島市公式パンフレット"):
+            record_source("五島市公式パンフレット")
+        if "/新上五島町公式パンフレット/" in p or p.endswith("/新上五島町公式パンフレット"):
+            record_source("新上五島町公式パンフレット")
+    except Exception:
+        pass
+
+def _unique_sources(srcs: list[dict]) -> list[dict]:
+    seen = set()
+    out = []
+    for s in srcs or []:
+        key = (s.get("note",""), s.get("url",""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+def _sources_footer_text() -> str | None:
+    srcs = _unique_sources(getattr(g, "response_sources", []) or [])
+    if not srcs:
+        return None
+    lines = ["— 出典 —"]
+    for s in srcs:
+        n = s.get("note","").strip()
+        u = s.get("url","").strip()
+        if n and u:
+            lines.append(f"{n} {u}")
+        else:
+            lines.append(n or u)
+    return "\n".join(lines)
+
+def _append_sources_if_text(s: str) -> str:
+    """文字列本文の末尾に出典脚注を付ける。出典未登録ならそのまま。"""
+    foot = _sources_footer_text()
+    if not foot:
+        return s
+    s = "" if s is None else str(s)
+    # 「出典だけ」を送る用途のときは重複防止
+    if s.strip().startswith("— 出典 —"):
+        return s
+    return (s.rstrip() + "\n\n" + foot)
+
+# ===============================================================
 
 
 # ===== ここを Flask 設定の直後に追加 =====
@@ -1015,11 +1104,24 @@ if _line_enabled() and handler:
         # 「近く」などのキーワードで現在地をお願い
         t = text.lower()
         if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
-            mode = _classify_mode(text)   # 'all' | 'tourism' | 'shop'
+            mode = _classify_mode(text)
             uid = _line_target_id(event)
             if "_LAST" in globals():
                 _LAST["mode"][uid] = mode
-            _reply_or_push(event, _ask_location("現在地から近い順で探します。位置情報を送ってください。"))
+
+            # ★ _ask_location() は TextSendMessage を返すので、ここだけ直接 reply
+            try:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    _ask_location("現在地から近い順で探します。位置情報を送ってください。")
+                )
+            except Exception:
+                # 失敗時は文字列でフォールバック（push強制で確実に届ける）
+                _reply_or_push(
+                    event,
+                    "現在地から近い順で探します。位置情報を送ってください。",
+                    force_push=True
+                )
             return
 
         # それ以外はヘルプ or 既定レス
@@ -1062,6 +1164,14 @@ if _line_enabled() and handler:
                 event.reply_token,
                 FlexSendMessage(alt_text="近くのスポット", contents=flex)
             )
+
+            # ★ 近く検索で積んだ出典を“別送”する（Flexはテキスト末尾に付けられないため）
+            foot = _sources_footer_text()
+            if foot:
+                tid = _line_target_id(event)
+                if tid:
+                    line_bot_api.push_message(tid, TextSendMessage(text=foot))
+
         except Exception:
             lines = [f"近くのスポット（上位{min(10, len(rows))}件）:"]
             for it in rows[:10]:
@@ -1071,28 +1181,85 @@ if _line_enabled() and handler:
 
 
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
+# === LINE 返信ユーティリティ（安全送信 + エラー計測 + force_push互換） ===
 def _reply_or_push(event, text: str, *, force_push: bool = False):
-    """長文は自動分割して返信。force_push=True で常に push。"""
+    if isinstance(text, str):
+        text = _append_sources_if_text(text)    
+    """
+    長文は自動分割して返信。5通/呼び出し上限を厳守。
+    force_push=True のときは reply_token があっても push のみで送る。
+    送信失敗は SEND_ERROR_COUNT / SEND_FAIL_COUNT と LAST_SEND_ERROR に記録。
+    """
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
 
-    parts = _split_for_line(text, LINE_SAFE_CHARS)
-    if not parts:
-        parts = [""]
+    def _compress_to(parts, lim):
+        """分割済みpartsを、1通あたりlim文字以内でできるだけ結合して個数を減らす"""
+        out, buf = [], ""
+        for p in parts:
+            if not buf:
+                buf = p
+                continue
+            if len(buf) + 1 + len(p) <= lim:
+                buf += "\n" + p
+            else:
+                out.append(buf)
+                buf = p
+        if buf:
+            out.append(buf)
+        return out
 
-    messages = [TextSendMessage(text=p) for p in parts]
+    lim = LINE_SAFE_CHARS
+    parts = _split_for_line(text, lim) or [""]
+    parts = _compress_to(parts, lim)
+
+    MAX_PER_CALL = 5  # reply/push とも5通/呼び出し
+
+    def _do_reply(msgs):
+        line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=m) for m in msgs])
+
+    def _do_push(tid, msgs):
+        line_bot_api.push_message(tid, [TextSendMessage(text=m) for m in msgs])
+
     try:
         reply_token = getattr(event, "reply_token", None)
-        if reply_token and not force_push:
-            line_bot_api.reply_message(reply_token, messages)
-        else:
+
+        # force_push 指定 or reply_token が無い場合は push 送信のみ
+        if force_push or not reply_token:
             tid = _line_target_id(event)
             if tid:
-                line_bot_api.push_message(tid, messages)
+                for i in range(0, len(parts), MAX_PER_CALL):
+                    _do_push(tid, parts[i:i + MAX_PER_CALL])
+            return
+
+        # まず reply で5通まで
+        head = parts[:MAX_PER_CALL]
+        _do_reply(head)
+        rest = parts[MAX_PER_CALL:]
+
+        # 余りは push で後送（ベストエフォート）
+        if rest:
+            tid = _line_target_id(event)
+            if tid:
+                for i in range(0, len(rest), MAX_PER_CALL):
+                    try:
+                        _do_push(tid, rest[i:i + MAX_PER_CALL])
+                    except LineBotApiError as e:
+                        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
+                        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+                        app.logger.warning("LINE push failed on chunk %s: %s", i // MAX_PER_CALL, e)
+                        break
+
     except LineBotApiError as e:
         globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-        app.logger.exception("LINE send failed: %s", e)
+        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed")
+
+    except Exception as e:
+        globals()["SEND_FAIL_COUNT"]  = globals().get("SEND_FAIL_COUNT", 0) + 1
+        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed (unexpected)")
 
 
 # データ格納先
@@ -2797,6 +2964,10 @@ def admin_entry():
         parking_num = (request.form.get("parking_num") or "").strip()
         remark      = (request.form.get("remark") or "").strip()
 
+        # 出典（任意入力）
+        source     = (request.form.get("source") or "").strip()
+        source_url = (request.form.get("source_url") or "").strip()
+
         # 追加情報
         extras_keys = request.form.getlist("extras_key[]")
         extras_vals = request.form.getlist("extras_val[]")
@@ -2845,6 +3016,8 @@ def admin_entry():
             "parking_num": parking_num,
             "remark": remark,
             "extras": extras,
+            "source": source,           # ← 出典フィールド（任意）
+            "source_url": source_url,   # ← 出典URL（任意）
         }
         new_entry = _norm_entry(new_entry)
 
@@ -2853,6 +3026,12 @@ def admin_entry():
         delete_flag = (request.form.get("image_delete") == "1")
         try:
             result = _save_jpeg_1080_350kb(upload, previous=prev_img, delete=delete_flag)
+        except RequestEntityTooLarge:
+            # グローバルの 413 ハンドラに任せるなら再送出:
+            # raise
+            # もしくは、ここで画面に戻すなら↓
+            flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
+            return redirect(url_for("admin_entry"))
         except Exception:
             result = None
             app.logger.exception("image handler failed")
@@ -2861,6 +3040,7 @@ def admin_entry():
             # 変更なし → 前画像を維持（削除指示がない限り）
             if prev_img and not delete_flag:
                 new_entry["image_file"] = prev_img
+                new_entry["image"] = prev_img
         elif result == "":
             # 明示削除
             new_entry.pop("image_file", None)
@@ -2868,6 +3048,7 @@ def admin_entry():
         else:
             # 置換/新規保存
             new_entry["image_file"] = result
+            new_entry["image"] = result
 
         # === 緯度・経度（raw/lat/lng/map を総合して決定、片側空は前回値を継承） ===
         lat, lng = _normalize_latlng(
@@ -2899,10 +3080,23 @@ def admin_entry():
             entries.append(new_entry)
             flash("登録しました")
 
+        # 保存（重複統合も内部で実行）
         save_entries(entries)
+
+        # （任意）タグ類義語オート更新の簡易キュー
+        try:
+            q = _load_syn_queue()
+            q.setdefault("tags", {})
+            for t in (new_entry.get("tags") or []):
+                if t:
+                    q["tags"][t] = True
+            _save_syn_queue(q)
+        except Exception:
+            pass
+
         return redirect(url_for("admin_entry"))
 
-    # ---- 一覧用: “サムネ/容量/サイズ” を各エントリに付加 ----
+    # ---- 一覧用: “サムネ/容量/サイズ” を各エントリに付加（テンプレ未使用なら無害） ----
     entries_view = []
     for e in entries:
         e2 = dict(e)  # テンプレ用コピー（元データは変更しない）
