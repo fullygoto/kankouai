@@ -123,20 +123,25 @@ def _haversine_km(lat1, lon1, lat2, lon2) -> float:
     except Exception:
         return 1e9  # 計算不可時は超遠距離扱い
 
-def _build_image_urls(img_name: str|None):
+def _build_image_urls(img_name: str | None):
     """サムネ用（透かし付き）と原寸用（署名付き）"""
     if not img_name:
         return {"thumb": "", "image": ""}
-    # これらの関数は前の回答で導入済みの想定：
-    # - build_signed_image_url(filename, wm=False/True, external=False/True)
-    # もし未導入なら、serve_image への通常 url_for に置き換えてください。
+
     try:
-        thumb = build_signed_image_url(img_name, wm=True,  external=False)
-        orig  = build_signed_image_url(img_name, wm=False, external=False)
+        # 署名付き・絶対URL（Flex対応）
+        thumb = build_signed_image_url(img_name, wm=True,  external=True)
+        orig  = build_signed_image_url(img_name, wm=False, external=True)
     except Exception:
-        # フォールバック（署名無し）
-        thumb = url_for("serve_image", filename=img_name) + "?wm=1"
-        orig  = url_for("serve_image", filename=img_name)
+        # フォールバックも絶対URL +（必要なら）署名付きに
+        try:
+            thumb = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True, wm=1)
+            orig  = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True)
+        except Exception:
+            # それでも失敗したときの最後のフォールバック
+            thumb = url_for("serve_image", filename=img_name, _external=True) + "?wm=1"
+            orig  = url_for("serve_image", filename=img_name, _external=True)
+
     return {"thumb": thumb, "image": orig}
 
 def _nearby_core(lat: float, lng: float, *, radius_m:int=1500, cat_filter:set[str]|None=None, limit:int=20):
@@ -960,9 +965,99 @@ except Exception as e:
     app.logger.exception("LINE init failed: %s", e)
 
 
+# =========================
+#  LINE: Webhook とハンドラ
+# =========================
+
+# 1) Webhook 受け口
+@app.route("/callback", methods=["POST"])
+def callback():
+    # LINEを無効で動かしている環境でも落ちないように
+    if not _line_enabled() or not handler:
+        abort(503)  # 「Service Unavailable」
+    signature = request.headers.get("X-Line-Signature", "")
+    body = request.get_data(as_text=True)
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return "OK"
+
+
+# 2) イベントハンドラ
+# handler が無い環境では定義しない（起動エラー回避）
+if _line_enabled() and handler:
+
+    # --- テキストを受けたとき -------------------------------
+    @handler.add(MessageEvent, message=TextMessage)
+    def on_text(event):
+        text = (event.message.text or "").strip()
+
+        # ミュート/一時停止のガード（あなたの実装を呼び出し）
+        if _line_mute_gate(event, text):
+            return
+
+        # 「近く」などのキーワードで現在地をお願い
+        t = text.lower()
+        if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
+            mode = _classify_mode(text)   # 'all' | 'tourism' | 'shop'
+            uid = _line_target_id(event)
+            if "_LAST" in globals():
+                _LAST["mode"][uid] = mode
+            _reply_or_push(event, _ask_location("現在地から近い順で探します。位置情報を送ってください。"))
+            return
+
+        # それ以外はヘルプ or 既定レス
+        reply = smalltalk_or_help_reply(text) or "受け取りました。『近く』と送ると現在地から検索できます。"
+        _reply_or_push(event, reply)
+
+
+    # --- 位置情報を受けたとき -------------------------------
+    @handler.add(MessageEvent, message=LocationMessage)
+    def on_location(event):
+        if _line_mute_gate(event, "location"):
+            return
+
+        lat = float(event.message.latitude)
+        lng = float(event.message.longitude)
+        uid  = _line_target_id(event)
+        mode = (_LAST["mode"].get(uid) if "_LAST" in globals() else None) or "all"
+        cats = _mode_to_cats(mode)
+
+        # 1) “待ってね” は push
+        try:
+            _reply_or_push(event, pick_wait_message(uid), force_push=True)
+        except Exception:
+            pass
+
+        # 2) 検索
+        rows = _nearby_core(lat, lng, radius_m=1500, cat_filter=cats, limit=10)
+        if not rows:
+            # 結果本体は reply
+            try:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="近くで見つかりませんでした。半径を広げるか、キーワードを変えてみてください。"))
+            except Exception:
+                _reply_or_push(event, "近くで見つかりませんでした。半径を広げるか、キーワードを変えてみてください。", force_push=True)
+            return
+
+        flex = _nearby_flex(rows)
+        # 3) Flex を reply。失敗したら push でテキスト
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(alt_text="近くのスポット", contents=flex)
+            )
+        except Exception:
+            lines = [f"近くのスポット（上位{min(10, len(rows))}件）:"]
+            for it in rows[:10]:
+                url = it.get("google_url", "")
+                lines.append(f"- {it['title']}（{it['distance_m']}m） {url}")
+            _reply_or_push(event, "\n".join(lines), force_push=True)
+
+
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
-def _reply_or_push(event, text: str):
-    """長文は自動分割して返信。LINE未設定環境ではログのみ。"""
+def _reply_or_push(event, text: str, *, force_push: bool = False):
+    """長文は自動分割して返信。force_push=True で常に push。"""
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
@@ -974,7 +1069,7 @@ def _reply_or_push(event, text: str):
     messages = [TextSendMessage(text=p) for p in parts]
     try:
         reply_token = getattr(event, "reply_token", None)
-        if reply_token:
+        if reply_token and not force_push:
             line_bot_api.reply_message(reply_token, messages)
         else:
             tid = _line_target_id(event)
