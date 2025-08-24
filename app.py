@@ -52,6 +52,12 @@ from functools import wraps
 import re, math, json, urllib.parse as _u
 from flask import jsonify, render_template_string, request
 
+# =========================
+#  Flask / 設定
+# =========================
+app = Flask(__name__)
+
+
 # 既に前の回答で入れていれば流用されます
 MYMAP_MID = os.getenv("MYMAP_MID", "")
 
@@ -297,11 +303,6 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
 
     return e
 
-
-# =========================
-#  Flask / 設定
-# =========================
-app = Flask(__name__)
 
 # ← ここに追加（この下から各種設定が続く）
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))  # お好みで
