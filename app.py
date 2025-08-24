@@ -669,52 +669,57 @@ def _too_large(e):
 # ==== 追加（Flask設定の近くでOK）====
 ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on","yes"}
 # ====================================
-# ==== 出典クレジット（回答末尾に自動付与） ==========================
+# ====================================
+# 出典クレジット（フォームのテキストのみ使用）
+# ====================================
 from flask import g
+
+# 既定は「フォームだけ」。必要なら 0/false で将来ゆるめられます
+SOURCES_ONLY_FORM = os.getenv("SOURCES_ONLY_FORM", "1").lower() in {"1","true","on","yes"}
 
 def record_source(note: str, url: str = ""):
     """
-    今回の返信に出典を追加登録する（同一リクエスト内）。
-    - note: 出典名（例：五島の島たび（五島市公式））
-    - url:  ページURLなど（任意）
+    今回の返信に出典を追加登録（同一リクエスト内）。
     """
     try:
         lst = getattr(g, "response_sources", [])
-        if note or url:
-            lst.append({"note": (note or "").strip(), "url": (url or "").strip()})
+        note = (note or "").strip()
+        url  = (url or "").strip()
+        # ★ フォームの“出典”テキストが空なら登録しない
+        if not note:
+            return
+        lst.append({"note": note, "url": url})
         g.response_sources = lst
     except RuntimeError:
-        # リクエスト外など
-        pass
+        pass  # リクエスト外など
 
 def record_source_from_entry(entry: dict | None):
-    """エントリに出典が入っていれば、今返信の出典に加える"""
+    """
+    エントリから“出典”を登録。
+    フォームの『出典』テキスト（entry['source']）が空なら何もしない。
+    """
     if not entry:
         return
     note = (entry.get("source") or "").strip()
+    if not note:
+        return  # ★ テキストが空なら脚注を出さない
     url  = (entry.get("source_url") or "").strip()
-    if note or url:
-        record_source(note, url)
+    record_source(note, url)
 
 def record_source_from_path(path: str):
     """
-    data/ 配下の“公的パンフ”起点を使ったときに呼ぶヘルパ。
-    例: record_source_from_path(actual_file_path)
+    パスからの自動出典付与は無効化（フォームのみを採用）。
+    必要になったら SOURCES_ONLY_FORM=0 で再度実装してください。
     """
-    try:
-        p = (path or "").replace("\\", "/")
-        if "/五島市公式パンフレット/" in p or p.endswith("/五島市公式パンフレット"):
-            record_source("五島市公式パンフレット")
-        if "/新上五島町公式パンフレット/" in p or p.endswith("/新上五島町公式パンフレット"):
-            record_source("新上五島町公式パンフレット")
-    except Exception:
-        pass
+    if SOURCES_ONLY_FORM:
+        return
+    # ここには何もしない（互換のため関数は残す）
 
 def _unique_sources(srcs: list[dict]) -> list[dict]:
     seen = set()
     out = []
     for s in srcs or []:
-        key = (s.get("note",""), s.get("url",""))
+        key = ((s.get("note","") or "").strip(), (s.get("url","") or "").strip())
         if key in seen:
             continue
         seen.add(key)
@@ -722,21 +727,25 @@ def _unique_sources(srcs: list[dict]) -> list[dict]:
     return out
 
 def _sources_footer_text() -> str | None:
+    """
+    送信前に呼ばれ、登録された出典があれば脚注文字列を返す。
+    """
     srcs = _unique_sources(getattr(g, "response_sources", []) or [])
     if not srcs:
         return None
     lines = ["— 出典 —"]
     for s in srcs:
-        n = s.get("note","").strip()
-        u = s.get("url","").strip()
-        if n and u:
-            lines.append(f"{n} {u}")
-        else:
-            lines.append(n or u)
+        n = (s.get("note","") or "").strip()
+        u = (s.get("url","") or "").strip()
+        # テキストは必須。URLはあれば併記（不要ならここで外してOK）
+        lines.append(f"{n} {u}".strip())
     return "\n".join(lines)
 
 def _append_sources_if_text(s: str) -> str:
-    """文字列本文の末尾に出典脚注を付ける。出典未登録ならそのまま。"""
+    """
+    文字列本文の末尾に出典脚注を付ける。
+    出典が未登録（=フォームにテキストが無い）なら何も付けない。
+    """
     foot = _sources_footer_text()
     if not foot:
         return s
@@ -745,8 +754,6 @@ def _append_sources_if_text(s: str) -> str:
     if s.strip().startswith("— 出典 —"):
         return s
     return (s.rstrip() + "\n\n" + foot)
-
-# ===============================================================
 
 
 # ===== ここを Flask 設定の直後に追加 =====
