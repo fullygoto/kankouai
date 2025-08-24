@@ -969,21 +969,6 @@ except Exception as e:
 #  LINE: Webhook とハンドラ
 # =========================
 
-# 1) Webhook 受け口
-@app.route("/callback", methods=["POST"])
-def callback():
-    # LINEを無効で動かしている環境でも落ちないように
-    if not _line_enabled() or not handler:
-        abort(503)  # 「Service Unavailable」
-    signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
-    try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        abort(400)
-    return "OK"
-
-
 # 2) イベントハンドラ
 # handler が無い環境では定義しない（起動エラー回避）
 if _line_enabled() and handler:
@@ -5660,14 +5645,16 @@ def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[s
         parts.append(rest)
     return parts
 
-# === LINE 返信ユーティリティ（★安全送信版） ===
+
+
+# === LINE 返信ユーティリティ（安全送信 + エラー計測） ===
 def _reply_or_push(event, text: str):
-    """長文は自動分割して返信。5通上限を厳守。超過分は結合 or pushで後送。"""
+    """長文は自動分割して返信。5通上限を厳守。超過分は結合しつつ、余りはpushで後送。"""
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
 
-    def _compress_to(parts, lim):
+    def _compress_to(parts: list[str], lim: int) -> list[str]:
         """分割済みpartsを、1通あたりlim文字以内でできるだけ結合して個数を減らす"""
         out, buf = [], ""
         for p in parts:
@@ -5685,48 +5672,54 @@ def _reply_or_push(event, text: str):
 
     lim = LINE_SAFE_CHARS
     parts = _split_for_line(text, lim) or [""]
+    parts = _compress_to(parts, lim)  # できるだけ結合して通数を減らす
 
-    # まずは結合して個数をできるだけ減らす
-    parts = _compress_to(parts, lim)
+    MAX_PER_CALL = 5  # reply/push とも5通/呼び出し
 
-    # reply API の上限は5通
-    MAX_PER_CALL = 5
-
-    def _do_reply(msgs):
+    def _do_reply(msgs: list[str]) -> None:
         line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=m) for m in msgs])
 
-    def _do_push(tid, msgs):
+    def _do_push(tid: str, msgs: list[str]) -> None:
         line_bot_api.push_message(tid, [TextSendMessage(text=m) for m in msgs])
 
     try:
-        if getattr(event, "reply_token", None):
+        reply_token = getattr(event, "reply_token", None)
+        if reply_token:
             head = parts[:MAX_PER_CALL]
             _do_reply(head)
             rest = parts[MAX_PER_CALL:]
         else:
-            # reply_tokenが無ければpushのみ
+            # reply_tokenが無ければ push のみで分割送信
             tid = _line_target_id(event)
             if tid:
                 for i in range(0, len(parts), MAX_PER_CALL):
-                    _do_push(tid, parts[i:i+MAX_PER_CALL])
+                    _do_push(tid, parts[i:i + MAX_PER_CALL])
             return
 
-        # 余りはpushで後送（ベストエフォート）
+        # 余りは push で後送（ベストエフォート）
         if rest:
             tid = _line_target_id(event)
             if tid:
                 for i in range(0, len(rest), MAX_PER_CALL):
                     try:
-                        _do_push(tid, rest[i:i+MAX_PER_CALL])
+                        _do_push(tid, rest[i:i + MAX_PER_CALL])
                     except LineBotApiError as e:
-                        app.logger.warning("LINE push failed on chunk %s: %s", i//MAX_PER_CALL, e)
+                        # push 側の個別失敗も記録
+                        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
+                        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+                        app.logger.warning("LINE push failed on chunk %s: %s", i // MAX_PER_CALL, e)
                         break
 
+    # ここから例外処理：個別→汎用の順でキャッチ
     except LineBotApiError as e:
-        global SEND_FAIL_COUNT, LAST_SEND_ERROR
-        SEND_FAIL_COUNT += 1
-        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
+        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
         app.logger.exception("LINE send failed")
+
+    except Exception as e:
+        globals()["SEND_FAIL_COUNT"]  = globals().get("SEND_FAIL_COUNT", 0) + 1
+        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed (unexpected)")
 
 def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
     """複数テキストを順に push。重複抑止＋世代ガード付き。"""
