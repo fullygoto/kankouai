@@ -47,6 +47,167 @@ import io
 from functools import wraps
 
 
+
+# ==== Nearby (現在地から近いスポット検索) ======================================
+import re, math, json, urllib.parse as _u
+from flask import jsonify, render_template_string, request
+
+# 既に前の回答で入れていれば流用されます
+MYMAP_MID = os.getenv("MYMAP_MID", "")
+
+def gmaps_url(*, name:str="", address:str="", lat:float|None=None, lng:float|None=None, place_id:str|None=None) -> str:
+    base = "https://www.google.com/maps/search/?api=1"
+    if place_id:
+        q = _u.quote(name or address or "")
+        return f"{base}&query={q}&query_place_id={_u.quote(place_id)}"
+    if lat is not None and lng is not None:
+        return f"{base}&query={lat:.6f},{lng:.6f}"
+    q = _u.quote(name or address)
+    return f"{base}&query={q}"
+
+def mymap_view_url(*, lat:float|None=None, lng:float|None=None, zoom:int=13) -> str:
+    if not MYMAP_MID:
+        return ""
+    base = f"https://www.google.com/maps/d/viewer?mid={_u.quote(MYMAP_MID)}"
+    if lat is not None and lng is not None:
+        return f"{base}&ll={lat:.6f},{lng:.6f}&z={int(zoom)}"
+    return base
+
+# entries の 1件から lat/lng を安全に取り出す（lat/lngが無ければ map URL から推定）
+_float = lambda x: (float(x) if x not in (None, "", "None") else None)
+def _extract_latlng_from_map(map_url: str|None):
+    if not map_url:
+        return (None, None)
+    try:
+        # 1) /@lat,lng, の形（Google Maps 共有URLでよくある）
+        m = re.search(r'@(-?\d+\.\d+),\s*(-?\d+\.\d+)', map_url)
+        if m:
+            return (_float(m.group(1)), _float(m.group(2)))
+        # 2) クエリパラメータ（ll= / center= / q=）
+        parsed = _u.urlparse(map_url)
+        qs = _u.parse_qs(parsed.query)
+        for key in ("ll", "center", "q"):
+            if key in qs:
+                s = _u.unquote(qs[key][0])
+                m = re.match(r'\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*', s)
+                if m:
+                    return (_float(m.group(1)), _float(m.group(2)))
+    except Exception:
+        pass
+    return (None, None)
+
+def _entry_latlng(e: dict):
+    lat = _float(e.get("lat"))
+    lng = _float(e.get("lng"))
+    if lat is not None and lng is not None:
+        return (lat, lng)
+    # map URL から推定
+    return _extract_latlng_from_map(e.get("map"))
+
+def _haversine_km(lat1, lon1, lat2, lon2) -> float:
+    # 地球半径(キロ)
+    R = 6371.0
+    try:
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlmb = math.radians(lon2 - lon1)
+        a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlmb/2)**2
+        return R * (2*math.asin(math.sqrt(a)))
+    except Exception:
+        return 1e9  # 計算不可時は超遠距離扱い
+
+def _build_image_urls(img_name: str|None):
+    """サムネ用（透かし付き）と原寸用（署名付き）"""
+    if not img_name:
+        return {"thumb": "", "image": ""}
+    # これらの関数は前の回答で導入済みの想定：
+    # - build_signed_image_url(filename, wm=False/True, external=False/True)
+    # もし未導入なら、serve_image への通常 url_for に置き換えてください。
+    try:
+        thumb = build_signed_image_url(img_name, wm=True,  external=False)
+        orig  = build_signed_image_url(img_name, wm=False, external=False)
+    except Exception:
+        # フォールバック（署名無し）
+        thumb = url_for("serve_image", filename=img_name) + "?wm=1"
+        orig  = url_for("serve_image", filename=img_name)
+    return {"thumb": thumb, "image": orig}
+
+def _nearby_core(lat: float, lng: float, *, radius_m:int=1500, cat_filter:set[str]|None=None, limit:int=20):
+    # entries 取得（既存のロード関数を使用）
+    try:
+        items = [_norm_entry(x) for x in load_entries()]
+    except Exception:
+        items = []
+
+    rows = []
+    for i, e in enumerate(items):
+        # カテゴリフィルタ
+        cat = (e.get("category") or "").strip()
+        if cat_filter and cat not in cat_filter:
+            continue
+
+        elat, elng = _entry_latlng(e)
+        if elat is None or elng is None:
+            continue
+        d_km = _haversine_km(lat, lng, elat, elng)
+        if d_km*1000 > radius_m:
+            continue
+
+        img = e.get("image_file") or e.get("image") or ""
+        imgs = _build_image_urls(img)
+
+        row = {
+            "idx": i,
+            "title": e.get("title",""),
+            "desc": e.get("desc",""),
+            "address": e.get("address",""),
+            "category": cat,
+            "areas": e.get("areas") or [],
+            "tags": e.get("tags") or [],
+            "lat": elat, "lng": elng,
+            "distance_m": int(round(d_km*1000)),
+            "google_url": gmaps_url(name=e.get("title",""), address=e.get("address",""), lat=elat, lng=elng, place_id=e.get("place_id")),
+            "mymap_url": mymap_view_url(lat=elat, lng=elng) if MYMAP_MID else "",
+            "image_thumb": imgs["thumb"],
+            "image_url": imgs["image"],
+        }
+        rows.append(row)
+
+    rows.sort(key=lambda x: x["distance_m"])
+    return rows[:max(1, int(limit))]
+
+@app.route("/api/nearby", methods=["GET"])
+def api_nearby():
+    """
+    例: /api/nearby?lat=32.7&lng=128.8&r=2000&cat=観光,飲食&limit=20
+    - lat,lng: 現在地（必須）
+    - r: 半径[m]（デフォルト 1500）
+    - cat: カンマ区切りカテゴリ（省略可）
+    - limit: 件数（省略可）
+    """
+    try:
+        lat = float(request.args.get("lat"))
+        lng = float(request.args.get("lng"))
+    except Exception:
+        return jsonify({"ok": False, "error": "lat/lng が不正です"}), 400
+
+    try:
+        radius_m = int(request.args.get("r", 1500))
+    except Exception:
+        radius_m = 1500
+
+    cat_param = (request.args.get("cat") or "").strip()
+    cats = {c.strip() for c in cat_param.split(",") if c.strip()} if cat_param else None
+
+    try:
+        limit = int(request.args.get("limit", 20))
+    except Exception:
+        limit = 20
+
+    rows = _nearby_core(lat, lng, radius_m=radius_m, cat_filter=cats, limit=limit)
+    return jsonify({"ok": True, "count": len(rows), "items": rows})
+
+
 # =========================
 #  正規化ヘルパー
 # =========================
@@ -381,6 +542,93 @@ def _restrict_admin_ip():
         if not _admin_ip_ok(client_ip):
             abort(403, description="Forbidden: your IP is not allowed for admin/shop.")
 # ===== ここまで =====
+@app.route("/nearby", methods=["GET"])
+def nearby_page():
+    html = """
+<!DOCTYPE html><html lang="ja"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>近くのスポット検索</title>
+<style>
+ body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,'Noto Sans JP',sans-serif;background:#f6faf9;margin:0}
+ .wrap{max-width:760px;margin:24px auto;background:#fff;padding:18px 16px;border-radius:16px;box-shadow:0 4px 20px #b7d3e04d}
+ h1{margin:0 0 12px 0;font-size:1.2rem}
+ .ctl{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 14px}
+ .btn{padding:8px 12px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+ .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+ .muted{color:#678;font-size:.92em}
+ .card{display:flex;gap:10px;border:1px solid #e5eef5;background:#fbfeff;border-radius:12px;padding:10px;margin:8px 0}
+ .thumb{width:96px;height:72px;object-fit:cover;border-radius:8px;border:1px solid #e2e8f0;background:#fff}
+ .ttl{font-weight:600}
+ .row{font-size:.95em;color:#345}
+ .dist{font-weight:600}
+</style>
+</head><body>
+<div class="wrap">
+  <h1>近くのスポット検索</h1>
+  <div class="ctl">
+    半径
+    <select id="r">
+      <option value="500">500m</option>
+      <option value="1000" selected>1km</option>
+      <option value="2000">2km</option>
+      <option value="5000">5km</option>
+    </select>
+    カテゴリ
+    <select id="cat">
+      <option value="">（指定なし）</option>
+      <option>観光</option><option>飲食</option><option>宿泊</option>
+      <option>ショップ</option><option>イベント</option>
+    </select>
+    <button class="btn" id="btn">現在地から検索</button>
+    <span id="status" class="muted"></span>
+  </div>
+  <div id="list"></div>
+</div>
+<script>
+const $ = s=>document.querySelector(s);
+const list = $("#list"), status = $("#status"), btn=$("#btn");
+async function search(lat,lng){
+  const r = $("#r").value, cat = $("#cat").value;
+  status.textContent = "検索中…";
+  list.innerHTML = "";
+  const qs = new URLSearchParams({lat,lng,r});
+  if(cat) qs.set("cat", cat);
+  const res = await fetch(`/api/nearby?${qs.toString()}`);
+  const data = await res.json().catch(()=>({ok:false}));
+  if(!data.ok){ status.textContent = "検索に失敗しました"; return; }
+  status.textContent = `見つかった件数：${data.count}`;
+  for(const it of data.items){
+    const a = document.createElement("div");
+    a.className = "card";
+    a.innerHTML = `
+      ${it.image_thumb ? `<a href="${it.image_url}" target="_blank" rel="noopener"><img class="thumb" src="${it.image_thumb}" loading="lazy" referrerpolicy="no-referrer"></a>` : ``}
+      <div class="body">
+        <div class="ttl">${it.title}</div>
+        <div class="row">${it.address ?? ""}</div>
+        <div class="row"><span class="dist">${it.distance_m}</span> m / ${it.category ?? ""}</div>
+        <div class="row">
+          <a href="${it.google_url}" target="_blank" rel="noopener">地図で開く</a>
+          ${it.mymap_url ? ` / <a href="${it.mymap_url}" target="_blank" rel="noopener">周辺をマイマップ</a>` : ``}
+        </div>
+      </div>`;
+    list.appendChild(a);
+  }
+}
+btn.addEventListener("click", ()=>{
+  if(!("geolocation" in navigator)){
+    status.textContent = "このブラウザは位置情報に対応していません"; return;
+  }
+  status.textContent = "位置情報を取得中…";
+  navigator.geolocation.getCurrentPosition(
+    p=>{ search(p.coords.latitude, p.coords.longitude); },
+    e=>{ status.textContent = "位置情報の取得を許可してください（HTTPSのみ可）"; },
+    {enableHighAccuracy:true, timeout:10000, maximumAge:30000}
+  );
+});
+</script>
+</body></html>
+    """
+    return render_template_string(html)
 
 @app.route("/_debug/ip")
 def _debug_ip():
@@ -2048,58 +2296,32 @@ def admin_entry():
     # ---- 画像メタ情報を取得する小ヘルパ（この関数内だけで完結） ----
     def _image_meta(img_name: str | None):
         """
-        画像ファイルの存在/サイズ/解像度とアクセスURLを返す。
-        返すキー:
-          - name, exists, bytes, kb, width, height
-          - url            : 通常のURL
-          - url_wm         : 透かし(wm=1)付きURL
-          - url_signed     : 署名付きURL（あれば）
-          - url_wm_signed  : 署名+透かしURL（あれば）
+        画像ファイルの存在/サイズ/解像度とURLを返す。
+        戻り値例:
+        {
+          "name": "abcd.jpg",
+          "exists": True/False,
+          "url": "https://.../media/img/abcd.jpg",
+          "bytes": 123456,
+          "kb": 121,               # 端数切り上げ
+          "width": 1080,
+          "height": 720
+        }
         """
         if not img_name:
             return None
-
-        # URL作成（safe_url_for / build_signed_image_url が無い環境でも落ちないように多段フォールバック）
-        def _plain_url(wm=False):
-            try:
-                # safe_url_for があれば優先（画像エンドポイント用の拡張あり）
-                return safe_url_for(
-                    "serve_image",
-                    filename=img_name,
-                    _external=True,
-                    wm=("1" if wm else None),
-                )
-            except Exception:
-                pass
-            try:
-                u = url_for("serve_image", filename=img_name, _external=True)
-                if wm:
-                    u += ("&" if "?" in u else "?") + "wm=1"
-                return u
-            except Exception:
-                return ""
-
-        def _signed_url(wm=False):
-            # build_signed_image_url が無ければ None を返す
-            try:
-                return build_signed_image_url(img_name, wm=wm, external=True)
-            except Exception:
-                return None
-
-        url_plain      = _plain_url(wm=False)
-        url_plain_wm   = _plain_url(wm=True)
-        url_signed     = _signed_url(wm=False)
-        url_wm_signed  = _signed_url(wm=True)
-
         try:
+            # 画像URL（存在しなくてもURLは生成しておく）
+            try:
+                url = url_for("serve_image", filename=img_name, _external=True)
+            except Exception:
+                url = ""
+
             path = os.path.join(IMAGES_DIR, img_name)
             if not os.path.isfile(path):
                 return {
-                    "name": img_name, "exists": False,
-                    "url": url_plain, "url_wm": url_plain_wm,
-                    "url_signed": url_signed or url_plain,
-                    "url_wm_signed": url_wm_signed or url_plain_wm,
-                    "bytes": None, "kb": None, "width": None, "height": None,
+                    "name": img_name, "exists": False, "url": url,
+                    "bytes": None, "kb": None, "width": None, "height": None
                 }
 
             size_b = os.path.getsize(path)
@@ -2113,20 +2335,14 @@ def admin_entry():
                 pass
 
             return {
-                "name": img_name, "exists": True,
-                "url": url_plain, "url_wm": url_plain_wm,
-                "url_signed": url_signed or url_plain,
-                "url_wm_signed": url_wm_signed or url_plain_wm,
-                "bytes": size_b, "kb": kb, "width": w, "height": h,
+                "name": img_name, "exists": True, "url": url,
+                "bytes": size_b, "kb": kb, "width": w, "height": h
             }
         except Exception:
             # 何かあっても画面は壊さない
             return {
-                "name": img_name or "", "exists": False,
-                "url": url_plain, "url_wm": url_plain_wm,
-                "url_signed": url_signed or url_plain,
-                "url_wm_signed": url_wm_signed or url_plain_wm,
-                "bytes": None, "kb": None, "width": None, "height": None,
+                "name": img_name or "", "exists": False, "url": "",
+                "bytes": None, "kb": None, "width": None, "height": None
             }
 
     # ---- ここから従来どおり ----
@@ -2150,6 +2366,21 @@ def admin_entry():
         address  = (request.form.get("address") or "").strip()
         map_url  = (request.form.get("map") or "").strip()
 
+        # ★ 緯度・経度（任意）
+        lat_raw = (request.form.get("lat") or "").strip()
+        lng_raw = (request.form.get("lng") or "").strip()
+        lat = None
+        lng = None
+        if lat_raw != "" or lng_raw != "":
+            try:
+                lat = float(lat_raw) if lat_raw != "" else None
+            except Exception:
+                lat = None
+            try:
+                lng = float(lng_raw) if lng_raw != "" else None
+            except Exception:
+                lng = None
+
         # リスト系（改行/カンマ両対応）
         tags   = _split_lines_commas(request.form.get("tags", ""))
         areas  = request.form.getlist("areas") or _split_lines_commas(request.form.get("areas",""))
@@ -2163,6 +2394,9 @@ def admin_entry():
         parking     = (request.form.get("parking") or "").strip()
         parking_num = (request.form.get("parking_num") or "").strip()
         remark      = (request.form.get("remark") or "").strip()
+
+        # ★ 透かしON/OFF（任意）
+        wm_on = (request.form.get("wm_on") in ("1", "on", "true", "True"))
 
         # 追加情報
         extras_keys = request.form.getlist("extras_key[]")
@@ -2212,8 +2446,11 @@ def admin_entry():
             "parking_num": parking_num,
             "remark": remark,
             "extras": extras,
+            # ↓ 緯度・経度は「入力が空」の場合は前回値を温存したいので後で調整
         }
-        new_entry = _norm_entry(new_entry)  # 保存前にも正規化
+
+        # 保存前にも正規化
+        new_entry = _norm_entry(new_entry)
 
         # === 画像アップロード/削除 ===
         upload = request.files.get("image_file")
@@ -2233,6 +2470,18 @@ def admin_entry():
                 # 新規 or 置換
                 new_entry["image_file"] = result
 
+        # === 緯度・経度・透かしフラグの反映 ===
+        if lat is not None: new_entry["lat"] = lat
+        if lng is not None: new_entry["lng"] = lng
+        if (lat is None and lng is None) and prev_entry:
+            # 入力が空なら前回値を引き継ぐ
+            if "lat" in prev_entry: new_entry["lat"] = prev_entry.get("lat")
+            if "lng" in prev_entry: new_entry["lng"] = prev_entry.get("lng")
+
+        # 透かしON/OFF（チェック有無でそのまま保存）
+        wm_on = ('wm_on' in request.form)
+        new_entry["wm_on"] = wm_on
+
         # === 保存 ===
         if idx_edit is not None:
             try:
@@ -2247,6 +2496,23 @@ def admin_entry():
 
         save_entries(entries)
         return redirect(url_for("admin_entry"))
+
+    # ---- ここで “サムネ/容量/サイズ” を各エントリに付加してテンプレへ渡す ----
+    entries_view = []
+    for e in entries:
+        e2 = dict(e)  # テンプレ用にコピー（元データは変更しない）
+        img_name = e.get("image_file") or e.get("image")
+        e2["__image"] = _image_meta(img_name) if img_name else None
+        entries_view.append(e2)
+
+    return render_template(
+        "admin_entry.html",
+        entries=entries_view,
+        entry_edit=entry_edit,
+        edit_id=edit_id if edit_id not in (None, "", "None") else None,
+        role=session.get("role", ""),
+        global_paused=_is_global_paused(),
+    )
 
     # ---- “サムネ/容量/サイズ” を各エントリに付加してテンプレへ渡す ----
     entries_view = []
