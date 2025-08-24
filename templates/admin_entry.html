@@ -330,18 +330,17 @@
 
             <!-- ★ 座標コピペ欄（なんでもOK） -->
             <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
-            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分"
-                   value=""><br>
+            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
             <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
 
             <!-- 緯度・経度（小数、任意） -->
             <label>緯度・経度（任意）</label><br>
             <div class="row" style="display:flex; gap:10px; align-items:center;">
-              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+              <input type="text" name="lat" inputmode="decimal"
                      placeholder="緯度 例: 32.695123"
                      value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
                      style="width:48%;">
-              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+              <input type="text" name="lng" inputmode="decimal"
                      placeholder="経度 例: 128.845678"
                      value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
                      style="width:48%;">
@@ -481,18 +480,17 @@ https://instagram.com/xxx">
 
             <!-- ★ 座標コピペ欄（なんでもOK） -->
             <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
-            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分"
-                   value=""><br>
+            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
             <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
 
             <!-- 緯度・経度（小数、任意） -->
             <label>緯度・経度（任意）</label><br>
             <div class="row" style="display:flex; gap:10px; align-items:center;">
-              <input type="text" name="lat" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+              <input type="text" name="lat" inputmode="decimal"
                      placeholder="緯度 例: 32.695123"
                      value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
                      style="width:48%;">
-              <input type="text" name="lng" inputmode="decimal" pattern="-?\\d+(\\.\\d+)?"
+              <input type="text" name="lng" inputmode="decimal"
                      placeholder="経度 例: 128.845678"
                      value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
                      style="width:48%;">
