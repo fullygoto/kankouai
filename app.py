@@ -161,10 +161,8 @@ def _flex_viewpoints_map():
     return {"type": "carousel", "contents": [bubble]}
 
 def send_viewpoints_map(event):
-    """
-    展望所マップを reply。Flexが使えなければURLテキストでフォールバック。
-    """
     try:
+        app.logger.info("[viewpoints] url=%s thumb=%s", viewpoints_map_url(), VIEWPOINTS_THUMB)
         flex = _flex_viewpoints_map()
         if flex:
             line_bot_api.reply_message(
@@ -175,7 +173,6 @@ def send_viewpoints_map(event):
     except Exception:
         app.logger.exception("send_viewpoints_map: flex failed")
 
-    # フォールバック（テキストのみ）
     url = viewpoints_map_url() or "(展望所マップURLが未設定です)"
     _reply_or_push(event, f"展望所マップはこちら：\n{url}")
 
