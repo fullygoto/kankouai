@@ -89,6 +89,97 @@ _MAP_HOST_RE = re.compile(
     re.I
 )
 
+
+# ==== 展望所マップ（My Maps 専用） =========================
+VIEWPOINTS_URL  = os.getenv("VIEWPOINTS_URL", "").strip()
+VIEWPOINTS_MID  = os.getenv("VIEWPOINTS_MID", "").strip()
+VIEWPOINTS_LL   = os.getenv("VIEWPOINTS_LL", "").strip()   # 例: "32.97,129.52"
+VIEWPOINTS_ZOOM = os.getenv("VIEWPOINTS_ZOOM", "10").strip()
+VIEWPOINTS_THUMB = os.getenv("VIEWPOINTS_THUMB", "").strip()  # 例: "viewer_thumb.jpg"
+
+def viewpoints_map_url() -> str:
+    """
+    優先順位:
+      1) VIEWPOINTS_URL（フルURL指定）
+      2) VIEWPOINTS_MID から組み立て（ll, z があれば付与）
+    """
+    if VIEWPOINTS_URL:
+        return VIEWPOINTS_URL
+    if VIEWPOINTS_MID:
+        base = f"https://www.google.com/maps/d/viewer?mid={_u.quote(VIEWPOINTS_MID)}&femb=1"
+        ll = ""
+        if VIEWPOINTS_LL:
+            try:
+                lat, lng = [s.strip() for s in VIEWPOINTS_LL.split(",", 1)]
+                ll = f"&ll={_u.quote(lat)},{_u.quote(lng)}"
+            except Exception:
+                ll = ""
+        z = ""
+        if VIEWPOINTS_ZOOM:
+            try:
+                z = f"&z={int(VIEWPOINTS_ZOOM)}"
+            except Exception:
+                z = ""
+        return base + ll + z
+    return ""  # 未設定
+
+def _flex_viewpoints_map():
+    """
+    “展望所マップ”だけを返す Flex バブル。サムネは任意（VIEWPOINTS_THUMB）。
+    """
+    url = viewpoints_map_url()
+    if not url:
+        # URL 未設定時は None（呼び出し側でテキストフォールバック）
+        return None
+
+    hero = None
+    if VIEWPOINTS_THUMB:
+        try:
+            thumb_url = build_signed_image_url(VIEWPOINTS_THUMB, wm=True, external=True)
+            hero = {"type": "image", "url": thumb_url, "size": "full", "aspectMode": "cover", "aspectRatio": "16:9"}
+        except Exception:
+            hero = None
+
+    body_contents = [
+        {"type": "text", "text": "五島列島 展望所マップ", "weight": "bold", "wrap": True},
+        {"type": "text", "text": "Googleマイマップで展望スポットを一覧表示します。", "size": "sm", "color": "#666666", "wrap": True},
+    ]
+    bubble = {
+        "type": "bubble",
+        **({"hero": hero} if hero else {}),
+        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body_contents},
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+                {"type": "button", "style": "primary",
+                 "action": {"type": "uri", "label": "マップを開く", "uri": url}}
+            ]
+        }
+    }
+    return {"type": "carousel", "contents": [bubble]}
+
+def send_viewpoints_map(event):
+    """
+    展望所マップを reply。Flexが使えなければURLテキストでフォールバック。
+    """
+    try:
+        flex = _flex_viewpoints_map()
+        if flex:
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(alt_text="展望所マップ", contents=flex)
+            )
+            return
+    except Exception:
+        app.logger.exception("send_viewpoints_map: flex failed")
+
+    # フォールバック（テキストのみ）
+    url = viewpoints_map_url() or "(展望所マップURLが未設定です)"
+    _reply_or_push(event, f"展望所マップはこちら：\n{url}")
+
+
 def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -> str:
     """
     1) エントリの map フィールドが Google系の共有URLならそれを優先（店名が出やすい）
@@ -1175,7 +1266,14 @@ if _line_enabled() and handler:
     @handler.add(MessageEvent, message=TextMessage)
     def on_text(event):
         text = (event.message.text or "").strip()
-
+        # ▼ ここから追加：展望所マップ専用コマンド
+        tnorm = _norm_cmd(text)  # 既存の正規化ヘルパー
+        if any(kw in tnorm for kw in [
+            "展望所マップ", "展望マップ", "展望台マップ", "展望地図",
+            "てんぼうしょまっぷ", "てんぼうだいまっぷ", "viewpoint map", "viewpoints map"
+        ]):
+            return send_viewpoints_map(event)
+        # ▲ ここまで追加
         # ミュート/一時停止のガード（あなたの実装を呼び出し）
         if _line_mute_gate(event, text):
             return
