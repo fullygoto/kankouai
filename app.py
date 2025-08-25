@@ -1266,34 +1266,34 @@ if _line_enabled() and handler:
     @handler.add(MessageEvent, message=TextMessage)
     def on_text(event):
         text = (event.message.text or "").strip()
-        # ▼ ここから追加：展望所マップ専用コマンド
-        tnorm = _norm_cmd(text)  # 既存の正規化ヘルパー
-        if any(kw in tnorm for kw in [
-            "展望所マップ", "展望マップ", "展望台マップ", "展望地図",
-            "てんぼうしょまっぷ", "てんぼうだいまっぷ", "viewpoint map", "viewpoints map"
-        ]):
-            return send_viewpoints_map(event)
-        # ▲ ここまで追加
-        # ミュート/一時停止のガード（あなたの実装を呼び出し）
+
+        # === 展望所マップ（先頭で最優先処理） ===
+        try:
+            if _is_viewpoints_cmd(text):
+                app.logger.info("[viewpoints] hit: %r", text)
+                send_viewpoints_map(event)
+                return
+        except Exception:
+            app.logger.exception("[viewpoints] handler failed")
+
+        # ↓ 以下は既存の処理をそのまま残す ↓
+        # ミュート/一時停止ガード
         if _line_mute_gate(event, text):
             return
 
-        # 「近く」などのキーワードで現在地をお願い
+        # 「近く」キーワードで位置情報依頼
         t = text.lower()
         if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
             mode = _classify_mode(text)
             uid = _line_target_id(event)
             if "_LAST" in globals():
                 _LAST["mode"][uid] = mode
-
-            # ★ _ask_location() は TextSendMessage を返すので、ここだけ直接 reply
             try:
                 line_bot_api.reply_message(
                     event.reply_token,
                     _ask_location("現在地から近い順で探します。位置情報を送ってください。")
                 )
             except Exception:
-                # 失敗時は文字列でフォールバック（push強制で確実に届ける）
                 _reply_or_push(
                     event,
                     "現在地から近い順で探します。位置情報を送ってください。",
@@ -1301,7 +1301,7 @@ if _line_enabled() and handler:
                 )
             return
 
-        # それ以外はヘルプ or 既定レス
+        # 既存の簡易ヘルプ or 既定レス
         reply = smalltalk_or_help_reply(text) or "受け取りました。『近く』と送ると現在地から検索できます。"
         _reply_or_push(event, reply)
 
@@ -1999,6 +1999,22 @@ def _line_mute_gate(event, text: str) -> bool:
         return True
 
     return False
+
+# ==== 展望所マップ: コマンド検出（表記ゆれ対応） ====
+# 例: 「展望所マップ」「展望 所 マップ」「展望台マップ？」「VIEWPOINTS MAP」
+_CMD_RE_VIEWPOINTS = re.compile(
+    r"(?:展望\s*(?:所|台)?\s*(?:マップ|地図))|(?:viewpoints?\s*map)",
+    re.I
+)
+
+def _is_viewpoints_cmd(text: str) -> bool:
+    """
+    表記ゆれ（NFKC・大小文字・全半角・スペース・句読点）を吸収して判定
+    """
+    t = _norm_cmd(text)  # NFKC + lower + trim
+    # 単語間スペース・全角スペース・スラッシュ類を除去して緩く判定
+    t = re.sub(r"[ \t\u3000／/、。,．。!！?？\-ー〜~]+", "", t)
+    return bool(_CMD_RE_VIEWPOINTS.search(t))
 
 
 # 初回ブートストラップ
