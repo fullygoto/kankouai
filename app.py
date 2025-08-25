@@ -1276,6 +1276,18 @@ if _line_enabled() and handler:
         except Exception:
             app.logger.exception("[viewpoints] handler failed")
 
+         # --- セーフティ（超ゆるい再チェック）: 表記ゆれ・前置き付きでも拾う ---
+        try:
+            t2 = unicodedata.normalize("NFKC", (text or "")).lower()
+            # 「展望」かつ「マップ/地図」 または 英語 viewpoint+map を含めばヒット
+            if (("展望" in t2) and ("マップ" in t2 or "地図" in t2)) or ("viewpoint" in t2 and "map" in t2):
+                app.logger.info("[viewpoints] fallback hit: %r", text)
+                send_viewpoints_map(event)
+                return
+        except Exception:
+            app.logger.exception("[viewpoints] fallback checker failed")
+        # --- セーフティここまで ---
+
         # ↓ 以下は既存処理のまま ↓
         if _line_mute_gate(event, text):
             return
