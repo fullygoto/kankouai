@@ -1258,16 +1258,21 @@ if line_bot_api is not None:
 # 2) イベントハンドラ
 # handler が無い環境では定義しない（起動エラー回避）
 if _line_enabled() and handler:
+    # 既存の厳密判定の「少し後ろ」〜 mute判定の「前」に追加
+    def _hit_viewpoints_loose(s: str) -> bool:
+        t = _n(s)  # NFKC + 空白圧縮 + lower
+        return (("展望" in t) and ("マップ" in t or "地図" in t)) or ("viewpoint" in t)
+
 
     # --- テキストを受けたとき -------------------------------
     @handler.add(MessageEvent, message=TextMessage)
     def on_text(event):
         text = (event.message.text or "").strip()
 
-        # === 展望所マップ（最優先で処理） ===
+        # --- 展望所マップ（厳密 or 保険のゆる判定） ---
         try:
-            if _is_viewpoints_cmd(text):
-                app.logger.info("[viewpoints] hit: %r", text)
+            if _is_viewpoints_cmd(text) or _hit_viewpoints_loose(text):
+                app.logger.info("[viewpoints] cmd hit: %r", text)
                 send_viewpoints_map(event)
                 return
         except Exception:
@@ -6305,6 +6310,26 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
             line_bot_api.push_message(target_id, TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"))
         except Exception:
             pass
+
+
+@app.route("/_debug/viewpoints")
+def _dbg_viewpoints():
+    return jsonify({
+        "VIEWPOINTS_URL": VIEWPOINTS_URL,
+        "VIEWPOINTS_MID": VIEWPOINTS_MID,
+        "VIEWPOINTS_LL": VIEWPOINTS_LL,
+        "VIEWPOINTS_ZOOM": VIEWPOINTS_ZOOM,
+        "computed_url": viewpoints_map_url(),
+    })
+
+@app.route("/_debug/viewpoints_test")
+def _dbg_viewpoints_test():
+    q = request.args.get("q","")
+    try:
+        hit = _is_viewpoints_cmd(q)
+    except Exception as e:
+        hit = f"ERROR: {e}"
+    return jsonify({"q": q, "hit": bool(hit)})
 
 
 # =========================
