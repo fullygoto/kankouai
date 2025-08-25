@@ -1282,103 +1282,129 @@ if _line_enabled() and handler:
         t = _n(s)  # NFKC + 空白圧縮 + lower
         return (("展望" in t) and ("マップ" in t or "地図" in t)) or ("viewpoint" in t)
 
-
-    # --- テキストを受けたとき -------------------------------
+    # ==== ここから：統合した TextMessage ハンドラ（1本だけ残す） ====
     @handler.add(MessageEvent, message=TextMessage)
-    def on_text(event):
-        text = (event.message.text or "").strip()
-
-        # --- 展望所マップ（厳密 or 保険のゆる判定） ---
+    def handle_message(event):
         try:
-            if _is_viewpoints_cmd(text) or _hit_viewpoints_loose(text):
-                app.logger.info("[viewpoints] cmd hit: %r", text)
-                send_viewpoints_map(event)
+            text = getattr(event.message, "text", "") or ""
+        except Exception:
+            text = ""
+
+        # --- ① ミュート/一時停止ゲート -------------------------
+        try:
+            if _line_mute_gate(event, text):
                 return
         except Exception:
-            app.logger.exception("[viewpoints] handler failed")
+            app.logger.exception("_line_mute_gate failed")
 
-         # --- セーフティ（超ゆるい再チェック）: 表記ゆれ・前置き付きでも拾う ---
+        # --- ② 展望所マップ（厳密＋保険のゆる判定） --------------
         try:
+            # 厳密判定（正規表現）
+            if _is_viewpoints_cmd(text) or _hit_viewpoints_loose(text):
+                app.logger.info("[viewpoints] strict/loose hit: %r", text)
+                send_viewpoints_map(event)
+                return
+
+            # セーフティ（超ゆるい再チェック）
+            import unicodedata
             t2 = unicodedata.normalize("NFKC", (text or "")).lower()
-            # 「展望」かつ「マップ/地図」 または 英語 viewpoint+map を含めばヒット
             if (("展望" in t2) and ("マップ" in t2 or "地図" in t2)) or ("viewpoint" in t2 and "map" in t2):
                 app.logger.info("[viewpoints] fallback hit: %r", text)
                 send_viewpoints_map(event)
                 return
         except Exception:
-            app.logger.exception("[viewpoints] fallback checker failed")
-        # --- セーフティここまで ---
+            app.logger.exception("[viewpoints] checker failed")
 
-        # ↓ 以下は既存処理のまま ↓
-        if _line_mute_gate(event, text):
-            return
-
-        t = text.lower()
-        if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
-            mode = _classify_mode(text)
-            uid = _line_target_id(event)
-            if "_LAST" in globals():
-                _LAST["mode"][uid] = mode
-            try:
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    _ask_location("現在地から近い順で探します。位置情報を送ってください。")
-                )
-            except Exception:
-                _reply_or_push(
-                    event,
-                    "現在地から近い順で探します。位置情報を送ってください。",
-                    force_push=True
-                )
-            return
-
-        reply = smalltalk_or_help_reply(text) or "受け取りました。『近く』と送ると現在地から検索できます。"
-        _reply_or_push(event, reply)
-
-
-    # --- 位置情報を受けたとき -------------------------------
-    @handler.add(MessageEvent, message=LocationMessage)
-    def on_location(event):
-        if _line_mute_gate(event, "location"):
-            return
-
-        lat = float(event.message.latitude)
-        lng = float(event.message.longitude)
-        uid  = _line_target_id(event)
-        mode = (_LAST["mode"].get(uid) if "_LAST" in globals() else None) or "all"
-        cats = _mode_to_cats(mode)
-
-        # 1) “待ってね” は push
+        # --- ③ 近く検索（どちらの実装も生かす） ------------------
+        # 3-1) 既存の早期ハンドラがあれば最優先で使う
         try:
-            _reply_or_push(event, pick_wait_message(uid), force_push=True)
+            _nearby_early = globals().get("_handle_nearby_text")
+            if callable(_nearby_early) and _nearby_early(event, text):
+                return
         except Exception:
-            pass
+            app.logger.exception("nearby early handler failed")
 
-        # 2) 検索
-        rows = _nearby_core(lat, lng, radius_m=1500, cat_filter=cats, limit=10)
-        if not rows:
-            # 結果本体は reply
-            try:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="近くで見つかりませんでした。半径を広げるか、キーワードを変えてみてください。"))
-            except Exception:
-                _reply_or_push(event, "近くで見つかりませんでした。半径を広げるか、キーワードを変えてみてください。", force_push=True)
-            return
-
-        flex = _nearby_flex(rows)
-        # 3) Flex を reply。失敗したら push でテキスト
+        # 3-2) キーワード版（旧 on_text の簡易実装も維持）
         try:
-            line_bot_api.reply_message(
-                event.reply_token,
-                FlexSendMessage(alt_text="近くのスポット", contents=flex)
-            )
-
-
+            t = (text or "").lower()
+            if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
+                mode = _classify_mode(text)
+                uid = _line_target_id(event)
+                if "_LAST" in globals():
+                    _LAST["mode"][uid] = mode
+                # 位置情報のお願いを reply/push
+                try:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        _ask_location("現在地から近い順で探します。位置情報を送ってください。")
+                    )
+                except Exception:
+                    _reply_or_push(
+                        event,
+                        "現在地から近い順で探します。位置情報を送ってください。",
+                        force_push=True
+                    )
+                return
         except Exception:
-            lines = [f"近くのスポット（上位{min(10, len(rows))}件）:"]
-            for it in rows[:10]:
-                url = it.get("google_url", "")
-                lines.append(f"- {it['title']}（{it['distance_m']}m） {url}")
-            _reply_or_push(event, "\n".join(lines), force_push=True)
+            app.logger.exception("nearby keyword handler failed")
+
+        # --- ④ 即答リンク（天気・交通） -------------------------
+        try:
+            w, ok = get_weather_reply(text)
+            app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
+            if ok and w:
+                _reply_or_push(event, w)
+                save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
+                return
+
+            tmsg, ok = get_transport_reply(text)
+            app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
+            if ok and tmsg:
+                _reply_or_push(event, tmsg)
+                save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
+                return
+        except Exception as e:
+            app.logger.exception(f"quick link reply failed: {e}")
+
+        # --- ⑤ スモールトーク/ヘルプ -----------------------------
+        try:
+            st = smalltalk_or_help_reply(text)
+            if st:
+                _reply_or_push(event, st)
+                save_qa_log(text, st, source="line", hit_db=False, extra={"kind":"smalltalk"})
+                return
+        except Exception:
+            app.logger.exception("smalltalk failed")
+
+        # --- ⑥ DB回答（画像→テキストを1回の reply にまとめる） ---
+        try:
+            ans, hit, img_url = _answer_from_entries_min(text)
+
+            msgs = []
+            if img_url:
+                msgs.append(ImageSendMessage(
+                    original_content_url=img_url,
+                    preview_image_url=img_url
+                ))
+            for p in _split_for_line(ans, LINE_SAFE_CHARS):
+                msgs.append(TextSendMessage(text=p))
+
+            line_bot_api.reply_message(event.reply_token, msgs)
+
+            joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
+            save_qa_log(text, joined, source="line", hit_db=hit)
+
+        except LineBotApiError as e:
+            global LAST_SEND_ERROR, SEND_ERROR_COUNT
+            SEND_ERROR_COUNT = globals().get("SEND_ERROR_COUNT", 0) + 1
+            LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+            app.logger.exception("LINE send failed")
+        except Exception as e:
+            app.logger.exception("answer flow failed: %s", e)
+            fallback, _ = build_refine_suggestions(text)
+            _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
+            save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
+    # ==== ここまで：統合ハンドラ ====
 
 
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
@@ -5166,123 +5192,86 @@ if handler:
 
         return False
 
-    @handler.add(MessageEvent, message=TextMessage)
-    def handle_message(event):
-        try:
-            text = getattr(event.message, "text", "") or ""
-        except Exception:
-            text = ""
 
-        # ① 近く検索の早期処理（ここで完結したら以降へ進まない）
-        try:
-            if _handle_nearby_text(event, text):
-                return
-        except Exception:
-            app.logger.exception("nearby early handler failed")
-
-        # ② ミュート/一時停止ゲート
-        try:
-            if _line_mute_gate(event, text):
-                return
-        except Exception:
-            app.logger.exception("_line_mute_gate failed")
-
-        # ③ 即答リンク（天気・交通）
-        try:
-            w, ok = get_weather_reply(text)
-            app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
-            if ok and w:
-                _reply_or_push(event, w)
-                save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
-                return
-
-            tmsg, ok = get_transport_reply(text)
-            app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
-            if ok and tmsg:
-                _reply_or_push(event, tmsg)
-                save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
-                return
-        except Exception as e:
-            app.logger.exception(f"quick link reply failed: {e}")
-
-        # ④ スモールトーク/ヘルプ
-        try:
-            st = smalltalk_or_help_reply(text)
-            if st:
-                _reply_or_push(event, st)
-                save_qa_log(text, st, source="line", hit_db=False, extra={"kind":"smalltalk"})
-                return
-        except Exception:
-            app.logger.exception("smalltalk failed")
-
-        # ⑤ DB回答（画像→テキストの順で 1 回の reply にまとめて送信）
-        try:
-            ans, hit, img_url = _answer_from_entries_min(text)
-
-            msgs = []
-            if img_url:
-                msgs.append(ImageSendMessage(
-                    original_content_url=img_url,
-                    preview_image_url=img_url
-                ))
-            for p in _split_for_line(ans, LINE_SAFE_CHARS):
-                msgs.append(TextSendMessage(text=p))
-
-            line_bot_api.reply_message(event.reply_token, msgs)
-
-            joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
-            save_qa_log(text, joined, source="line", hit_db=hit)
-
-        except LineBotApiError as e:
-            global LAST_SEND_ERROR, SEND_ERROR_COUNT
-            SEND_ERROR_COUNT += 1
-            LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
-            app.logger.exception("LINE send failed")
-        except Exception as e:
-            app.logger.exception("answer flow failed: %s", e)
-            fallback, _ = build_refine_suggestions(text)
-            _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
-            save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
-
-    # 位置情報メッセージを受け取ったら即検索
+    # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
     @handler.add(MessageEvent, message=LocationMessage)
-    def handle_location(event):
+    def on_location(event):
         try:
-            if _line_mute_gate(event, "（location）"):
+            # 0) ミュート／一時停止ゲート
+            if _line_mute_gate(event, "location"):
                 return
-        except Exception:
-            app.logger.exception("_line_mute_gate failed")
 
-        try:
-            user_id = _line_target_id(event)
+            uid = _line_target_id(event)
             lat = float(event.message.latitude)
             lng = float(event.message.longitude)
-            ts = time.time()
-            if user_id:
-                _LAST["location"][user_id] = (lat, lng, ts)
 
-            mode = _LAST["mode"].get(user_id, "all")
-            cats = _mode_to_cats(mode)
-            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
-            if not items:
-                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
-                return
-
-            flex = _nearby_flex(items)
-            if flex:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
-            else:
-                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
-
+            # 1) 直近位置を覚える（後半の機能）
             try:
-                save_qa_log("LOCATION", "nearby-flex", source="line", hit_db=True,
-                            extra={"kind":"nearby", "mode":mode, "lat":lat, "lng":lng})
+                if "_LAST" in globals() and isinstance(_LAST, dict):
+                    _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
             except Exception:
                 pass
 
+            # 2) ユーザーモード→カテゴリ
+            mode = (globals().get("_LAST", {}).get("mode", {}).get(uid)) or "all"
+            cats = _mode_to_cats(mode)
+
+            # 3) “少しお待ちください…” は push（reply_token を結果用に温存）
+            try:
+                _reply_or_push(event, pick_wait_message(uid), force_push=True)
+            except Exception:
+                pass
+
+            # 4) 検索（半径/件数は好みで調整）
+            radius_m = 2000   # ← 前半(1500m)と後半(2000m)のうち、ここでは 2000m を採用
+            limit    = 10     # ← 後半(8件)より少し広めに
+            rows = _nearby_core(lat, lng, radius_m=radius_m, cat_filter=cats, limit=limit)
+
+            if not rows:
+                # 5) 結果なし：reply → 失敗時は push
+                try:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        TextSendMessage(text="近くの候補が見つかりませんでした（半径を広げる/別のキーワードをお試しください）。")
+                    )
+                except Exception:
+                    _reply_or_push(
+                        event,
+                        "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）。",
+                        force_push=True
+                    )
+                return
+
+            # 6) Flex返信（失敗時はテキストにフォールバック）
+            flex = _nearby_flex(rows)
+            try:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    FlexSendMessage(alt_text="近くのスポット", contents=flex)
+                )
+            except Exception:
+                lines = [f"近くのスポット（上位{min(limit, len(rows))}件）:"]
+                for it in rows[:limit]:
+                    url = it.get("google_url", "")
+                    lines.append(f"- {it['title']}（{it['distance_m']}m） {url}")
+                _reply_or_push(event, "\n".join(lines), force_push=True)
+
+            # 7) ログ（後半の機能）
+            try:
+                save_qa_log(
+                    "LOCATION", "nearby-flex", source="line", hit_db=True,
+                    extra={"kind": "nearby", "mode": mode, "lat": lat, "lng": lng, "radius_m": radius_m, "limit": limit}
+                )
+            except Exception:
+                pass
+
+        except LineBotApiError as e:
+            globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
+            globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+            app.logger.exception("LINE send failed in on_location")
         except Exception as e:
-            app.logger.exception("location handler failed: %s", e)
-            _reply_or_push(event, "位置情報の処理に失敗しました。もう一度お試しください。")
+            app.logger.exception("on_location failed: %s", e)
+            _reply_or_push(event, "位置情報の処理でエラーが起きました。もう一度お試しください。", force_push=True)
 
 else:
     # LINE無効時のダミー（何もしない）
