@@ -3619,51 +3619,166 @@ def admin_import():
 # =========================
 #  ログ・未ヒット確認
 # =========================
+from datetime import datetime as _dt
+
+def _boolish_strict(v) -> bool:
+    """
+    hit_db の厳密判定:
+      True 扱い: True, 1, "1", "true", "yes", "y", "on"
+      False扱い: False, 0, "0", "false", "no", "n", "off", "", None
+      想定外の文字列は False（=未ヒット扱い）に倒す
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in {"1", "true", "yes", "y", "on"}:
+            return True
+        if s in {"0", "false", "no", "n", "off", ""}:
+            return False
+        return False
+    return False
+
+def _parse_ts(ts_str: str):
+    """ISO風タイムスタンプを datetime に。失敗時は最小値（ソート用）。"""
+    if not ts_str:
+        return _dt.min
+    s = (ts_str or "").strip()
+    try:
+        # "Z" が来る可能性も一応吸収
+        return _dt.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+            try:
+                return _dt.strptime(s[:19], fmt)
+            except Exception:
+                pass
+    return _dt.min
+
+
 @app.route("/admin/logs")
 @login_required
 def admin_logs():
     if session.get("role") != "admin":
         abort(403)
+
+    # 追加: 簡易検索 & 上限（既定300は従来と同じ体感）
+    q = (request.args.get("q") or "").strip().lower()
+    try:
+        limit = int(request.args.get("limit", "300"))
+    except Exception:
+        limit = 300
+    limit = max(1, min(limit, 2000))
+
     logs = []
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, encoding="utf-8") as f:
             for line in f:
                 try:
-                    logs.append(json.loads(line.strip()))
+                    log = json.loads((line or "").strip() or "{}")
+                    if q:
+                        blob = (
+                            (log.get("question") or "") + "\n" +
+                            (log.get("answer") or "")   + "\n" +
+                            (log.get("source") or "")   + "\n" +
+                            json.dumps(log.get("extra") or {}, ensure_ascii=False)
+                        ).lower()
+                        if q not in blob:
+                            continue
+                    logs.append(log)
                 except Exception:
                     pass
-    logs = list(itertools.islice(reversed(logs), 300))
-    return render_template("admin_logs.html", logs=logs)
+
+    # 新しい順に統一
+    logs.sort(key=lambda x: _parse_ts(x.get("timestamp")), reverse=True)
+    logs = logs[:limit]
+
+    # ?fmt=json でそのまま確認も可能
+    if (request.args.get("fmt") or "").lower() == "json":
+        return jsonify({"ok": True, "items": logs, "count": len(logs)})
+
+    return render_template("admin_logs.html", logs=logs, q=q, limit=limit, role=session.get("role",""))
+
 
 @app.route("/admin/unhit_questions")
 @login_required
 def admin_unhit_questions():
     if session.get("role") != "admin":
         abort(403)
-    unhit_logs = []
+
+    # 追加: 簡易検索 & 上限（既定100は従来と同じ）
+    q = (request.args.get("q") or "").strip().lower()
+    try:
+        limit = int(request.args.get("limit", "100"))
+    except Exception:
+        limit = 100
+    limit = max(1, min(limit, 2000))
+
+    unhit_all = []
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, encoding="utf-8") as f:
             for line in f:
                 try:
-                    log = json.loads(line.strip())
-                    if not log.get("hit_db"):
-                        unhit_logs.append(log)
+                    log = json.loads((line or "").strip() or "{}")
+                    # 厳密な未ヒット判定
+                    hit = _boolish_strict(log.get("hit_db", False))
+                    if hit:
+                        continue
+                    if q:
+                        blob = (
+                            (log.get("question") or "") + "\n" +
+                            (log.get("answer") or "")   + "\n" +
+                            (log.get("source") or "")   + "\n" +
+                            json.dumps(log.get("extra") or {}, ensure_ascii=False)
+                        ).lower()
+                        if q not in blob:
+                            continue
+                    unhit_all.append(log)
                 except Exception:
                     pass
-    unhit_logs = unhit_logs[-100:]
-    return render_template("admin_unhit.html", unhit_logs=unhit_logs, role=session.get("role",""))
+
+    # 新しい順で上位 limit 件
+    unhit_all.sort(key=lambda x: _parse_ts(x.get("timestamp")), reverse=True)
+    unhit_logs = unhit_all[:limit]
+
+    stats = {
+        "total_unhit": len(unhit_all),
+        "showing": len(unhit_logs),
+        "limit": limit,
+        "q": q,
+    }
+
+    # ?fmt=json でAPI返却（運用チェック用）
+    if (request.args.get("fmt") or "").lower() == "json":
+        return jsonify({"ok": True, "stats": stats, "items": unhit_logs})
+
+    return render_template(
+        "admin_unhit.html",
+        unhit_logs=unhit_logs,
+        stats=stats,
+        q=q,
+        limit=limit,
+        role=session.get("role",""),
+    )
+
 
 @app.route("/api/faq_suggest", methods=["POST"])
-@limit_deco(ASK_LIMITS)   # ★ これを追加
+@limit_deco(ASK_LIMITS)   # レート制限は維持
 @login_required
 def api_faq_suggest():
     if session.get("role") != "admin":
         abort(403)
-    q = (request.form.get("q") or (request.get_json(silent=True) or {}).get("q") or "").strip()
+
+    # フォーム or JSON どちらでも受け付け
+    payload = request.get_json(silent=True) or {}
+    q = (request.form.get("q") or payload.get("q") or "").strip()
     if not q:
         return jsonify({"ok": False, "error": "q is required"}), 400
     if not OPENAI_API_KEY:
         return jsonify({"ok": False, "error": "OPENAI_API_KEY not set"}), 500
+
     text = ai_suggest_faq(q, model=OPENAI_MODEL_PRIMARY) or ""
     return jsonify({"ok": True, "text": text})
 
@@ -3673,32 +3788,37 @@ def api_faq_suggest():
 def admin_add_entry():
     if session.get("role") != "admin":
         abort(403)
+
     entries = load_entries()
     title = request.form.get("title", "")
-    desc = request.form.get("desc", "")
-    tags = _split_lines_commas(request.form.get("tags", ""))
+    desc  = request.form.get("desc", "")
+    tags  = _split_lines_commas(request.form.get("tags", ""))
     areas = _split_lines_commas(request.form.get("areas", ""))
+
     if not title or not desc:
         flash("タイトルと説明は必須です")
         return redirect(url_for("admin_unhit_questions"))
-    entry = {
+
+    entry = _norm_entry({
         "title": title,
         "desc": desc,
         "address": "",
         "map": "",
         "tags": tags,
         "areas": areas
-    }
-    entry = _norm_entry(entry)
+    })
     entries.append(entry)
     save_entries(entries)
+
     try:
+        # その場で触れたタグからシノニムを軽く更新（失敗しても致命ではない）
         auto_update_synonyms_from_entries([entry])
         flash("DBに追加しました（シノニムも自動更新）")
     except Exception:
         flash("DBに追加しました（シノニム自動更新でエラーが出ました。ログを確認してください）")
 
     return redirect(url_for("admin_entry"))
+# =========================
 
 
 
