@@ -1279,8 +1279,83 @@ if line_bot_api is not None:
 if _line_enabled() and handler:
     # 既存の厳密判定の「少し後ろ」〜 mute判定の「前」に追加
     def _hit_viewpoints_loose(s: str) -> bool:
-        t = _n(s)  # NFKC + 空白圧縮 + lower
-        return (("展望" in t) and ("マップ" in t or "地図" in t)) or ("viewpoint" in t)
+        t = _n(s)
+        return (("展望" in t) and ("マップ" in t or "地図" in t)) or ("viewpoint" in t and "map" in t)
+
+    # 近く検索の早期処理だけ残す（※デコレータなし）
+    def _handle_nearby_text(event, text):
+        """「近く」系テキストの早期処理。処理したら True を返す。"""
+        # 停止/再開・全体停止のガード
+        try:
+            if _line_mute_gate(event, text):
+                return True
+        except Exception:
+            app.logger.exception("_line_mute_gate failed")
+
+        t = (text or "").strip()
+        user_id = _line_target_id(event)
+
+        # 開発用ショートカット: "near 32.6977,128.8445"
+        if t.lower().startswith("near "):
+            try:
+                a, b = t[5:].replace("，", ",").split(",", 1)
+                lat, lng = float(a), float(b)
+            except Exception:
+                _reply_or_push(event, "書式: near 32.6977,128.8445")
+                return True
+
+            mode = _LAST["mode"].get(user_id, "all")
+            cats = _mode_to_cats(mode)
+            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
+            if not items:
+                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
+                return True
+
+            flex = _nearby_flex(items)
+            if flex:
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+            else:
+                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
+            try:
+                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
+            except Exception:
+                pass
+            return True
+
+        # 自然文（近く/周辺/付近）
+        if any(k in t for k in ["近く", "周辺", "付近"]):
+            mode = _classify_mode(t)
+            if user_id:
+                _LAST["mode"][user_id] = mode
+
+            last = _LAST["location"].get(user_id)
+            if not last:
+                # まずは位置情報をもらう
+                try:
+                    line_bot_api.reply_message(event.reply_token, _ask_location())
+                except Exception:
+                    _reply_or_push(event, "現在地を取得できませんでした。位置情報を送ってください。")
+                return True
+
+            lat, lng, _ts = last
+            cats = _mode_to_cats(mode)
+            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
+            if not items:
+                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
+                return True
+
+            flex = _nearby_flex(items)
+            if flex:
+                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+            else:
+                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
+            try:
+                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
+            except Exception:
+                pass
+            return True
+
+        return False
 
     # ==== ここから：統合した TextMessage ハンドラ（1本だけ残す） ====
     @handler.add(MessageEvent, message=TextMessage)
@@ -1405,6 +1480,87 @@ if _line_enabled() and handler:
             _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
             save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
     # ==== ここまで：統合ハンドラ ====
+
+
+    # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
+    @handler.add(MessageEvent, message=LocationMessage)
+    def on_location(event):
+        try:
+            # 0) ミュート／一時停止ゲート
+            if _line_mute_gate(event, "location"):
+                return
+
+            uid = _line_target_id(event)
+            lat = float(event.message.latitude)
+            lng = float(event.message.longitude)
+
+            # 1) 直近位置を覚える（後半の機能）
+            try:
+                if "_LAST" in globals() and isinstance(_LAST, dict):
+                    _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
+            except Exception:
+                pass
+
+            # 2) ユーザーモード→カテゴリ
+            mode = (globals().get("_LAST", {}).get("mode", {}).get(uid)) or "all"
+            cats = _mode_to_cats(mode)
+
+            # 3) “少しお待ちください…” は push（reply_token を結果用に温存）
+            try:
+                _reply_or_push(event, pick_wait_message(uid), force_push=True)
+            except Exception:
+                pass
+
+            # 4) 検索（半径/件数は好みで調整）
+            radius_m = 2000   # ← 前半(1500m)と後半(2000m)のうち、ここでは 2000m を採用
+            limit    = 10     # ← 後半(8件)より少し広めに
+            rows = _nearby_core(lat, lng, radius_m=radius_m, cat_filter=cats, limit=limit)
+
+            if not rows:
+                # 5) 結果なし：reply → 失敗時は push
+                try:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        TextSendMessage(text="近くの候補が見つかりませんでした（半径を広げる/別のキーワードをお試しください）。")
+                    )
+                except Exception:
+                    _reply_or_push(
+                        event,
+                        "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）。",
+                        force_push=True
+                    )
+                return
+
+            # 6) Flex返信（失敗時はテキストにフォールバック）
+            flex = _nearby_flex(rows)
+            try:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    FlexSendMessage(alt_text="近くのスポット", contents=flex)
+                )
+            except Exception:
+                lines = [f"近くのスポット（上位{min(limit, len(rows))}件）:"]
+                for it in rows[:limit]:
+                    url = it.get("google_url", "")
+                    lines.append(f"- {it['title']}（{it['distance_m']}m） {url}")
+                _reply_or_push(event, "\n".join(lines), force_push=True)
+
+            # 7) ログ（後半の機能）
+            try:
+                save_qa_log(
+                    "LOCATION", "nearby-flex", source="line", hit_db=True,
+                    extra={"kind": "nearby", "mode": mode, "lat": lat, "lng": lng, "radius_m": radius_m, "limit": limit}
+                )
+            except Exception:
+                pass
+
+        except LineBotApiError as e:
+            globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
+            globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+            app.logger.exception("LINE send failed in on_location")
+        except Exception as e:
+            app.logger.exception("on_location failed: %s", e)
+            _reply_or_push(event, "位置情報の処理でエラーが起きました。もう一度お試しください。", force_push=True)
 
 
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
@@ -5050,235 +5206,6 @@ def _answer_from_entries_rich(question: str):
 
     txt = "\n".join(lines)
     return [TextSendMessage(text=p) for p in _split_for_line(txt, LINE_SAFE_CHARS)], True
-
-
-# --- メッセージ受信 ---
-# === 修正版: LINEメッセージハンドラ（コピペで上書き） ===
-if handler:
-    # 追加の import（この if ブロックの先頭でOK）
-    from linebot.models import LocationMessage, FlexSendMessage, LocationAction
-
-    # 近く検索用の軽量メモ
-    _LAST = {
-        "mode": {},       # user_id -> 'all' | 'tourism' | 'shop'
-        "location": {},   # user_id -> (lat, lng, ts)
-    }
-
-    def _classify_mode(text):
-        t = (text or "").lower()
-        if any(k in t for k in ["観光", "観る", "名所", "景勝", "スポット"]):
-            return "tourism"
-        if any(k in t for k in ["店", "お店", "飲食", "食べる", "呑む", "ショップ", "買い物", "カフェ", "レストラン", "宿泊", "ホテル", "旅館"]):
-            return "shop"
-        return "all"
-
-    def _mode_to_cats(mode):
-        if mode == "tourism":
-            return {"観光", "イベント", "癒し"}
-        if mode == "shop":
-            return {"食べる・呑む", "ショップ", "泊まる", "生活", "きれい"}
-        return None  # all
-
-    def _nearby_flex(items):
-        """/api/nearby 相当の辞書配列から Flex carousel を作る"""
-        bubbles = []
-        for it in items[:10]:  # Flex の見やすさ的に最大10
-            body_contents = [
-                {"type": "text", "text": it.get("title") or "無題", "weight": "bold", "wrap": True},
-                {"type": "text", "text": f'{it.get("distance_m", 0)} m ・ {it.get("category","")}', "size": "sm", "color": "#888888"},
-            ]
-            if it.get("address"):
-                body_contents.append({"type": "text", "text": it["address"], "size": "sm", "wrap": True, "color": "#666666"})
-
-            bubble = {
-                "type": "bubble",
-                **({"hero": {
-                    "type": "image",
-                    "url": it.get("image_thumb",""),
-                    "size": "full",
-                    "aspectMode": "cover",
-                    "aspectRatio": "16:9"
-                }} if it.get("image_thumb") else {}),
-                "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body_contents},
-                "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
-                    {"type": "button", "style": "primary",
-                     "action": {"type": "uri", "label": "地図で開く", "uri": it.get("google_url","")}}
-                ]}
-            }
-            if it.get("mymap_url"):
-                bubble["footer"]["contents"].append(
-                    {"type": "button", "style": "secondary",
-                     "action": {"type": "uri", "label": "周辺をマイマップ", "uri": it["mymap_url"]}}
-                )
-            bubbles.append(bubble)
-        if not bubbles:
-            return None
-        return {"type": "carousel", "contents": bubbles}
-
-    def _ask_location(text="現在地から近い順で探します。位置情報を送ってください。"):
-        return TextSendMessage(
-            text=text,
-            quick_reply=QuickReply(items=[QuickReplyButton(action=LocationAction(label="現在地を送る"))])
-        )
-
-    def _handle_nearby_text(event, text):
-        """「近く」系テキストの早期処理。処理したら True を返す。"""
-        # 停止/再開・全体停止のガード
-        try:
-            if _line_mute_gate(event, text):
-                return True
-        except Exception:
-            app.logger.exception("_line_mute_gate failed")
-
-        t = (text or "").strip()
-        user_id = _line_target_id(event)
-
-        # 開発用ショートカット: "near 32.6977,128.8445"
-        if t.lower().startswith("near "):
-            try:
-                a, b = t[5:].replace("，", ",").split(",", 1)
-                lat, lng = float(a), float(b)
-            except Exception:
-                _reply_or_push(event, "書式: near 32.6977,128.8445")
-                return True
-            mode = _LAST["mode"].get(user_id, "all")
-            cats = _mode_to_cats(mode)
-            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
-            if not items:
-                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
-                return True
-            flex = _nearby_flex(items)
-            if flex:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
-            else:
-                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
-            try:
-                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
-            except Exception:
-                pass
-            return True
-
-        # 自然文（近く/周辺/付近）
-        if any(k in t for k in ["近く", "周辺", "付近"]):
-            mode = _classify_mode(t)
-            if user_id:
-                _LAST["mode"][user_id] = mode
-            last = _LAST["location"].get(user_id)
-            if not last:
-                # まずは位置情報をもらう
-                try:
-                    line_bot_api.reply_message(event.reply_token, _ask_location())
-                except Exception:
-                    _reply_or_push(event, "現在地を取得できませんでした。位置情報を送ってください。")
-                return True
-
-            lat, lng, _ts = last
-            cats = _mode_to_cats(mode)
-            items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
-            if not items:
-                _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
-                return True
-
-            flex = _nearby_flex(items)
-            if flex:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
-            else:
-                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
-            try:
-                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
-            except Exception:
-                pass
-            return True
-
-        return False
-
-
-    # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
-    @handler.add(MessageEvent, message=LocationMessage)
-    def on_location(event):
-        try:
-            # 0) ミュート／一時停止ゲート
-            if _line_mute_gate(event, "location"):
-                return
-
-            uid = _line_target_id(event)
-            lat = float(event.message.latitude)
-            lng = float(event.message.longitude)
-
-            # 1) 直近位置を覚える（後半の機能）
-            try:
-                if "_LAST" in globals() and isinstance(_LAST, dict):
-                    _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
-            except Exception:
-                pass
-
-            # 2) ユーザーモード→カテゴリ
-            mode = (globals().get("_LAST", {}).get("mode", {}).get(uid)) or "all"
-            cats = _mode_to_cats(mode)
-
-            # 3) “少しお待ちください…” は push（reply_token を結果用に温存）
-            try:
-                _reply_or_push(event, pick_wait_message(uid), force_push=True)
-            except Exception:
-                pass
-
-            # 4) 検索（半径/件数は好みで調整）
-            radius_m = 2000   # ← 前半(1500m)と後半(2000m)のうち、ここでは 2000m を採用
-            limit    = 10     # ← 後半(8件)より少し広めに
-            rows = _nearby_core(lat, lng, radius_m=radius_m, cat_filter=cats, limit=limit)
-
-            if not rows:
-                # 5) 結果なし：reply → 失敗時は push
-                try:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text="近くの候補が見つかりませんでした（半径を広げる/別のキーワードをお試しください）。")
-                    )
-                except Exception:
-                    _reply_or_push(
-                        event,
-                        "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）。",
-                        force_push=True
-                    )
-                return
-
-            # 6) Flex返信（失敗時はテキストにフォールバック）
-            flex = _nearby_flex(rows)
-            try:
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    FlexSendMessage(alt_text="近くのスポット", contents=flex)
-                )
-            except Exception:
-                lines = [f"近くのスポット（上位{min(limit, len(rows))}件）:"]
-                for it in rows[:limit]:
-                    url = it.get("google_url", "")
-                    lines.append(f"- {it['title']}（{it['distance_m']}m） {url}")
-                _reply_or_push(event, "\n".join(lines), force_push=True)
-
-            # 7) ログ（後半の機能）
-            try:
-                save_qa_log(
-                    "LOCATION", "nearby-flex", source="line", hit_db=True,
-                    extra={"kind": "nearby", "mode": mode, "lat": lat, "lng": lng, "radius_m": radius_m, "limit": limit}
-                )
-            except Exception:
-                pass
-
-        except LineBotApiError as e:
-            globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-            globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-            app.logger.exception("LINE send failed in on_location")
-        except Exception as e:
-            app.logger.exception("on_location failed: %s", e)
-            _reply_or_push(event, "位置情報の処理でエラーが起きました。もう一度お試しください。", force_push=True)
-
-else:
-    # LINE無効時のダミー（何もしない）
-    def handle_message(event):
-        return
-    def handle_location(event):
-        return
 
 @app.route("/admin/manual")
 @login_required
