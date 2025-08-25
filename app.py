@@ -1267,7 +1267,7 @@ if _line_enabled() and handler:
     def on_text(event):
         text = (event.message.text or "").strip()
 
-        # === 展望所マップ（先頭で最優先処理） ===
+        # === 展望所マップ（最優先で処理） ===
         try:
             if _is_viewpoints_cmd(text):
                 app.logger.info("[viewpoints] hit: %r", text)
@@ -1276,12 +1276,10 @@ if _line_enabled() and handler:
         except Exception:
             app.logger.exception("[viewpoints] handler failed")
 
-        # ↓ 以下は既存の処理をそのまま残す ↓
-        # ミュート/一時停止ガード
+        # ↓ 以下は既存処理のまま ↓
         if _line_mute_gate(event, text):
             return
 
-        # 「近く」キーワードで位置情報依頼
         t = text.lower()
         if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
             mode = _classify_mode(text)
@@ -1301,7 +1299,6 @@ if _line_enabled() and handler:
                 )
             return
 
-        # 既存の簡易ヘルプ or 既定レス
         reply = smalltalk_or_help_reply(text) or "受け取りました。『近く』と送ると現在地から検索できます。"
         _reply_or_push(event, reply)
 
@@ -2001,7 +1998,6 @@ def _line_mute_gate(event, text: str) -> bool:
     return False
 
 # ==== 展望所マップ: コマンド検出（表記ゆれ対応） ====
-# 例: 「展望所マップ」「展望 所 マップ」「展望台マップ？」「VIEWPOINTS MAP」
 _CMD_RE_VIEWPOINTS = re.compile(
     r"(?:展望\s*(?:所|台)?\s*(?:マップ|地図))|(?:viewpoints?\s*map)",
     re.I
@@ -2012,7 +2008,7 @@ def _is_viewpoints_cmd(text: str) -> bool:
     表記ゆれ（NFKC・大小文字・全半角・スペース・句読点）を吸収して判定
     """
     t = _norm_cmd(text)  # NFKC + lower + trim
-    # 単語間スペース・全角スペース・スラッシュ類を除去して緩く判定
+    # 単語間スペース・全角スペース・句読点/記号を除去して緩く判定
     t = re.sub(r"[ \t\u3000／/、。,．。!！?？\-ー〜~]+", "", t)
     return bool(_CMD_RE_VIEWPOINTS.search(t))
 
