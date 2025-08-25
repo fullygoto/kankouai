@@ -1093,6 +1093,25 @@ app.jinja_env.globals["safe_url_for"] = safe_url_for
 # 明示的に署名URLを作りたいときはこれも使えます（任意）
 app.jinja_env.globals["signed_image_url"] = lambda fn, wm=False: build_signed_image_url(fn, wm=wm, external=False)
 
+@app.route("/_debug/viewpoints")
+def _dbg_viewpoints():
+    return jsonify({
+        "VIEWPOINTS_URL": VIEWPOINTS_URL,
+        "VIEWPOINTS_MID": VIEWPOINTS_MID,
+        "VIEWPOINTS_LL": VIEWPOINTS_LL,
+        "VIEWPOINTS_ZOOM": VIEWPOINTS_ZOOM,
+        "computed_url": viewpoints_map_url(),
+    })
+
+@app.route("/_debug/viewpoints_test")
+def _dbg_viewpoints_test():
+    q = request.args.get("q","")
+    try:
+        hit = _is_viewpoints_cmd(q)
+    except Exception as e:
+        hit = f"ERROR: {e}"
+    return jsonify({"q": q, "hit": bool(hit)})
+
 # =========================
 #  環境変数 / モデル
 # =========================
@@ -6312,24 +6331,6 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
             pass
 
 
-@app.route("/_debug/viewpoints")
-def _dbg_viewpoints():
-    return jsonify({
-        "VIEWPOINTS_URL": VIEWPOINTS_URL,
-        "VIEWPOINTS_MID": VIEWPOINTS_MID,
-        "VIEWPOINTS_LL": VIEWPOINTS_LL,
-        "VIEWPOINTS_ZOOM": VIEWPOINTS_ZOOM,
-        "computed_url": viewpoints_map_url(),
-    })
-
-@app.route("/_debug/viewpoints_test")
-def _dbg_viewpoints_test():
-    q = request.args.get("q","")
-    try:
-        hit = _is_viewpoints_cmd(q)
-    except Exception as e:
-        hit = f"ERROR: {e}"
-    return jsonify({"q": q, "hit": bool(hit)})
 
 
 # =========================
