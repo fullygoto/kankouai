@@ -350,6 +350,22 @@ def _find_map_by_text(text: str):
         pass
     return None
 
+# ★ シリーズ一覧をテキスト1通にまとめるヘルパー（マップ本体のFlexとセットで使う）
+def _series_text_for_reply(exclude_key: str | None = None) -> str:
+    lines = ["他にもこのようなマップがあります。"]
+    for m in MAP_SERIES:
+        if exclude_key and m.get("key") == exclude_key:
+            continue
+        title = (m.get("title") or "マップ").strip()
+        # URL が作れなければ「後日追加」表記で載せる
+        url_fn = m.get("url_fn")
+        url_ok = (url_fn() if callable(url_fn) else "") != ""
+        if url_ok:
+            lines.append(f"・{title}")
+        else:
+            lines.append(f"・{title}（後日追加）")
+    lines.append("マップを見たい場合はそのマップの名前を送ってください。")
+    return "\n".join(lines)
 
 def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -> str:
     """
@@ -1530,20 +1546,22 @@ if _line_enabled() and handler:
 
         # --- ② マップシリーズ（展望所・海水浴場 ほか） ----------------
         try:
-            # 要望に合うマップを特定
             mm = _find_map_by_text(text)
             if mm:
                 url_fn = mm.get("url_fn")
                 url = url_fn() if callable(url_fn) else ""
 
                 msgs = []
+
+                # 1) ヒットしたマップだけを Flex（1枚）で返信
                 if url:
                     flex_main = _flex_mymap(
                         title = mm.get("title") or "マップ",
                         url   = url,
-                        thumb = (mm.get("thumb") or "").strip(),
+                        thumb = mm.get("thumb") or "",
                         subtitle = (mm.get("subtitle") or mm.get("desc") or "").strip() or None
                     )
+                    # 念のため空text防止チェック
                     if isinstance(flex_main, dict) and flex_main.get("contents"):
                         msgs.append(FlexSendMessage(
                             alt_text = mm.get("alt") or (mm.get("title") or "マップ"),
@@ -1551,40 +1569,17 @@ if _line_enabled() and handler:
                         ))
                     else:
                         msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}はこちら：\n{url}"))
+                else:
+                    # URL が作れない場合はテキストのみ
+                    msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}は現在準備中です。"))
 
-                # ヒットしたマップを除外してシリーズを提案
-                car = _flex_map_series_carousel(exclude_key=mm.get("key"))
-                if isinstance(car, dict) and car.get("contents"):
-                    msgs.append(FlexSendMessage(
-                        alt_text="五島列島マップシリーズ",
-                        contents=car
-                    ))
-                # 呼び出しワード（空を除外し最大4つ）
-                words = []
-                for m in MAP_SERIES:
-                    if m.get("key") == mm.get("key"):
-                        continue
-                    ex = [e for e in (m.get("examples") or []) if e]
-                    if ex:
-                        words.append("『" + " / ".join(ex[:2]) + "』")
-                if words:
-                    msgs.append(TextSendMessage(
-                        text="開くための合言葉の例：\n" + " / ".join(words[:4])
-                    ))
+                # 2) 残りのシリーズは「テキスト1通」にまとめて案内
+                series_text = _series_text_for_reply(exclude_key=mm.get("key"))
+                msgs.append(TextSendMessage(text=series_text))
 
-                try:
-                    if msgs:
-                        line_bot_api.reply_message(event.reply_token, msgs[:5])
-                    else:
-                        _reply_or_push(event, "マップを用意できませんでした。『マップ一覧』と送るとシリーズをご案内します。", force_push=True)
-                    return
-                except LineBotApiError:
-                    app.logger.exception("[map series] reply failed; fallback to push")
-                    if url:
-                        _reply_or_push(event, f"{mm.get('title','マップ')}はこちら：\n{url}", force_push=True)
-                    else:
-                        _reply_or_push(event, "『マップ一覧』と送るとシリーズをご案内します。", force_push=True)
-                    return
+                # 1回の reply でまとめて送信 → 終了
+                line_bot_api.reply_message(event.reply_token, msgs[:5])
+                return
         except Exception:
             app.logger.exception("[map series] handler failed")
 
