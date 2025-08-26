@@ -216,34 +216,70 @@ def beach_map_url() -> str:
     return ""
 
 # ==== 共通フレックス（タイトル・URL・サムネを受け取る） =========
-def _flex_mymap(title: str, url: str, thumb_name: str | None = None):
+def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = None):
+    """
+    単一マップのバブル or カルーセル（1枚）。
+    subtitle が空/None のときは2行目を入れない（LINEの空text禁止対策）。
+    """
+    title = (title or "マップ").strip()
     if not url:
         return None
-    hero = None
-    if thumb_name:
-        try:
-            hero = {
-                "type": "image",
-                "url": build_signed_image_url(thumb_name, wm=True, external=True),
-                "size": "full", "aspectMode": "cover", "aspectRatio": "16:9"
-            }
-        except Exception:
-            hero = None
-    body = {
-        "type": "box", "layout": "vertical", "spacing": "sm",
-        "contents": [
-            {"type":"text","text":title,"weight":"bold","wrap":True},
-            {"type":"text","text":"Googleマイマップで開きます。","size":"sm","color":"#666666","wrap":True},
-        ]
+
+    body_contents = [
+        {"type": "text", "text": title, "weight": "bold", "wrap": True},
+    ]
+    if subtitle:
+        st = str(subtitle).strip()
+        if st:
+            body_contents.append({"type": "text", "text": st, "size": "sm", "color": "#666666", "wrap": True})
+
+    bubble = {
+        "type": "bubble",
+        **({"hero": {"type":"image","url":thumb,"size":"full","aspectMode":"cover","aspectRatio":"16:9"}} if thumb else {}),
+        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body_contents},
+        "footer": {
+            "type":"box","layout":"vertical","spacing":"sm","contents":[
+                {"type":"button","style":"primary","action":{"type":"uri","label":"マップを開く","uri":url}}
+            ]
+        }
     }
-    footer = {
-        "type":"box","layout":"vertical","spacing":"sm","contents":[
-            {"type":"button","style":"primary",
-             "action":{"type":"uri","label":"マップを開く","uri":url}}
-        ]
-    }
-    bubble = {"type":"bubble", **({"hero":hero} if hero else {}), "body":body, "footer":footer}
-    return {"type":"carousel","contents":[bubble]}
+    return {"type": "carousel", "contents": [bubble]}
+
+def _flex_map_series_carousel(exclude_key: str | None = None):
+    """
+    MAP_SERIES からカルーセルを作成。subtitle が空なら1行のみにする。
+    URL が生成できない要素はスキップ。
+    """
+    bubbles = []
+    for m in MAP_SERIES:
+        if exclude_key and m.get("key") == exclude_key:
+            continue
+        url_fn = m.get("url_fn")
+        url = url_fn() if callable(url_fn) else ""
+        if not url:
+            continue
+
+        title = (m.get("title") or "マップ").strip()
+        subtitle = (m.get("subtitle") or m.get("desc") or "").strip()
+        thumb = (m.get("thumb") or "").strip()
+
+        body = [{"type":"text","text":title,"weight":"bold","wrap":True}]
+        if subtitle:
+            body.append({"type":"text","text":subtitle,"size":"sm","color":"#666666","wrap":True})
+
+        bubble = {
+            "type":"bubble",
+            **({"hero":{"type":"image","url":thumb,"size":"full","aspectMode":"cover","aspectRatio":"16:9"}} if thumb else {}),
+            "body":{"type":"box","layout":"vertical","spacing":"sm","contents":body},
+            "footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[
+                {"type":"button","style":"primary","action":{"type":"uri","label":"マップを開く","uri":url}}
+            ]}
+        }
+        bubbles.append(bubble)
+
+    if not bubbles:
+        return None
+    return {"type":"carousel","contents":bubbles}
 
 # ==== マップシリーズ定義（ここに増やしていける） =================
 MAP_SERIES = [
@@ -1490,57 +1526,65 @@ if _line_enabled() and handler:
             # 要望に合うマップを特定
             mm = _find_map_by_text(text)
             if mm:
-                # URLビルダーの安全呼び出し
+                # URLを安全に取得
                 url_fn = mm.get("url_fn")
                 url = url_fn() if callable(url_fn) else ""
 
-                # URL未設定のときはエラーメッセージ + シリーズ紹介にフォールバック
-                if not url:
-                    msgs = [TextSendMessage(text=f"{mm['title']}のURLが未設定です。設定をご確認ください。")]
-                    car = _flex_map_series_carousel(exclude_key=mm.get("key"))
-                    if car:
-                        msgs.append(FlexSendMessage(
-                            alt_text="他にもこのようなマップがあります",
-                            contents=car
-                        ))
-                    line_bot_api.reply_message(event.reply_token, msgs[:5])
-                    return
-
+                # URLが無いマップは reply せず、シリーズ紹介だけに切替
                 msgs = []
+                if url:
+                    # 1) 該当マップ
+                    flex_main = _flex_mymap(
+                        title = mm.get("title") or "マップ",
+                        url   = url,
+                        thumb = mm.get("thumb") or "",
+                        subtitle = (mm.get("subtitle") or mm.get("desc") or "").strip() or None  # ← 空は入れない
+                    )
+                    if isinstance(flex_main, dict) and flex_main.get("contents"):
+                        msgs.append(FlexSendMessage(
+                            alt_text = mm.get("alt") or (mm.get("title") or "マップ"),
+                            contents = flex_main
+                        ))
+                    else:
+                        msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}はこちら：\n{url}"))
 
-                # 1) まず「該当マップ」を返信
-                flex_main = _flex_mymap(mm["title"], url, mm.get("thumb") or "")
-                if flex_main:
-                    # alt_text は短めに
-                    msgs.append(FlexSendMessage(alt_text=mm.get("alt", mm["title"]), contents=flex_main))
-                else:
-                    msgs.append(TextSendMessage(text=f"{mm['title']}はこちら：\n{url}"))
-
-                # 2) 続けて「他のマップもどうぞ」カルーセル（今回ヒットを除外）
+                # 2) 「他のマップもどうぞ」カルーセル（今回ヒットを除外）
                 car = _flex_map_series_carousel(exclude_key=mm.get("key"))
-                if car:
+                if isinstance(car, dict) and car.get("contents"):
                     msgs.append(FlexSendMessage(
                         alt_text="他にもこのようなマップがあります",
                         contents=car
                     ))
 
-                # 3) 呼び出しワードの例もテキストで追記（長くなりすぎないように2〜4個）
+                # 3) 呼び出しワード例（最大4つ）
                 words = []
                 for m in MAP_SERIES:
                     if m.get("key") == mm.get("key"):
                         continue
-                    ex = (m.get("examples") or [])[:2]
+                    ex = [e for e in (m.get("examples") or []) if e]  # 空は除外
                     if ex:
-                        words.append("『" + " / ".join(ex) + "』")
+                        words.append("『" + " / ".join(ex[:2]) + "』")
                 if words:
-                    # 文字数対策で最大4つまで
                     msgs.append(TextSendMessage(
                         text="他にもこのようなマップがあります。\n" + " / ".join(words[:4])
                     ))
 
-                # LINEの1回のreplyは最大5通
-                line_bot_api.reply_message(event.reply_token, msgs[:5])
-                return
+                # 送信（5通上限）
+                try:
+                    if msgs:
+                        line_bot_api.reply_message(event.reply_token, msgs[:5])
+                    else:
+                        # 何も用意できなかった場合の保険
+                        _reply_or_push(event, "マップを用意できませんでした。『マップ一覧』と送るとシリーズをご案内します。", force_push=True)
+                    return
+                except LineBotApiError:
+                    # reply で落ちたら push でフォロー（同一イベントで2回 reply を避ける）
+                    app.logger.exception("[map series] reply failed; fallback to push")
+                    if url:
+                        _reply_or_push(event, f"{mm.get('title','マップ')}はこちら：\n{url}", force_push=True)
+                    else:
+                        _reply_or_push(event, "『マップ一覧』と送るとシリーズをご案内します。", force_push=True)
+                    return
         except Exception:
             app.logger.exception("[map series] handler failed")
 
