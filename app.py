@@ -177,6 +177,121 @@ def send_viewpoints_map(event):
     _reply_or_push(event, f"展望所マップはこちら：\n{url}")
 
 
+# ==== My Maps 共通（VIEWER化） ==================================
+def _normalize_mymaps_url(u: str) -> str:
+    if not u:
+        return ""
+    u = u.strip()
+    u = re.sub(r"/edit(\?|$)", r"/viewer\1", u)  # /edit → /viewer
+    if "femb=1" not in u:
+        u += ("&" if "?" in u else "?") + "femb=1"
+    return u
+
+# ==== 海水浴場マップ（My Maps 専用） ============================
+BEACHMAP_URL  = os.getenv("BEACHMAP_URL", "").strip()
+BEACHMAP_MID  = os.getenv("BEACHMAP_MID", "").strip()
+BEACHMAP_LL   = os.getenv("BEACHMAP_LL", "").strip()
+BEACHMAP_ZOOM = os.getenv("BEACHMAP_ZOOM", "11").strip()
+BEACHMAP_THUMB = os.getenv("BEACHMAP_THUMB", "").strip()
+
+def beach_map_url() -> str:
+    if BEACHMAP_URL:
+        return _normalize_mymaps_url(BEACHMAP_URL)
+    if BEACHMAP_MID:
+        base = f"https://www.google.com/maps/d/viewer?mid={_u.quote(BEACHMAP_MID)}&femb=1"
+        ll = ""
+        if BEACHMAP_LL:
+            try:
+                lat, lng = [s.strip() for s in BEACHMAP_LL.split(",", 1)]
+                ll = f"&ll={_u.quote(lat)},{_u.quote(lng)}"
+            except Exception:
+                ll = ""
+        z = ""
+        if BEACHMAP_ZOOM:
+            try:
+                z = f"&z={int(BEACHMAP_ZOOM)}"
+            except Exception:
+                z = ""
+        return base + ll + z
+    return ""
+
+# ==== 共通フレックス（タイトル・URL・サムネを受け取る） =========
+def _flex_mymap(title: str, url: str, thumb_name: str | None = None):
+    if not url:
+        return None
+    hero = None
+    if thumb_name:
+        try:
+            hero = {
+                "type": "image",
+                "url": build_signed_image_url(thumb_name, wm=True, external=True),
+                "size": "full", "aspectMode": "cover", "aspectRatio": "16:9"
+            }
+        except Exception:
+            hero = None
+    body = {
+        "type": "box", "layout": "vertical", "spacing": "sm",
+        "contents": [
+            {"type":"text","text":title,"weight":"bold","wrap":True},
+            {"type":"text","text":"Googleマイマップで開きます。","size":"sm","color":"#666666","wrap":True},
+        ]
+    }
+    footer = {
+        "type":"box","layout":"vertical","spacing":"sm","contents":[
+            {"type":"button","style":"primary",
+             "action":{"type":"uri","label":"マップを開く","uri":url}}
+        ]
+    }
+    bubble = {"type":"bubble", **({"hero":hero} if hero else {}), "body":body, "footer":footer}
+    return {"type":"carousel","contents":[bubble]}
+
+# ==== マップシリーズ定義（ここに増やしていける） =================
+MAP_SERIES = [
+    {
+        "key": "viewpoints",
+        "title": "五島列島 展望所マップ",
+        "url_fn": viewpoints_map_url,
+        "thumb":  os.getenv("VIEWPOINTS_THUMB","").strip(),
+        "keywords": ["展望", "展望所", "展望台", "viewpoint"],
+        "examples": ["展望所マップ", "展望台の地図"]
+    },
+    {
+        "key": "beach",
+        "title": "五島列島 海水浴場マップ",
+        "url_fn": beach_map_url,
+        "thumb":  BEACHMAP_THUMB,
+        "keywords": ["海水浴", "海水浴場", "ビーチ", "海水浴マップ", "beach"],
+        "examples": ["海水浴場マップ", "ビーチの地図"]
+    },
+]
+
+def _find_map_by_text(text: str):
+    t = _n(text)  # NFKC + lower + 空白圧縮
+    has_map_word = ("マップ" in t) or ("地図" in t) or (" map" in t)
+    for m in MAP_SERIES:
+        if any(k in t for k in m["keywords"]) and has_map_word:
+            return m
+    try:
+        if _is_viewpoints_cmd(text):
+            return next(ms for ms in MAP_SERIES if ms["key"]=="viewpoints")
+    except Exception:
+        pass
+    return None
+
+def _flex_map_series_carousel():
+    bubbles = []
+    for m in MAP_SERIES:
+        url = m["url_fn"]()
+        if not url:
+            continue
+        card = _flex_mymap(m["title"], url, m.get("thumb") or "")
+        if card and card.get("contents"):
+            bubbles.append(card["contents"][0])
+    if not bubbles:
+        return None
+    return {"type":"carousel","contents":bubbles}
+
+
 def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -> str:
     """
     1) エントリの map フィールドが Google系の共有URLならそれを優先（店名が出やすい）
@@ -1354,23 +1469,42 @@ if _line_enabled() and handler:
         except Exception:
             app.logger.exception("_line_mute_gate failed")
 
-        # --- ② 展望所マップ（厳密＋保険のゆる判定） --------------
+        # --- ② マップシリーズ（展望所・海水浴場 ほか） ----------------
         try:
-            # 厳密判定（正規表現）
-            if _is_viewpoints_cmd(text) or _hit_viewpoints_loose(text):
-                app.logger.info("[viewpoints] strict/loose hit: %r", text)
-                send_viewpoints_map(event)
-                return
+            # 要望に合うマップを特定
+            mm = _find_map_by_text(text)
+            if mm:
+                url = mm["url_fn"]()
+                if url:
+                    flex = _flex_mymap(mm["title"], url, mm.get("thumb") or "")
+                    if flex:
+                        line_bot_api.reply_message(
+                            event.reply_token,
+                            FlexSendMessage(alt_text=mm["title"], contents=flex)
+                        )
+                    else:
+                        _reply_or_push(event, f"{mm['title']}はこちら：\n{url}")
+                    return
 
-            # セーフティ（超ゆるい再チェック）
-            import unicodedata
-            t2 = unicodedata.normalize("NFKC", (text or "")).lower()
-            if (("展望" in t2) and ("マップ" in t2 or "地図" in t2)) or ("viewpoint" in t2 and "map" in t2):
-                app.logger.info("[viewpoints] fallback hit: %r", text)
-                send_viewpoints_map(event)
-                return
+            # 「他のマップ」「マップ一覧」等でシリーズを提案
+            t2 = _n(text)
+            if any(w in t2 for w in ["他のマップ", "別のマップ", "他にも", "マップ一覧", "地図一覧", "シリーズ", "マップ", "地図"]):
+                car = _flex_map_series_carousel()
+                if car:
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        FlexSendMessage(alt_text="五島列島マップシリーズ", contents=car)
+                    )
+                    # 呼び出しワードも軽く提案（pushで追送）
+                    words = []
+                    for m in MAP_SERIES:
+                        if m.get("examples"):
+                            words.append("『" + " / ".join(m["examples"][:2]) + "』")
+                    if words:
+                        _reply_or_push(event, "他にもこんなマップがあります。\n" + " / ".join(words), force_push=True)
+                    return
         except Exception:
-            app.logger.exception("[viewpoints] checker failed")
+            app.logger.exception("[map series] handler failed")
 
         # --- ③ 近く検索（どちらの実装も生かす） ------------------
         # 3-1) 既存の早期ハンドラがあれば最優先で使う
