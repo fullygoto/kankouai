@@ -278,18 +278,34 @@ def _find_map_by_text(text: str):
         pass
     return None
 
-def _flex_map_series_carousel():
+def _flex_map_series_carousel(exclude_key: str | None = None):
     bubbles = []
     for m in MAP_SERIES:
+        if exclude_key and m.get("key") == exclude_key:
+            continue
         url = m["url_fn"]()
         if not url:
             continue
-        card = _flex_mymap(m["title"], url, m.get("thumb") or "")
-        if card and card.get("contents"):
-            bubbles.append(card["contents"][0])
-    if not bubbles:
-        return None
-    return {"type":"carousel","contents":bubbles}
+        hero = None
+        if m.get("thumb"):
+            try:
+                thumb_url = build_signed_image_url(m["thumb"], wm=True, external=True)
+                hero = {"type":"image","url":thumb_url,"size":"full","aspectMode":"cover","aspectRatio":"16:9"}
+            except Exception:
+                hero = None
+        bubble = {
+            "type":"bubble",
+            **({"hero": hero} if hero else {}),
+            "body":{"type":"box","layout":"vertical","spacing":"sm","contents":[
+                {"type":"text","text":m["title"],"weight":"bold","wrap":True},
+                {"type":"text","text":m.get("desc",""),"size":"sm","color":"#666666","wrap":True},
+            ]},
+            "footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[
+                {"type":"button","style":"primary","action":{"type":"uri","label":"マップを開く","uri":url}}
+            ]}
+        }
+        bubbles.append(bubble)
+    return {"type":"carousel","contents":bubbles} if bubbles else None
 
 
 def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -> str:
@@ -1474,38 +1490,57 @@ if _line_enabled() and handler:
             # 要望に合うマップを特定
             mm = _find_map_by_text(text)
             if mm:
-                url = mm["url_fn"]()
-                if url:
-                    msgs = []
+                # URLビルダーの安全呼び出し
+                url_fn = mm.get("url_fn")
+                url = url_fn() if callable(url_fn) else ""
 
-                    # 1) まず「該当マップ」を返信
-                    flex_main = _flex_mymap(mm["title"], url, mm.get("thumb") or "")
-                    if flex_main:
-                        msgs.append(FlexSendMessage(alt_text=mm["title"], contents=flex_main))
-                    else:
-                        msgs.append(TextSendMessage(text=f"{mm['title']}はこちら：\n{url}"))
-
-                    # 2) 続けて「他のマップもどうぞ」カルーセルを同時送信
-                    #    ※ 今回ヒットしたマップは除外
+                # URL未設定のときはエラーメッセージ + シリーズ紹介にフォールバック
+                if not url:
+                    msgs = [TextSendMessage(text=f"{mm['title']}のURLが未設定です。設定をご確認ください。")]
                     car = _flex_map_series_carousel(exclude_key=mm.get("key"))
                     if car:
-                        msgs.append(FlexSendMessage(alt_text="他にもこのようなマップがあります", contents=car))
-
-                    # 3) 呼び出しワードの例もテキストで追記
-                    words = []
-                    for m in MAP_SERIES:
-                        if mm.get("key") and m.get("key") == mm.get("key"):
-                            continue
-                        ex = (m.get("examples") or [])[:2]
-                        if ex:
-                            words.append("『" + " / ".join(ex) + "』")
-                    if words:
-                        msgs.append(TextSendMessage(
-                            text="他にもこのようなマップがあります。\n" + " / ".join(words)
+                        msgs.append(FlexSendMessage(
+                            alt_text="他にもこのようなマップがあります",
+                            contents=car
                         ))
-
-                    line_bot_api.reply_message(event.reply_token, msgs)
+                    line_bot_api.reply_message(event.reply_token, msgs[:5])
                     return
+
+                msgs = []
+
+                # 1) まず「該当マップ」を返信
+                flex_main = _flex_mymap(mm["title"], url, mm.get("thumb") or "")
+                if flex_main:
+                    # alt_text は短めに
+                    msgs.append(FlexSendMessage(alt_text=mm.get("alt", mm["title"]), contents=flex_main))
+                else:
+                    msgs.append(TextSendMessage(text=f"{mm['title']}はこちら：\n{url}"))
+
+                # 2) 続けて「他のマップもどうぞ」カルーセル（今回ヒットを除外）
+                car = _flex_map_series_carousel(exclude_key=mm.get("key"))
+                if car:
+                    msgs.append(FlexSendMessage(
+                        alt_text="他にもこのようなマップがあります",
+                        contents=car
+                    ))
+
+                # 3) 呼び出しワードの例もテキストで追記（長くなりすぎないように2〜4個）
+                words = []
+                for m in MAP_SERIES:
+                    if m.get("key") == mm.get("key"):
+                        continue
+                    ex = (m.get("examples") or [])[:2]
+                    if ex:
+                        words.append("『" + " / ".join(ex) + "』")
+                if words:
+                    # 文字数対策で最大4つまで
+                    msgs.append(TextSendMessage(
+                        text="他にもこのようなマップがあります。\n" + " / ".join(words[:4])
+                    ))
+
+                # LINEの1回のreplyは最大5通
+                line_bot_api.reply_message(event.reply_token, msgs[:5])
+                return
         except Exception:
             app.logger.exception("[map series] handler failed")
 
