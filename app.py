@@ -1476,32 +1476,35 @@ if _line_enabled() and handler:
             if mm:
                 url = mm["url_fn"]()
                 if url:
-                    flex = _flex_mymap(mm["title"], url, mm.get("thumb") or "")
-                    if flex:
-                        line_bot_api.reply_message(
-                            event.reply_token,
-                            FlexSendMessage(alt_text=mm["title"], contents=flex)
-                        )
-                    else:
-                        _reply_or_push(event, f"{mm['title']}はこちら：\n{url}")
-                    return
+                    msgs = []
 
-            # 「他のマップ」「マップ一覧」等でシリーズを提案
-            t2 = _n(text)
-            if any(w in t2 for w in ["他のマップ", "別のマップ", "他にも", "マップ一覧", "地図一覧", "シリーズ", "マップ", "地図"]):
-                car = _flex_map_series_carousel()
-                if car:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        FlexSendMessage(alt_text="五島列島マップシリーズ", contents=car)
-                    )
-                    # 呼び出しワードも軽く提案（pushで追送）
+                    # 1) まず「該当マップ」を返信
+                    flex_main = _flex_mymap(mm["title"], url, mm.get("thumb") or "")
+                    if flex_main:
+                        msgs.append(FlexSendMessage(alt_text=mm["title"], contents=flex_main))
+                    else:
+                        msgs.append(TextSendMessage(text=f"{mm['title']}はこちら：\n{url}"))
+
+                    # 2) 続けて「他のマップもどうぞ」カルーセルを同時送信
+                    #    ※ 今回ヒットしたマップは除外
+                    car = _flex_map_series_carousel(exclude_key=mm.get("key"))
+                    if car:
+                        msgs.append(FlexSendMessage(alt_text="他にもこのようなマップがあります", contents=car))
+
+                    # 3) 呼び出しワードの例もテキストで追記
                     words = []
                     for m in MAP_SERIES:
-                        if m.get("examples"):
-                            words.append("『" + " / ".join(m["examples"][:2]) + "』")
+                        if mm.get("key") and m.get("key") == mm.get("key"):
+                            continue
+                        ex = (m.get("examples") or [])[:2]
+                        if ex:
+                            words.append("『" + " / ".join(ex) + "』")
                     if words:
-                        _reply_or_push(event, "他にもこんなマップがあります。\n" + " / ".join(words), force_push=True)
+                        msgs.append(TextSendMessage(
+                            text="他にもこのようなマップがあります。\n" + " / ".join(words)
+                        ))
+
+                    line_bot_api.reply_message(event.reply_token, msgs)
                     return
         except Exception:
             app.logger.exception("[map series] handler failed")
