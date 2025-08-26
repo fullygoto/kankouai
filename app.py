@@ -1556,10 +1556,9 @@ if _line_enabled() and handler:
                 car = _flex_map_series_carousel(exclude_key=mm.get("key"))
                 if isinstance(car, dict) and car.get("contents"):
                     msgs.append(FlexSendMessage(
-                        alt_text="他にもこのようなマップがあります",
+                        alt_text="五島列島マップシリーズ",
                         contents=car
                     ))
-
                 # 呼び出しワード（空を除外し最大4つ）
                 words = []
                 for m in MAP_SERIES:
@@ -1570,7 +1569,7 @@ if _line_enabled() and handler:
                         words.append("『" + " / ".join(ex[:2]) + "』")
                 if words:
                     msgs.append(TextSendMessage(
-                        text="他にもこのようなマップがあります。\n" + " / ".join(words[:4])
+                        text="開くための合言葉の例：\n" + " / ".join(words[:4])
                     ))
 
                 try:
