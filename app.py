@@ -247,39 +247,75 @@ def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = No
 
 def _flex_map_series_carousel(exclude_key: str | None = None):
     """
-    MAP_SERIES からカルーセルを作成。subtitle が空なら1行のみにする。
-    URL が生成できない要素はスキップ。
+    MAP_SERIES からカルーセルを作成。
+    - exclude_key があればその要素を除外
+    - URLが生成できない要素はスキップ
+    - subtitle/desc が空なら2行目は入れない（LINEの空text禁止対策）
+    - サムネは署名付きURL（失敗時のみ素のHTTP URLを許容）
     """
     bubbles = []
     for m in MAP_SERIES:
         if exclude_key and m.get("key") == exclude_key:
             continue
+
+        # URL生成（callable/url両対応）
         url_fn = m.get("url_fn")
-        url = url_fn() if callable(url_fn) else ""
+        url = url_fn() if callable(url_fn) else (m.get("url") or "")
+        url = (url or "").strip()
         if not url:
             continue
 
         title = (m.get("title") or "マップ").strip()
         subtitle = (m.get("subtitle") or m.get("desc") or "").strip()
-        thumb = (m.get("thumb") or "").strip()
+        thumb_in = (m.get("thumb") or "").strip()
 
-        body = [{"type":"text","text":title,"weight":"bold","wrap":True}]
+        # hero画像（署名URLを優先、失敗時はHTTP直URLのみ許容）
+        hero = None
+        if thumb_in:
+            thumb_url = ""
+            try:
+                thumb_url = build_signed_image_url(thumb_in, wm=True, external=True)
+            except Exception:
+                # 署名生成に失敗した場合、http(s) 直URLだけ通す
+                if thumb_in.startswith("http://") or thumb_in.startswith("https://"):
+                    thumb_url = thumb_in
+            if thumb_url:
+                hero = {
+                    "type": "image",
+                    "url": thumb_url,
+                    "size": "full",
+                    "aspectMode": "cover",
+                    "aspectRatio": "16:9",
+                }
+
+        # 本文（空行は作らない）
+        body_contents = [
+            {"type": "text", "text": title, "weight": "bold", "wrap": True},
+        ]
         if subtitle:
-            body.append({"type":"text","text":subtitle,"size":"sm","color":"#666666","wrap":True})
+            body_contents.append(
+                {"type": "text", "text": subtitle, "size": "sm", "color": "#666666", "wrap": True}
+            )
 
         bubble = {
-            "type":"bubble",
-            **({"hero":{"type":"image","url":thumb,"size":"full","aspectMode":"cover","aspectRatio":"16:9"}} if thumb else {}),
-            "body":{"type":"box","layout":"vertical","spacing":"sm","contents":body},
-            "footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[
-                {"type":"button","style":"primary","action":{"type":"uri","label":"マップを開く","uri":url}}
-            ]}
+            "type": "bubble",
+            **({"hero": hero} if hero else {}),
+            "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body_contents},
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {"type": "button", "style": "primary",
+                     "action": {"type": "uri", "label": "マップを開く", "uri": url}}
+                ],
+            },
         }
         bubbles.append(bubble)
 
     if not bubbles:
         return None
-    return {"type":"carousel","contents":bubbles}
+    return {"type": "carousel", "contents": bubbles}
 
 # ==== マップシリーズ定義（ここに増やしていける） =================
 MAP_SERIES = [
@@ -313,35 +349,6 @@ def _find_map_by_text(text: str):
     except Exception:
         pass
     return None
-
-def _flex_map_series_carousel(exclude_key: str | None = None):
-    bubbles = []
-    for m in MAP_SERIES:
-        if exclude_key and m.get("key") == exclude_key:
-            continue
-        url = m["url_fn"]()
-        if not url:
-            continue
-        hero = None
-        if m.get("thumb"):
-            try:
-                thumb_url = build_signed_image_url(m["thumb"], wm=True, external=True)
-                hero = {"type":"image","url":thumb_url,"size":"full","aspectMode":"cover","aspectRatio":"16:9"}
-            except Exception:
-                hero = None
-        bubble = {
-            "type":"bubble",
-            **({"hero": hero} if hero else {}),
-            "body":{"type":"box","layout":"vertical","spacing":"sm","contents":[
-                {"type":"text","text":m["title"],"weight":"bold","wrap":True},
-                {"type":"text","text":m.get("desc",""),"size":"sm","color":"#666666","wrap":True},
-            ]},
-            "footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[
-                {"type":"button","style":"primary","action":{"type":"uri","label":"マップを開く","uri":url}}
-            ]}
-        }
-        bubbles.append(bubble)
-    return {"type":"carousel","contents":bubbles} if bubbles else None
 
 
 def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -> str:
@@ -1526,19 +1533,16 @@ if _line_enabled() and handler:
             # 要望に合うマップを特定
             mm = _find_map_by_text(text)
             if mm:
-                # URLを安全に取得
                 url_fn = mm.get("url_fn")
                 url = url_fn() if callable(url_fn) else ""
 
-                # URLが無いマップは reply せず、シリーズ紹介だけに切替
                 msgs = []
                 if url:
-                    # 1) 該当マップ
                     flex_main = _flex_mymap(
                         title = mm.get("title") or "マップ",
                         url   = url,
-                        thumb = mm.get("thumb") or "",
-                        subtitle = (mm.get("subtitle") or mm.get("desc") or "").strip() or None  # ← 空は入れない
+                        thumb = (mm.get("thumb") or "").strip(),
+                        subtitle = (mm.get("subtitle") or mm.get("desc") or "").strip() or None
                     )
                     if isinstance(flex_main, dict) and flex_main.get("contents"):
                         msgs.append(FlexSendMessage(
@@ -1548,7 +1552,7 @@ if _line_enabled() and handler:
                     else:
                         msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}はこちら：\n{url}"))
 
-                # 2) 「他のマップもどうぞ」カルーセル（今回ヒットを除外）
+                # ヒットしたマップを除外してシリーズを提案
                 car = _flex_map_series_carousel(exclude_key=mm.get("key"))
                 if isinstance(car, dict) and car.get("contents"):
                     msgs.append(FlexSendMessage(
@@ -1556,12 +1560,12 @@ if _line_enabled() and handler:
                         contents=car
                     ))
 
-                # 3) 呼び出しワード例（最大4つ）
+                # 呼び出しワード（空を除外し最大4つ）
                 words = []
                 for m in MAP_SERIES:
                     if m.get("key") == mm.get("key"):
                         continue
-                    ex = [e for e in (m.get("examples") or []) if e]  # 空は除外
+                    ex = [e for e in (m.get("examples") or []) if e]
                     if ex:
                         words.append("『" + " / ".join(ex[:2]) + "』")
                 if words:
@@ -1569,16 +1573,13 @@ if _line_enabled() and handler:
                         text="他にもこのようなマップがあります。\n" + " / ".join(words[:4])
                     ))
 
-                # 送信（5通上限）
                 try:
                     if msgs:
                         line_bot_api.reply_message(event.reply_token, msgs[:5])
                     else:
-                        # 何も用意できなかった場合の保険
                         _reply_or_push(event, "マップを用意できませんでした。『マップ一覧』と送るとシリーズをご案内します。", force_push=True)
                     return
                 except LineBotApiError:
-                    # reply で落ちたら push でフォロー（同一イベントで2回 reply を避ける）
                     app.logger.exception("[map series] reply failed; fallback to push")
                     if url:
                         _reply_or_push(event, f"{mm.get('title','マップ')}はこちら：\n{url}", force_push=True)
@@ -2302,6 +2303,12 @@ def _safe_read_json(path: str, default_obj):
         return default_obj
 
 import unicodedata
+def _n(s: str) -> str:
+    """NFKC正規化 + 小文字化 + 連続空白圧縮"""
+    import unicodedata, re
+    t = unicodedata.normalize("NFKC", (s or ""))
+    t = re.sub(r"\s+", " ", t)
+    return t.strip().lower()
 
 
 def _norm_cmd(s: str) -> str:
