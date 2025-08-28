@@ -230,6 +230,17 @@ def trek_map_url() -> str:
     """
     return _normalize_mymaps_url(TREKMAP_URL)
 
+# ==== さくらマップ（My Maps 専用） ==============================
+SAKURAMAP_URL = os.getenv(
+    "SAKURAMAP_URL",
+    # いただいた共有URL（/edit は実行時に /viewer + femb=1 へ正規化されます）
+    "https://www.google.com/maps/d/u/1/edit?mid=1DXUZRnCUkppZ-WSmvInN5kWBgO0zCbw&usp=sharing"
+).strip()
+SAKURAMAP_THUMB = os.getenv("SAKURAMAP_THUMB", "").strip()  # 任意：サムネ画像（無くてもOK）
+
+def sakura_map_url() -> str:
+    """My Maps の /edit URL → /viewer + femb=1 に正規化して返す"""
+    return _normalize_mymaps_url(SAKURAMAP_URL)
 
 # ==== 共通フレックス（タイトル・URL・サムネを受け取る） =========
 def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = None):
@@ -359,6 +370,14 @@ MAP_SERIES = [
         "thumb": TREKMAP_THUMB,            # 任意（未設定可）
         "keywords": ["登山", "トレッキング", "ハイキング", "山", "hiking", "trekking", "trail"],
         "examples": ["登山マップ", "トレッキングマップ", "ハイキングの地図"]
+    },
+    {
+        "key": "sakura",
+        "title": "五島列島 さくらマップ",
+        "url_fn": sakura_map_url,
+        "thumb": SAKURAMAP_THUMB,
+        "keywords": ["桜", "さくら", "花見", "お花見", "sakura"],
+        "examples": ["さくらマップ", "桜の地図", "花見マップ"]
     },
 ]
 
