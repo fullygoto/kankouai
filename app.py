@@ -215,6 +215,22 @@ def beach_map_url() -> str:
         return base + ll + z
     return ""
 
+# ==== 登山・トレッキングマップ（My Maps 専用） ====================
+TREKMAP_URL   = os.getenv(
+    "TREKMAP_URL",
+    # デフォルトに共有された /edit URL をそのまま入れてOK。実行時に /viewer & femb=1 に正規化されます。
+    "https://www.google.com/maps/d/u/1/edit?mid=1dXNtYKD1kx273Ux-zLKhMVmeTLpU1YQ&usp=sharing"
+).strip()
+TREKMAP_THUMB = os.getenv("TREKMAP_THUMB", "").strip()  # 任意サムネ（未設定でも可）
+
+def trek_map_url() -> str:
+    """
+    My Maps の /edit URL を /viewer に変換し、埋め込み最適化パラメータ femb=1 を付与して返します。
+    TREKMAP_URL を .env で差し替えれば運用で変更可能です。
+    """
+    return _normalize_mymaps_url(TREKMAP_URL)
+
+
 # ==== 共通フレックス（タイトル・URL・サムネを受け取る） =========
 def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = None):
     """
@@ -335,7 +351,17 @@ MAP_SERIES = [
         "keywords": ["海水浴", "海水浴場", "ビーチ", "海水浴マップ", "beach"],
         "examples": ["海水浴場マップ", "ビーチの地図"]
     },
+    # ← ここから追加
+    {
+        "key": "trek",
+        "title": "五島列島 登山・トレッキングマップ",
+        "url_fn": trek_map_url,            # 上で定義した関数
+        "thumb": TREKMAP_THUMB,            # 任意（未設定可）
+        "keywords": ["登山", "トレッキング", "ハイキング", "山", "hiking", "trekking", "trail"],
+        "examples": ["登山マップ", "トレッキングマップ", "ハイキングの地図"]
+    },
 ]
+
 
 def _find_map_by_text(text: str):
     t = _n(text)  # NFKC + lower + 空白圧縮
