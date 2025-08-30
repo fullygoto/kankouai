@@ -2776,102 +2776,175 @@ def _img_sig(filename: str, exp: int) -> str:
         hmac.new(IMAGES_SIGNING_KEY, msg, hashlib.sha256).digest()
     ).rstrip(b"=").decode("ascii")
 
-def build_signed_image_url(filename: str,
-                           *,
-                           wm: str | bool | None = None,
-                           external: bool = True,
-                           ttl_sec: int | None = None) -> str:
+# ---- HTTPSの絶対URLを保証するヘルパ／url_forの安全版 ----
+def _force_https_abs(u: str) -> str:
+    """
+    与えられたURLを必ず HTTPS の絶対URLに補正する。
+    - '/media/...' のような相対 → リクエストのホスト or EXTERNAL_BASE_URL を付与
+    - 'http://' → 'https://' に置換
+    - それ以外はそのまま
+    """
+    if not u:
+        return ""
+    try:
+        import os
+        from flask import request
+
+        # //example.com 形式は https を付ける
+        if u.startswith("//"):
+            return "https:" + u
+
+        # /path から始まる相対URL → ホストを付ける
+        if u.startswith("/"):
+            try:
+                base = (request.url_root or "").rstrip("/")
+            except Exception:
+                base = ""
+            if not base:
+                base = (os.getenv("EXTERNAL_BASE_URL") or "").rstrip("/")
+            if base.startswith("http://"):
+                base = "https://" + base[len("http://"):]
+            return (base + u) if base else u
+
+        # http → https
+        if u.startswith("http://"):
+            return "https://" + u[len("http://"):]
+        return u
+    except Exception:
+        return u
+
+
+def safe_url_for(endpoint: str, **values) -> str:
+    """
+    url_for のラッパ。
+    - 常に _external=True で絶対URLを作成
+    - 必ず HTTPS に補正
+    - リクエストコンテキストが無い場面では EXTERNAL_BASE_URL を利用（任意）
+    """
+    from flask import url_for, request
+    import os
+    from urllib.parse import urlencode
+
+    # url_for で作れるならそれを使う
+    try:
+        values["_external"] = True
+        u = url_for(endpoint, **values)
+        return _force_https_abs(u)
+    except Exception:
+        # 例：リクエスト外などで url_for が使えない場合のフォールバック
+        filename = values.get("filename")
+        qs = values.copy()
+        qs.pop("filename", None)
+        qs.pop("_external", None)
+        query = ("?" + urlencode(qs)) if qs else ""
+        base = (os.getenv("EXTERNAL_BASE_URL") or "").rstrip("/")
+        if not base:
+            try:
+                base = (request.url_root or "").rstrip("/")
+            except Exception:
+                base = ""
+        u = f"{base}{MEDIA_URL_PREFIX}/{filename}{query}" if base else f"{MEDIA_URL_PREFIX}/{filename}{query}"
+        return _force_https_abs(u)
+
+
+def build_signed_image_url(
+    filename: str,
+    *,
+    wm: str | bool | None = None,
+    external: bool = True,
+    ttl_sec: int | None = None,
+) -> str:
     """
     署名付きURLを生成（従来互換＋拡張版）。
-    - 署名機構: safe_url_for(_sign=True) があれば使用。無ければ従来の IMAGE_PROTECT + _img_sig にフォールバック。
-    - wm 引数:
-        * 文字列: "fullygoto"/"gotocity" はそのままクエリに付与。
-                  "fully"→"fullygoto", "city"→"gotocity" に正規化。
-        * True:   旧来互換として wm=1 を付与（デフォルト透かし扱い）
-        * False/None: wm を付けない（透かし無し）
+    - まず safe_url_for(_sign=True) を試す（署名・絶対URL・HTTPS補正まで一気に）
+    - 使えない場合は従来の IMAGE_PROTECT + _img_sig にフォールバック
+    - どの経路でも最終的に HTTPS の絶対URLへ補正して返す
+    - wm:
+        * "fullygoto" / "gotocity" はそのまま
+        * "fully"→"fullygoto", "city"→"gotocity"
+        * True → "1"（旧来のON互換）
+        * False/None → 付けない
     """
     if not filename:
         return ""
 
-    # --- wm 正規化（文字列の同義語を統一） -------------------------
-    wm_q = None
+    # --- wm 正規化 ---
+    wm_q: str | None
     try:
         if isinstance(wm, str):
             v = wm.strip().lower()
-            if v in ("fullygoto", "gotocity"):
-                wm_q = v
-            elif v == "fully":
-                wm_q = "fullygoto"
-            elif v == "city":
-                wm_q = "gotocity"
-            elif v in ("none", "0", "off", "false", ""):
-                wm_q = None
-            else:
-                # 不明な文字列はそのまま（後方互換）
-                wm_q = v
+            if   v in ("fullygoto", "gotocity"): wm_q = v
+            elif v == "fully":                   wm_q = "fullygoto"
+            elif v == "city":                    wm_q = "gotocity"
+            elif v in ("none", "0", "off", "false", ""): wm_q = None
+            else:                                wm_q = v  # 後方互換でそのまま
         elif wm is True:
-            # 旧実装での「ON」を踏襲（値は '1'）
             wm_q = "1"
         else:
             wm_q = None
     except Exception:
         wm_q = None
 
-    # --- 1) safe_url_for があれば署名付きで（新方式） ---------------
+    # --- 1) 新方式: safe_url_for(_sign=True) があればそれを使う ---
     try:
-        # safe_url_for が未定義の環境もあるので try
         kwargs = {"filename": filename, "_external": external, "_sign": True}
         if wm_q:
             kwargs["wm"] = wm_q
-        return safe_url_for("serve_image", **kwargs)  # type: ignore[name-defined]
+        u = safe_url_for("serve_image", **kwargs)  # noqa: F821  (存在しない環境は except へ)
+        return _force_https_abs(u)
     except Exception:
-        pass  # フォールバックへ
+        pass
 
-    # --- 2) 従来方式: IMAGE_PROTECT / _img_sig ----------------------
+    # --- 2) 従来方式（IMAGE_PROTECT / _img_sig） ---
     try:
+        from flask import url_for
+        import time as _t
+        from urllib.parse import urlencode
+
         if not IMAGE_PROTECT:
-            # 署名不要環境：そのまま url_for へ
+            # 署名不要環境
             q = {}
             if wm_q:
                 q["wm"] = wm_q
             try:
-                return url_for("serve_image", filename=filename, _external=external, **q)
+                u = url_for("serve_image", filename=filename, _external=external, **q)
+                return _force_https_abs(u)
             except Exception:
                 base = f"{MEDIA_URL_PREFIX}/{filename}"
                 if q:
-                    from urllib.parse import urlencode
-                    return f"{base}?{urlencode(q)}"
-                return base
+                    base = f"{base}?{urlencode(q)}"
+                return _force_https_abs(base)
 
         # 署名あり
         ttl = int(ttl_sec or SIGNED_IMAGE_TTL_SEC)
-        exp = int(time.time()) + max(60, ttl)
+        exp = int(_t.time()) + max(60, ttl)
         sig = _img_sig(filename, exp)
         q = {"sig": sig, "exp": exp}
         if wm_q:
             q["wm"] = wm_q
 
         try:
-            return url_for("serve_image", filename=filename, _external=external, **q)
+            u = url_for("serve_image", filename=filename, _external=external, **q)
+            return _force_https_abs(u)
         except Exception:
-            # url_for が使えない状況（テスト等）への最終フォールバック
-            wm_val = q.get("wm")
-            wm_part = f"&wm={wm_val}" if wm_val is not None else ""
-            return f"{MEDIA_URL_PREFIX}/{filename}?sig={sig}&exp={exp}{wm_part}"
+            base = f"{MEDIA_URL_PREFIX}/{filename}?{urlencode(q)}"
+            return _force_https_abs(base)
 
     except Exception:
         app.logger.exception("build_signed_image_url failed (fallback)")
-        # 最後の最後の保険（署名無し）
+        # 最後の保険（署名無し）
         try:
+            from flask import url_for
             q = {}
             if wm_q:
                 q["wm"] = wm_q
-            return url_for("serve_image", filename=filename, _external=external, **q)
+            u = url_for("serve_image", filename=filename, _external=external, **q)
+            return _force_https_abs(u)
         except Exception:
             base = f"{MEDIA_URL_PREFIX}/{filename}"
             if wm_q:
-                return f"{base}?wm={wm_q}"
-            return base
+                base = f"{base}?wm={wm_q}"
+            return _force_https_abs(base)
 
 
 def _apply_text_watermark(im, text: str):
