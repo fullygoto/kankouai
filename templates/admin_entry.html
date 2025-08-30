@@ -398,15 +398,25 @@
               <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            <!-- 透かしON/OFF -->
-            {% set _wm_on_edit = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+            {# ▼▼▼ 透かし（外部公開URL）選択：none / fully / city ▼▼▼ #}
+            {% set _wm_choice_t = (
+                entry_edit.wm_external_choice
+                if entry_edit and entry_edit.wm_external_choice
+                else ('fully' if (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) else 'none')
+            ) %}
             <div class="mt-2">
-              <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="checkbox" name="wm_on" value="1" {% if _wm_on_edit %}checked{% endif %}>
-                外部公開URLに透かし（＠fullyGOTO）を付ける
+              <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
+              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                <input type="radio" name="wm_external_choice" value="none"  {% if _wm_choice_t=='none' %}checked{% endif %}> なし
               </label>
-              <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
+              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                <input type="radio" name="wm_external_choice" value="fully" {% if _wm_choice_t=='fully' %}checked{% endif %}> @Goto City（fully）
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:.4em;">
+                <input type="radio" name="wm_external_choice" value="city"  {% if _wm_choice_t=='city' %}checked{% endif %}> @Goto City（city）
+              </label>
             </div>
+            {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
 
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
@@ -515,15 +525,25 @@ https://instagram.com/xxx">
               <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            <!-- 透かしON/OFF -->
-            {% set _wm_on_edit2 = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+            {# ▼▼▼ 透かし（外部公開URL）選択：none / fully / city ▼▼▼ #}
+            {% set _wm_choice_s = (
+                entry_edit.wm_external_choice
+                if entry_edit and entry_edit.wm_external_choice
+                else ('fully' if (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) else 'none')
+            ) %}
             <div class="mt-2">
-              <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="checkbox" name="wm_on" value="1" {% if _wm_on_edit2 %}checked{% endif %}>
-                外部公開URLに透かし（＠fullyGOTO）を付ける
+              <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
+              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                <input type="radio" name="wm_external_choice" value="none"  {% if _wm_choice_s=='none' %}checked{% endif %}> なし
               </label>
-              <div class="mini-note">※一覧のサムネは常に透かし表示。ここは「クリック時の原寸URL」に適用されます。</div>
+              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                <input type="radio" name="wm_external_choice" value="fully" {% if _wm_choice_s=='fully' %}checked{% endif %}> @Goto City（fully）
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:.4em;">
+                <input type="radio" name="wm_external_choice" value="city"  {% if _wm_choice_s=='city' %}checked{% endif %}> @Goto City（city）
+              </label>
             </div>
+            {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
 
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
@@ -712,9 +732,10 @@ https://instagram.com/xxx">
 
           {% set _img = e.image_file or e.image %}
           {% set _wm = (e.wm_on if e.wm_on is defined else True) %}
+          {% set _wm_choice_view = (e.wm_external_choice if e.wm_external_choice else ('fully' if _wm else 'none')) %}
           <div style="display:flex; gap:12px; align-items:flex-start;">
             {% if _img %}
-              <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=1 if _wm else 0) }}"
+              <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=_wm_choice_view) }}"
                 target="_blank" rel="noopener noreferrer" style="flex:0 0 auto;">
                 <img
                   src="{{ safe_url_for('serve_image', filename=_img, wm=1) }}"
