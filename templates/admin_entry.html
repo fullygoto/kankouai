@@ -47,16 +47,12 @@
         }
     </style>
     <script>
+    // ===== 共通UI =====
     function toggleSection(id, enable){
       const sec = document.getElementById(id);
       if(!sec) return;
       sec.style.display = enable ? 'block' : 'none';
       sec.querySelectorAll('input,select,textarea').forEach(el => { el.disabled = !enable; });
-    }
-    function onCategoryChange() {
-      const cat = document.getElementById('category_select').value;
-      toggleSection('form_tourism', cat === '観光');
-      toggleSection('form_shop',   cat !== '観光');
     }
     function addExtraRow(targetId) {
         const wrap = document.getElementById(targetId);
@@ -82,7 +78,7 @@
 
     // ====== フィルタ & ソート & ページネーション ======
     let PAGING = {page:1, size:20, totalFiltered:0, totalAll:0};
-    let GEO = {active:false, lat:null, lng:null, radiusKm:3}; // 追加: 現在地フィルタ状態
+    let GEO = {active:false, lat:null, lng:null, radiusKm:3};
 
     function _norm(s){ return (s||'').toString().toLowerCase(); }
 
@@ -129,7 +125,6 @@
     function updateDistanceBadges(){
       const cards = Array.from(document.querySelectorAll('.entry-card'));
       cards.forEach(card=>{
-        // cleanup first
         const old = card.querySelector('.dist-badge');
         if(old) old.remove();
         if(!(GEO.active && card.style.display !== 'none')) return;
@@ -157,7 +152,7 @@
       const list = Array.from(document.querySelectorAll('.entry-card'));
       let filtered = [];
 
-      // 絞り込み（テキスト/カテゴリ/エリア/タグ）
+      // 絞り込み
       list.forEach(card=>{
         const txt = card.dataset.text;
         const dcat = card.dataset.category;
@@ -176,7 +171,7 @@
         if(ok) filtered.push(card);
       });
 
-      // 追加: 現在地フィルタ（距離計算 & 半径内抽出）
+      // 現在地フィルタ
       if(GEO.active && GEO.lat!=null && GEO.lng!=null){
         const picked = [];
         filtered.forEach(card=>{
@@ -189,7 +184,6 @@
         });
         filtered = picked;
       }else{
-        // 距離未使用時は距離データをクリアしておく
         filtered.forEach(card=>{ delete card.dataset.distance; });
       }
 
@@ -220,7 +214,7 @@
       PAGING.totalAll = list.length;
       if(resetPage) PAGING.page = 1;
       applyPagination(filtered);
-      updateDistanceBadges(); // 表示中カードに距離を表示
+      updateDistanceBadges();
     }
 
     function applyPagination(filtered){
@@ -254,7 +248,7 @@
       document.getElementById('f_area').value='';
       document.getElementById('f_tag').value='';
       document.getElementById('f_sort').value='title_asc';
-      clearNearby(); // 現在地条件も解除して初期化
+      clearNearby();
       PAGING.page = 1;
       filterCards(false);
     }
@@ -289,42 +283,71 @@
       return null;
     }
 
+    // ラジオ名分離 + hidden 同期（観光=t, 店舗=s）
     function _bindWmRadios(section){
-      // section: 't' | 's'
-      const rootId = section==='t' ? 'form_tourism' : 'form_shop';
-      const blockId = section==='t' ? 'wm-block-t' : 'wm-block-s';
+      const rootId  = section==='t' ? 'form_tourism' : 'form_shop';
+      const blockId = section==='t' ? 'wm-block-t'   : 'wm-block-s';
       const imgId   = section==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s';
+      const radioName = section==='t' ? 'wm_choice_t' : 'wm_choice_s';
 
       const root = document.getElementById(rootId);
       const block = document.getElementById(blockId);
       const img = document.getElementById(imgId);
-      if(!root || !block || !img) return;
+      const master = document.getElementById('wm_choice_master');
+      if(!root || !master) return;
 
-      const filename = block.dataset.filename || '';
-      const radios = root.querySelectorAll('input[name="wm_external_choice"]');
+      const filename = block ? (block.dataset.filename || '') : '';
+
+      const radios = root.querySelectorAll(`input[name="${radioName}"]`);
       radios.forEach(r => {
         r.addEventListener('change', async (ev)=>{
-          const choice = ev.target.value || 'none';
-          if(!filename) return;
-          const url = await _signPreview(filename, choice);
-          if(url) img.src = url;
+          if(ev.target.checked){
+            const choice = ev.target.value || 'none';
+            master.value = choice;            // hidden に同期
+            if(filename && img){              // プレビューも更新
+              const url = await _signPreview(filename, choice);
+              if(url) img.src = url;
+            }
+          }
         });
       });
 
-      // 初期表示も再署名（キャッシュずれ対策）
-      const init = root.querySelector('input[name="wm_external_choice"]:checked');
-      if(init && filename){
-        _signPreview(filename, init.value || 'none').then(url => { if(url) img.src = url; });
+      // 初期表示：checked を hidden に反映、プレビューも同期
+      const init = root.querySelector(`input[name="${radioName}"]:checked`);
+      if(init){
+        master.value = init.value || master.value;
+        if(filename && img){
+          _signPreview(filename, init.value || 'none').then(url => { if(url) img.src = url; });
+        }
       }
+    }
+
+    function _syncWmFromVisible(){
+      const cat = document.getElementById('category_select').value;
+      const master = document.getElementById('wm_choice_master');
+      if(!master) return;
+      if(cat === '観光'){
+        const p = document.querySelector('#form_tourism input[name="wm_choice_t"]:checked');
+        if(p) master.value = p.value;
+      }else{
+        const p = document.querySelector('#form_shop input[name="wm_choice_s"]:checked');
+        if(p) master.value = p.value;
+      }
+    }
+
+    function onCategoryChange() {
+      const cat = document.getElementById('category_select').value;
+      toggleSection('form_tourism', cat === '観光');
+      toggleSection('form_shop',   cat !== '観光');
+      _syncWmFromVisible();
     }
 
     window.onload = function(){
       onCategoryChange();
       filterCards();
-
-      // 観光/店舗のどちらが表示でも、両方バインドしておけばOK（存在チェックあり）
       _bindWmRadios('t');
       _bindWmRadios('s');
+      _syncWmFromVisible();
     };
     </script>
 </head>
@@ -399,11 +422,23 @@
     {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is defined and entry_edit.areas is not string
                           else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
 
+    {# === 透かし 初期値（保存済みの値→正規化） === #}
+    {% set _wm_on_init = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+    {% set _wm_raw_init = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+    {% set _wm_choice_init = (
+      _wm_raw_init if _wm_raw_init in ['none','fullygoto','gotocity']
+      else ('fullygoto' if _wm_raw_init == 'fully'
+            else ('gotocity' if _wm_raw_init == 'city' else ('fullygoto' if _wm_on_init else 'none')))
+    ) %}
+
     <!-- ===== 登録フォーム ===== -->
     <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
         {% if edit_id %}
         <input type="hidden" name="edit_id" value="{{ edit_id }}">
         {% endif %}
+
+        <!-- 代表（サーバに送る唯一の値） -->
+        <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_init }}">
 
         <label>カテゴリー</label><br>
         <select name="category" id="category_select" onchange="onCategoryChange()">
@@ -464,13 +499,13 @@
             <div class="mt-2">
               <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
               <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_external_choice" value="none"  {% if _wm_choice_t=='none' %}checked{% endif %}> なし
+                <input type="radio" name="wm_choice_t" value="none"  {% if _wm_choice_t=='none' %}checked{% endif %}> なし
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_external_choice" value="fullygoto" {% if _wm_choice_t=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
+                <input type="radio" name="wm_choice_t" value="fullygoto" {% if _wm_choice_t=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="radio" name="wm_external_choice" value="gotocity"  {% if _wm_choice_t=='gotocity' %}checked{% endif %}> ＠Goto City
+                <input type="radio" name="wm_choice_t" value="gotocity"  {% if _wm_choice_t=='gotocity' %}checked{% endif %}> ＠Goto City
               </label>
             </div>
             {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
@@ -602,13 +637,13 @@ https://instagram.com/xxx">
             <div class="mt-2">
               <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
               <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_external_choice" value="none"  {% if _wm_choice_s=='none' %}checked{% endif %}> なし
+                <input type="radio" name="wm_choice_s" value="none"  {% if _wm_choice_s=='none' %}checked{% endif %}> なし
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_external_choice" value="fullygoto" {% if _wm_choice_s=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
+                <input type="radio" name="wm_choice_s" value="fullygoto" {% if _wm_choice_s=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="radio" name="wm_external_choice" value="gotocity"  {% if _wm_choice_s=='gotocity' %}checked{% endif %}> ＠Goto City
+                <input type="radio" name="wm_choice_s" value="gotocity"  {% if _wm_choice_s=='gotocity' %}checked{% endif %}> ＠Goto City
               </label>
             </div>
             {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
@@ -754,7 +789,7 @@ https://instagram.com/xxx">
         <option value="50">1ページ 50件</option>
       </select>
 
-      <!-- 追加: 現在地コントロール -->
+      <!-- 現在地コントロール -->
       <div class="nearby-ctl">
         <button class="btn" type="button" onclick="startNearby()">現在地から</button>
         <select id="near_radius">
