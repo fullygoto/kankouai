@@ -11,6 +11,7 @@ import uuid
 import hmac, hashlib, base64
 from PIL import ImageDraw, ImageFont
 from PIL import Image, ImageOps  # ← 追加
+from pathlib import Path
 
 # 追加:
 import warnings
@@ -975,6 +976,70 @@ if 'mapping' not in app.jinja_env.tests:
 
 app.config["JSON_AS_ASCII"] = False  # 日本語をJSONでそのまま返す
 
+
+# === 透かしコマンド／ユーザー選好ユーティリティ =========================
+# 永続化先（必要なら .env で差し替え可）
+WM_PREFS_PATH = Path(os.getenv("WM_PREFS_PATH", "data/user_prefs.json"))
+
+def _load_user_prefs() -> dict:
+    try:
+        return json.loads(WM_PREFS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _save_user_prefs(prefs: dict) -> None:
+    WM_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    WM_PREFS_PATH.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def _get_user_wm(uid: str) -> str:
+    """
+    返り値: 'none' | 'fullygoto' | 'gotocity'
+    既定は 'none'
+    """
+    prefs = _load_user_prefs()
+    return (prefs.get(uid, {}) or {}).get("wm_choice", "none")
+
+def _set_user_wm(uid: str, choice: str) -> None:
+    """
+    choice は 'none' | 'fullygoto' | 'gotocity'
+    """
+    if choice not in ("none", "fullygoto", "gotocity"):
+        return
+    prefs = _load_user_prefs()
+    prefs.setdefault(uid, {})
+    prefs[uid]["wm_choice"] = choice
+    # 旧互換: none以外なら "wm_on": True としておく
+    prefs[uid]["wm_on"] = (choice != "none")
+    _save_user_prefs(prefs)
+
+def _normalize_at_command(s: str) -> str:
+    """
+    全角→半角、空白畳み込み、lower化（@FullyGOTO / ＠Goto City / none / なし 等に耐える）
+    """
+    if not s:
+        return ""
+    table = str.maketrans({"＠": "@", "　": " "})
+    s = s.translate(table)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+def parse_wm_command(text: str):
+    """
+    返り値: 'gotocity' | 'fullygoto' | 'none' | None
+    完全一致のみ。優先順位: City → fully → none
+    """
+    t = _normalize_at_command(text)
+
+    # City を先に判定（"goto" を含むため fully へ誤爆しやすい）
+    if re.fullmatch(r"(?:@)?goto\s*city", t, flags=re.I):
+        return "gotocity"
+    if re.fullmatch(r"(?:@)?fully\s*goto", t, flags=re.I):
+        return "fullygoto"
+    if re.fullmatch(r"(?:@)?(?:なし|none)", t, flags=re.I):
+        return "none"
+    return None
+# ======================================================================
+
 # 本番では必ず環境変数で設定
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
 
@@ -1371,52 +1436,68 @@ def safe_url_for(endpoint, **values):
     url_for の安全版 + 画像エンドポイントだけ“おまかせ署名”対応。
     - endpoint == "serve_image":
         * _sign=True で署名URL、_sign=False で素URL
-        * デフォルトは「外部(未ログイン)アクセス時は署名」
-        * wm は True/1/“fully”/“city”/“fullygoto”/“gotocity”を受け付ける
+        * 既定は「外部(未ログイン)アクセス時は署名」
+        * wm は True/1/“fully”/“city”/“fullygoto”/“gotocity”/“none” を受け付ける
         * _external=True で絶対URL
     - それ以外は通常の url_for。BuildError は "#" を返す
     """
     try:
         if endpoint == "serve_image":
-            filename = values.get("filename")
+            filename = values.get("filename") or values.pop("filename", None)
             if not filename:
                 return "#"
 
+            # オプション取り出し
             external = bool(values.pop("_external", False))
             wm_val   = values.pop("wm", values.pop("_wm", None))
 
-            # wm の正規化（fully/city を新キーにマップ）
+            # 未定義でも落ちないようフォールバック
+            WATERMARK_ON      = bool(globals().get("WATERMARK_ENABLE", True))
+            IMAGE_PROTECT_ON  = bool(globals().get("IMAGE_PROTECT", True))
+
+            # wm の正規化（新旧トークンと真偽値を吸収）
             wm_q = None
-            if WATERMARK_ENABLE:
+            if WATERMARK_ON:
                 if isinstance(wm_val, str):
                     v = wm_val.strip().lower()
                     if v in {"fully", "fullygoto"}:
                         wm_q = "fullygoto"
                     elif v in {"city", "gotocity"}:
                         wm_q = "gotocity"
-                    elif _boolish(v):  # "1","true"等
-                        wm_q = "1"
+                    elif v in {"none", "0", "off", "false", ""}:
+                        wm_q = None
+                    elif _boolish(v):
+                        wm_q = "1"  # 既定の透かし
                 elif wm_val is not None and _boolish(wm_val):
                     wm_q = "1"
 
-            # 署名するか（外部＝未ログインは既定で署名）
-            must_sign = IMAGE_PROTECT and not session.get("user_id")
-            sign      = _boolish(values.pop("_sign", must_sign))
+            # 署名の既定: 外部(=未ログイン)は署名
+            must_sign = (IMAGE_PROTECT_ON and not session.get("user_id"))
+            sign = _boolish(values.pop("_sign", must_sign))
 
+            # 署名URLを生成
             if sign:
-                return build_signed_image_url(filename, wm=(wm_q or False), external=external)
+                try:
+                    if "build_signed_image_url" in globals() and callable(globals()["build_signed_image_url"]):
+                        return build_signed_image_url(filename, wm=(wm_q or False), external=external)
+                except Exception:
+                    # フォールバック（署名できなければ通常URLに wm だけ付与）
+                    pass
 
-            # 署名しない（管理画面など）。wm はクエリ付与
+            # 署名しない（またはフォールバック）: wm をクエリに付与
             if wm_q:
                 values["wm"] = wm_q
+            values["filename"] = filename
             values["_external"] = external
             return url_for(endpoint, **values)
 
+        # 通常エンドポイント
         return url_for(endpoint, **values)
 
     except BuildError:
         return "#"
     except Exception:
+        # 最後のフォールバック（それでもダメなら #）
         try:
             return url_for(endpoint, **values)
         except Exception:
@@ -1634,23 +1715,35 @@ if line_bot_api is not None:
 if _line_enabled() and handler:
     # 既存の厳密判定の「少し後ろ」〜 mute判定の「前」に追加
     def _hit_viewpoints_loose(s: str) -> bool:
-        t = _n(s)
+        try:
+            norm = globals().get("_n", lambda x: re.sub(r"\s+", " ", (x or "").lower()))
+            t = norm(s)
+        except Exception:
+            t = (s or "").strip().lower()
         return (("展望" in t) and ("マップ" in t or "地図" in t)) or ("viewpoint" in t and "map" in t)
 
     # 近く検索の早期処理だけ残す（※デコレータなし）
     def _handle_nearby_text(event, text):
-        """「近く」系テキストの早期処理。処理したら True を返す。"""
+        """
+        「近く」系テキストの早期処理。処理したら True を返す（未処理なら False）。
+        - "near 32.6977,128.8445" の開発ショートカット
+        - 自然文（近く/近場/周辺/付近/現在地/近い/近所/近くの観光地）
+        """
         # 停止/再開・全体停止のガード
         try:
-            if _line_mute_gate(event, text):
+            if globals().get("_line_mute_gate") and _line_mute_gate(event, text):
                 return True
         except Exception:
-            app.logger.exception("_line_mute_gate failed")
+            app.logger.exception("_line_mute_gate failed in _handle_nearby_text")
 
         t = (text or "").strip()
-        user_id = _line_target_id(event)
+        # user_id の取得（個チャ/グループ両対応）
+        try:
+            user_id = _line_target_id(event)
+        except Exception:
+            user_id = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
-        # 開発用ショートカット: "near 32.6977,128.8445"
+        # --- 開発用ショートカット: "near 32.6977,128.8445"
         if t.lower().startswith("near "):
             try:
                 a, b = t[5:].replace("，", ",").split(",", 1)
@@ -1659,8 +1752,8 @@ if _line_enabled() and handler:
                 _reply_or_push(event, "書式: near 32.6977,128.8445")
                 return True
 
-            mode = _LAST["mode"].get(user_id, "all")
-            cats = _mode_to_cats(mode)
+            last_mode = globals().get("_LAST", {}).get("mode", {}).get(user_id, "all")
+            cats = _mode_to_cats(last_mode)
             items = _nearby_core(lat, lng, radius_m=2000, cat_filter=cats, limit=8)
             if not items:
                 _reply_or_push(event, "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）")
@@ -1670,20 +1763,28 @@ if _line_enabled() and handler:
             if flex:
                 line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
             else:
-                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
+                _reply_or_push(event, "\n".join(
+                    [f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i, d in enumerate(items)]
+                ))
             try:
-                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
+                if "save_qa_log" in globals():
+                    save_qa_log(t, "nearby-flex", source="line", hit_db=True,
+                                extra={"kind": "nearby", "mode": last_mode})
             except Exception:
                 pass
             return True
 
-        # 自然文（近く/周辺/付近）
-        if any(k in t for k in ["近く", "周辺", "付近"]):
+        # --- 自然文（近く/近場/周辺/付近/現在地/近い/近所/近くの観光地）
+        lower = t.lower()
+        if any(k in lower for k in ["近く", "近場", "周辺", "付近", "現在地", "近い", "近所"]) or ("近くの観光地" in lower):
             mode = _classify_mode(t)
-            if user_id:
-                _LAST["mode"][user_id] = mode
+            try:
+                if "_LAST" in globals():
+                    _LAST.setdefault("mode", {})[user_id] = mode
+            except Exception:
+                pass
 
-            last = _LAST["location"].get(user_id)
+            last = globals().get("_LAST", {}).get("location", {}).get(user_id)
             if not last:
                 # まずは位置情報をもらう
                 try:
@@ -1703,159 +1804,206 @@ if _line_enabled() and handler:
             if flex:
                 line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
             else:
-                _reply_or_push(event, "\n".join([f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i,d in enumerate(items)]))
+                _reply_or_push(event, "\n".join(
+                    [f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i, d in enumerate(items)]
+                ))
             try:
-                save_qa_log(t, "nearby-flex", source="line", hit_db=True, extra={"kind":"nearby", "mode":mode})
+                if "save_qa_log" in globals():
+                    save_qa_log(t, "nearby-flex", source="line", hit_db=True,
+                                extra={"kind": "nearby", "mode": mode})
             except Exception:
                 pass
             return True
 
         return False
 
-    # ==== ここから：統合した TextMessage ハンドラ（1本だけ残す） ====
-    @handler.add(MessageEvent, message=TextMessage)
-    def handle_message(event):
+# ==== ここから：統合した TextMessage ハンドラ（1本だけ残す） ====
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    try:
+        text = getattr(event.message, "text", "") or ""
+    except Exception:
+        text = ""
+
+    # --- ① ミュート/一時停止ゲート -------------------------
+    try:
+        if _line_mute_gate(event, text):
+            return
+    except Exception:
+        app.logger.exception("_line_mute_gate failed")
+
+    # --- ①.5 透かしコマンド（@Goto City / @fullyGOTO / なし） ----
+    # ※ ここで検出したらユーザー設定に保存し、即時に切替メッセージを返して終了
+    try:
+        uid = None
         try:
-            text = getattr(event.message, "text", "") or ""
+            # 既存のターゲットID関数があれば優先（個チャ/グループ両対応）
+            uid = _line_target_id(event)
         except Exception:
-            text = ""
+            uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
-        # --- ① ミュート/一時停止ゲート -------------------------
-        try:
-            if _line_mute_gate(event, text):
-                return
-        except Exception:
-            app.logger.exception("_line_mute_gate failed")
+        choice = parse_wm_command(text)  # 'gotocity' | 'fullygoto' | 'none' | None
+        if choice is not None:
+            _set_user_wm(uid, choice)
+            label = {"none": "なし", "fullygoto": "@fullyGOTO", "gotocity": "@Goto City"}[choice]
+            try:
+                _reply_or_push(event, f"透かしモードを「{label}」に切り替えました。")
+            except Exception:
+                # 念のため直接replyもフォールバック
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f"透かしモードを「{label}」に切り替えました。")
+                )
+            try:
+                save_qa_log(text, f"wm_choice={choice}", source="line", hit_db=False, extra={"kind": "wm"})
+            except Exception:
+                pass
+            return
+    except Exception:
+        app.logger.exception("wm command handler failed")
 
-        # --- ② マップシリーズ（展望所・海水浴場 ほか） ----------------
-        try:
-            mm = _find_map_by_text(text)
-            if mm:
-                url_fn = mm.get("url_fn")
-                url = url_fn() if callable(url_fn) else ""
-
-                msgs = []
-
-                # 1) ヒットしたマップだけを Flex（1枚）で返信
-                if url:
-                    flex_main = _flex_mymap(
-                        title = mm.get("title") or "マップ",
-                        url   = url,
-                        thumb = mm.get("thumb") or "",
-                        subtitle = (mm.get("subtitle") or mm.get("desc") or "").strip() or None
-                    )
-                    # 念のため空text防止チェック
-                    if isinstance(flex_main, dict) and flex_main.get("contents"):
-                        msgs.append(FlexSendMessage(
-                            alt_text = mm.get("alt") or (mm.get("title") or "マップ"),
-                            contents = flex_main
-                        ))
-                    else:
-                        msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}はこちら：\n{url}"))
-                else:
-                    # URL が作れない場合はテキストのみ
-                    msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}は現在準備中です。"))
-
-                # 2) 残りのシリーズは「テキスト1通」にまとめて案内
-                series_text = _series_text_for_reply(exclude_key=mm.get("key"))
-                msgs.append(TextSendMessage(text=series_text))
-
-                # 1回の reply でまとめて送信 → 終了
-                line_bot_api.reply_message(event.reply_token, msgs[:5])
-                return
-        except Exception:
-            app.logger.exception("[map series] handler failed")
-
-        # --- ③ 近く検索（どちらの実装も生かす） ------------------
-        # 3-1) 既存の早期ハンドラがあれば最優先で使う
-        try:
-            _nearby_early = globals().get("_handle_nearby_text")
-            if callable(_nearby_early) and _nearby_early(event, text):
-                return
-        except Exception:
-            app.logger.exception("nearby early handler failed")
-
-        # 3-2) キーワード版（旧 on_text の簡易実装も維持）
-        try:
-            t = (text or "").lower()
-            if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
-                mode = _classify_mode(text)
-                uid = _line_target_id(event)
-                if "_LAST" in globals():
-                    _LAST["mode"][uid] = mode
-                # 位置情報のお願いを reply/push
-                try:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        _ask_location("現在地から近い順で探します。位置情報を送ってください。")
-                    )
-                except Exception:
-                    _reply_or_push(
-                        event,
-                        "現在地から近い順で探します。位置情報を送ってください。",
-                        force_push=True
-                    )
-                return
-        except Exception:
-            app.logger.exception("nearby keyword handler failed")
-
-        # --- ④ 即答リンク（天気・交通） -------------------------
-        try:
-            w, ok = get_weather_reply(text)
-            app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
-            if ok and w:
-                _reply_or_push(event, w)
-                save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
-                return
-
-            tmsg, ok = get_transport_reply(text)
-            app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
-            if ok and tmsg:
-                _reply_or_push(event, tmsg)
-                save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
-                return
-        except Exception as e:
-            app.logger.exception(f"quick link reply failed: {e}")
-
-        # --- ⑤ スモールトーク/ヘルプ -----------------------------
-        try:
-            st = smalltalk_or_help_reply(text)
-            if st:
-                _reply_or_push(event, st)
-                save_qa_log(text, st, source="line", hit_db=False, extra={"kind":"smalltalk"})
-                return
-        except Exception:
-            app.logger.exception("smalltalk failed")
-
-        # --- ⑥ DB回答（画像→テキストを1回の reply にまとめる） ---
-        try:
-            ans, hit, img_url = _answer_from_entries_min(text)
+    # --- ② マップシリーズ（展望所・海水浴場 ほか） ----------------
+    try:
+        mm = _find_map_by_text(text)
+        if mm:
+            url_fn = mm.get("url_fn")
+            url = url_fn() if callable(url_fn) else ""
 
             msgs = []
-            if img_url:
-                msgs.append(ImageSendMessage(
-                    original_content_url=img_url,
-                    preview_image_url=img_url
-                ))
-            for p in _split_for_line(ans, LINE_SAFE_CHARS):
-                msgs.append(TextSendMessage(text=p))
 
-            line_bot_api.reply_message(event.reply_token, msgs)
+            # 1) ヒットしたマップだけを Flex（1枚）で返信
+            if url:
+                flex_main = _flex_mymap(
+                    title = mm.get("title") or "マップ",
+                    url   = url,
+                    thumb = mm.get("thumb") or "",
+                    subtitle = (mm.get("subtitle") or mm.get("desc") or "").strip() or None
+                )
+                # 念のため空text防止チェック
+                if isinstance(flex_main, dict) and flex_main.get("contents"):
+                    msgs.append(FlexSendMessage(
+                        alt_text = mm.get("alt") or (mm.get("title") or "マップ"),
+                        contents = flex_main
+                    ))
+                else:
+                    msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}はこちら：\n{url}"))
+            else:
+                # URL が作れない場合はテキストのみ
+                msgs.append(TextSendMessage(text=f"{mm.get('title','マップ')}は現在準備中です。"))
 
-            joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
-            save_qa_log(text, joined, source="line", hit_db=hit)
+            # 2) 残りのシリーズは「テキスト1通」にまとめて案内
+            series_text = _series_text_for_reply(exclude_key=mm.get("key"))
+            msgs.append(TextSendMessage(text=series_text))
 
-        except LineBotApiError as e:
-            global LAST_SEND_ERROR, SEND_ERROR_COUNT
-            SEND_ERROR_COUNT = globals().get("SEND_ERROR_COUNT", 0) + 1
-            LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
-            app.logger.exception("LINE send failed")
-        except Exception as e:
-            app.logger.exception("answer flow failed: %s", e)
-            fallback, _ = build_refine_suggestions(text)
-            _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
-            save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
-    # ==== ここまで：統合ハンドラ ====
+            # 1回の reply でまとめて送信 → 終了
+            line_bot_api.reply_message(event.reply_token, msgs[:5])
+            return
+    except Exception:
+        app.logger.exception("[map series] handler failed")
+
+    # --- ③ 近く検索（どちらの実装も生かす） ------------------
+    # 3-1) 既存の早期ハンドラがあれば最優先で使う
+    try:
+        _nearby_early = globals().get("_handle_nearby_text")
+        if callable(_nearby_early) and _nearby_early(event, text):
+            return
+    except Exception:
+        app.logger.exception("nearby early handler failed")
+
+    # 3-2) キーワード版（旧 on_text の簡易実装も維持）
+    try:
+        t = (text or "").lower()
+        if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
+            mode = _classify_mode(text)
+            uid2 = _line_target_id(event)
+            if "_LAST" in globals():
+                _LAST["mode"][uid2] = mode
+            # 位置情報のお願いを reply/push
+            try:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    _ask_location("現在地から近い順で探します。位置情報を送ってください。")
+                )
+            except Exception:
+                _reply_or_push(
+                    event,
+                    "現在地から近い順で探します。位置情報を送ってください。",
+                    force_push=True
+                )
+            return
+    except Exception:
+        app.logger.exception("nearby keyword handler failed")
+
+    # --- ④ 即答リンク（天気・交通） -------------------------
+    try:
+        w, ok = get_weather_reply(text)
+        app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
+        if ok and w:
+            _reply_or_push(event, w)
+            save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
+            return
+
+        tmsg, ok = get_transport_reply(text)
+        app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
+        if ok and tmsg:
+            _reply_or_push(event, tmsg)
+            save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
+            return
+    except Exception as e:
+        app.logger.exception(f"quick link reply failed: {e}")
+
+    # --- ⑤ スモールトーク/ヘルプ -----------------------------
+    try:
+        st = smalltalk_or_help_reply(text)
+        if st:
+            _reply_or_push(event, st)
+            save_qa_log(text, st, source="line", hit_db=False, extra={"kind":"smalltalk"})
+            return
+    except Exception:
+        app.logger.exception("smalltalk failed")
+
+    # --- ⑥ DB回答（画像→テキストを1回の reply にまとめる） ---
+    try:
+        # ★ ユーザーの透かし設定を取得して回答生成に渡す（新旧両対応）
+        uid3 = None
+        try:
+            uid3 = _line_target_id(event)
+        except Exception:
+            uid3 = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+        wm_mode = _get_user_wm(uid3)  # 'none' | 'fullygoto' | 'gotocity'
+
+        try:
+            # 新実装：wm_mode / user_id を受け取れる場合はこちらが使われる
+            ans, hit, img_url = _answer_from_entries_min(text, wm_mode=wm_mode, user_id=uid3)
+        except TypeError:
+            # 旧実装：引数を受け取れない場合は従来通り
+            ans, hit, img_url = _answer_from_entries_min(text)
+
+        msgs = []
+        if img_url:
+            msgs.append(ImageSendMessage(
+                original_content_url=img_url,
+                preview_image_url=img_url
+            ))
+        for p in _split_for_line(ans, LINE_SAFE_CHARS):
+            msgs.append(TextSendMessage(text=p))
+
+        line_bot_api.reply_message(event.reply_token, msgs)
+
+        joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
+        save_qa_log(text, joined, source="line", hit_db=hit)
+
+    except LineBotApiError as e:
+        global LAST_SEND_ERROR, SEND_ERROR_COUNT
+        SEND_ERROR_COUNT = globals().get("SEND_ERROR_COUNT", 0) + 1
+        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed")
+    except Exception as e:
+        app.logger.exception("answer flow failed: %s", e)
+        fallback, _ = build_refine_suggestions(text)
+        _reply_or_push(event, "うまく探せませんでした。\n" + fallback)
+        save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
+# ==== ここまで：統合ハンドラ ====
 
 
     # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
@@ -1949,6 +2097,8 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
     force_push=True のときは reply_token があっても push のみで送る。
     送信失敗は SEND_ERROR_COUNT / SEND_FAIL_COUNT と LAST_SEND_ERROR に記録。
     """
+    LINE_SAFE = globals().get("LINE_SAFE_CHARS", 3800)
+
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
@@ -1969,7 +2119,7 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
             out.append(buf)
         return out
 
-    lim = LINE_SAFE_CHARS
+    lim = LINE_SAFE
     parts = _split_for_line(text, lim) or [""]
     parts = _compress_to(parts, lim)
 
