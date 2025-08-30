@@ -497,6 +497,48 @@ def _build_image_urls(img_name: str | None):
 
     return {"thumb": thumb, "image": orig}
 
+def _build_image_urls_for_entry(e: dict):
+    """
+    サムネ: 常に透かし（従来どおり）
+    原寸: entry['wm_external_choice'] に応じて none/fully/city
+          （後方互換: 旧フラグ wm_external 等が True なら fully）
+    """
+    img_name = (e.get("image_file") or e.get("image") or "").strip()
+    if not img_name:
+        return {"thumb": "", "image": ""}
+
+    # 先に choice を確定（例外が起きても参照できるように）
+    choice = (e.get("wm_external_choice") or "").strip().lower()
+    if choice not in ("none", "fully", "city"):
+        # 後方互換：旧フラグが True なら fully、無ければ none
+        legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
+        choice = "fully" if legacy else "none"
+
+    try:
+        # サムネは常に透かし（wm=True）
+        thumb = build_signed_image_url(img_name, wm=True, external=True)
+
+        if choice == "none":
+            orig = build_signed_image_url(img_name, wm=False, external=True)
+        else:
+            # wm=fully / wm=city を付与
+            orig = build_signed_image_url(img_name, wm=choice, external=True)
+
+        return {"thumb": thumb, "image": orig}
+
+    except Exception:
+        # 例外時は（可能なら）署名URLでフォールバック
+        try:
+            thumb = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True, wm=1)
+            if choice == "none":
+                orig = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True)
+            else:
+                orig = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True, wm=choice)
+            return {"thumb": thumb, "image": orig}
+        except Exception:
+            return {"thumb": "", "image": ""}
+
+
 def _nearby_core(
     lat: float,
     lng: float,
@@ -527,7 +569,7 @@ def _nearby_core(
             continue
 
         img = e.get("image_file") or e.get("image") or ""
-        imgs = _build_image_urls(img)
+        imgs = _build_image_urls_for_entry(e)
 
         row = {
             "idx": i,
@@ -831,13 +873,22 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
     # 型の下駄（無ければ空文字）
     for k in ("category","title","desc","address","map","tel","holiday",
               "open_hours","parking","parking_num","remark",
-              "source","source_url"):                             # ← 追加
+              "source","source_url"):
         if e.get(k) is None:
             e[k] = ""
 
     # category の既定
     if not e["category"]:
         e["category"] = "観光"
+
+    # === 透かし選択（後方互換）===
+    # 文字列化してから正規化（bool 等が来ても落ちないように）
+    wm_choice = str(e.get("wm_external_choice") or "").strip().lower()
+    if wm_choice not in ("none", "fully", "city"):
+        # 旧フラグを厳密に bool 解釈（"false"/"0" などは False に）
+        legacy = any(_boolish(e.get(k)) for k in ("wm_external", "wm_ext_fully", "wm_ext"))
+        wm_choice = "fully" if legacy else "none"
+    e["wm_external_choice"] = wm_choice
 
     return e
 
@@ -1283,7 +1334,7 @@ def safe_url_for(endpoint, **values):
     - endpoint == "serve_image" のとき：
         * デフォルトで、未ログインの外部アクセス時は署名URLを返す（IMAGE_PROTECT 有効時）
         * _sign=True で強制的に署名、_sign=False で署名しない
-        * wm=1（または _wm=True）で透かし付きURL
+        * wm は True/1 だけでなく "fully" / "city" も可
         * _external=True で絶対URLに
     - それ以外は通常の url_for。BuildError は "#" を返す
     """
@@ -1296,18 +1347,29 @@ def safe_url_for(endpoint, **values):
             # url_for と衝突しないよう先に吸い出す
             external = bool(values.pop("_external", False))
             wm_val   = values.pop("wm", values.pop("_wm", None))
-            want_wm  = WATERMARK_ENABLE and (_boolish(wm_val) if wm_val is not None else False)
+            # wm クエリの決定（bool か "fully"/"city"）
+            wm_q = None
+            if WATERMARK_ENABLE:
+                if isinstance(wm_val, str):
+                    v = wm_val.strip().lower()
+                    if v in {"fully", "city"}:
+                        wm_q = v
+                    elif _boolish(v):
+                        wm_q = "1"
+                elif wm_val is not None and _boolish(wm_val):
+                    wm_q = "1"
 
             # 署名するか判断
             must_sign = IMAGE_PROTECT and not session.get("user_id")
             sign      = _boolish(values.pop("_sign", must_sign))
 
             if sign:
-                return build_signed_image_url(filename, wm=want_wm, external=external)
+                # build_signed_image_url は wm に bool か文字列("fully"/"city"/"1")を受け付ける
+                return build_signed_image_url(filename, wm=(wm_q or False), external=external)
 
             # 署名しない（＝管理画面など）。wm 指定があればクエリとして付与
-            if want_wm:
-                values["wm"] = "1"
+            if wm_q:
+                values["wm"] = wm_q
             values["_external"] = external
             return url_for(endpoint, **values)
 
@@ -1909,10 +1971,49 @@ IMAGE_PROTECT = os.getenv("IMAGE_PROTECT","1").lower() in {"1","true","on","yes"
 IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or app.secret_key or "change-me").encode("utf-8")
 SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
 
-WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE","1").lower() in {"1","true","on","yes"}
-WATERMARK_TEXT = os.getenv("WATERMARK_TEXT","@fullyGOTO")
-WATERMARK_OPACITY = int(os.getenv("WATERMARK_OPACITY","160"))   # 0-255
-WATERMARK_SCALE = float(os.getenv("WATERMARK_SCALE","0.035"))   # 画像幅に対する割合（文字サイズ）
+# === Watermark (英語表記に統一) =========================================
+WATERMARK_ENABLE  = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
+WATERMARK_TEXT    = os.getenv("WATERMARK_TEXT", "@Goto City")      # 既定は英語
+WATERMARK_OPACITY = int(os.getenv("WATERMARK_OPACITY", "160"))     # 0-255
+WATERMARK_SCALE   = float(os.getenv("WATERMARK_SCALE", "0.035"))   # 画像幅に対する割合
+
+# 日本語フォントは不要。使いたいフォントがある場合のみパスを環境変数で指定。
+# 例) WATERMARK_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+WATERMARK_FONT_PATH = os.getenv("WATERMARK_FONT_PATH", "").strip()
+
+# 透かしプリセット（既存の "wm=fully" / "wm=city" も英語表記に）
+WM_TEXTS = {
+    "none":  None,
+    "fully": "@Goto City",
+    "city":  "@Goto City",
+}
+
+def _load_wm_font(base_size: int):
+    """
+    透かし用フォントを読み込む（英語フォールバック）。
+    1) 環境変数 WATERMARK_FONT_PATH があれば優先
+    2) OSにある一般的な英字フォントを順に探す
+    3) 最後は PIL のデフォルトフォント
+    """
+    from PIL import ImageFont
+
+    if WATERMARK_FONT_PATH:
+        try:
+            return ImageFont.truetype(WATERMARK_FONT_PATH, base_size)
+        except Exception:
+            pass
+
+    for p in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",  # macOS例
+    ):
+        try:
+            return ImageFont.truetype(p, base_size)
+        except Exception:
+            continue
+
+    return ImageFont.load_default()
 
 def _img_sig(filename: str, exp: int) -> str:
     msg = f"{filename}|{exp}".encode("utf-8")
@@ -1920,64 +2021,85 @@ def _img_sig(filename: str, exp: int) -> str:
         hmac.new(IMAGES_SIGNING_KEY, msg, hashlib.sha256).digest()
     ).rstrip(b"=").decode("ascii")
 
-def build_signed_image_url(filename: str, *, ttl_sec: int|None=None, wm: bool=True, external: bool=True) -> str:
+def build_signed_image_url(filename: str, *, ttl_sec: int|None=None, wm: bool|str=True, external: bool=True) -> str:
     """
-    署名付きURLを生成（wm=Trueで透かし画像を配信）
+    署名付きURLを生成。
+    wm: True/False に加え "fully"/"city" も可（クエリ wm=fully / wm=city を付与）
     """
     if not filename:
         return ""
     if not IMAGE_PROTECT:
         try:
-            return url_for("serve_image", filename=filename, _external=external)
+            q = {}
+            if isinstance(wm, str) and wm:
+                q["wm"] = wm
+            elif wm:
+                q["wm"] = "1"
+            return url_for("serve_image", filename=filename, _external=external, **q)
         except Exception:
             return f"{MEDIA_URL_PREFIX}/{filename}"
+
     ttl = int(ttl_sec or SIGNED_IMAGE_TTL_SEC)
     exp = int(time.time()) + max(60, ttl)
     sig = _img_sig(filename, exp)
+    q = {"sig": sig, "exp": exp}
+    if isinstance(wm, str) and wm:
+        q["wm"] = wm
+    elif wm:
+        q["wm"] = 1
+
     try:
-        return url_for(
-            "serve_image",
-            filename=filename, sig=sig, exp=exp, wm=int(bool(wm)),
-            _external=external
-        )
+        return url_for("serve_image", filename=filename, _external=external, **q)
     except Exception:
-        # 異常時フォールバック（外部URL組み立てが失敗したとき）
-        return f"{MEDIA_URL_PREFIX}/{filename}?sig={sig}&exp={exp}&wm={1 if wm else 0}"
-
-app.jinja_env.globals["signed_image_url"] = build_signed_image_url  # Jinjaからも使える
+        wm_q = q.get("wm", 0)
+        return f"{MEDIA_URL_PREFIX}/{filename}?sig={sig}&exp={exp}&wm={wm_q}"
 
 
-def _apply_text_watermark(im: Image.Image, text: str) -> Image.Image:
+def _apply_text_watermark(im, text: str):
+    """画像に半透明テキスト透かしを描画して返す（英語表記想定）"""
+    from PIL import Image, ImageDraw
+
     if not text:
         return im
-    im = im.convert("RGBA")
-    W, H = im.size
-    # 文字サイズ（画像幅の一定割合）
+
+    base = im.convert("RGBA")
+    W, H = base.size
+
     size = max(12, int(W * WATERMARK_SCALE))
+    sw   = max(1, size // 12)  # 縁取り
+    font = _load_wm_font(size)
+    draw = ImageDraw.Draw(base)
+
+    # テキストサイズ（stroke を考慮）
     try:
-        font = ImageFont.truetype("arial.ttf", size)
-    except Exception:
-        font = ImageFont.load_default()
-    draw = ImageDraw.Draw(im)
-    # bbox（textsizeより新しめ。なければ代替）
-    try:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw, th = (bbox[2]-bbox[0], bbox[3]-bbox[1])
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=sw)
+        tw, th = (bbox[2] - bbox[0], bbox[3] - bbox[1])
     except Exception:
         tw, th = draw.textsize(text, font=font)
 
-    pad = max(6, size//3)
-    x = max(0, W - tw - pad*2)
-    y = max(0, H - th - pad*2)
+    pad = max(6, size // 3)
+    x = max(0, W - tw - pad * 2)
+    y = max(0, H - th - pad * 2)
+
+    opa = max(0, min(255, int(WATERMARK_OPACITY)))
 
     # 半透明の下地
-    bg = Image.new("RGBA", (tw+pad*2, th+pad*2), (0, 0, 0, int(WATERMARK_OPACITY*0.45)))
-    im.alpha_composite(bg, (x, y))
+    bg = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, int(opa * 0.45)))
+    base.alpha_composite(bg, (x, y))
 
-    # 文字（白）
-    draw = ImageDraw.Draw(im)
-    draw.text((x+pad, y+pad), text, fill=(255, 255, 255, WATERMARK_OPACITY), font=font)
-    return im.convert("RGB")
+    # 白文字（黒縁取り）
+    try:
+        draw.text(
+            (x + pad, y + pad), text,
+            fill=(255, 255, 255, opa),
+            font=font,
+            stroke_width=sw,
+            stroke_fill=(0, 0, 0, min(255, opa + 50)),
+        )
+    except TypeError:
+        draw.text((x + pad, y + pad), text, fill=(255, 255, 255, opa), font=font)
+
+    return base.convert("RGB")
 
 
 @app.route(f"{MEDIA_URL_PREFIX}/<path:filename>", methods=["GET","HEAD"])
@@ -2009,20 +2131,34 @@ def serve_image(filename):
     if (not path) or (not os.path.isfile(path)):
         abort(404)
 
-    want_wm = (request.args.get("wm") in {"1", "true", "on", "yes"}) and WATERMARK_ENABLE
+    # --- ここから：wm= の解釈（なし/fully/city/1） ---
+    wm_arg = (request.args.get("wm") or "").strip().lower()
+    wm_text = None
+    if WATERMARK_ENABLE:
+        if wm_arg in {"fully", "city"}:
+            # 文字列指定（例：wm=city）
+            wm_text = WM_TEXTS.get(wm_arg)
+        elif wm_arg in {"1", "true", "on", "yes"}:
+            # 旧来の真偽フラグ → 既定テキスト（環境変数が優先）
+            wm_text = WATERMARK_TEXT or WM_TEXTS.get("fully")
+        else:
+            # 0/空/その他 → 透かし無し
+            wm_text = None
+    # --- ここまで ---
 
-    # HEAD はボディ不要（ただし wm=1 の場合は通常レスポンスと同様に扱っても可）
-    if request.method == "HEAD" and not want_wm:
+    # HEAD はボディ不要（ただし 透かし無しのときだけ早期返却）
+    if request.method == "HEAD" and not wm_text:
         resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
         resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
 
-    if want_wm:
+    # 本体配信
+    if wm_text:
         try:
             with Image.open(path) as im:
                 im = ImageOps.exif_transpose(im)
-                im = _apply_text_watermark(im, WATERMARK_TEXT)
+                im = _apply_text_watermark(im, wm_text)  # ★ 可変テキスト透かしを適用
                 buf = io.BytesIO()
                 im.save(buf, format="JPEG", quality=85, optimize=True, progressive=True, subsampling=2)
                 buf.seek(0)
@@ -2856,63 +2992,45 @@ def _messages_to_prompt(messages):
 # OpenAIラッパ（モデル切替を一元管理）
 def openai_chat(model, messages, **kwargs):
     """
-    - GPT-5 系: Responses API を使用（temperature は渡さない / max_output_tokens を使用）
-    - それ以外: Chat Completions を優先（max_tokens / temperature 可）
-    - どちらも同じ呼び出し感覚で使えるよう吸収
+    コスト固定版:
+    - 常に gpt-5-mini（Responses API）で実行
+    - temperature 等は送らず、max_* は max_output_tokens に正規化
+    - 他モデル名が来ても mini に強制
     """
-    params = dict(kwargs)
-    # 呼び出し側がどれで渡しても拾えるようにする
-    mot = (
-        params.pop("max_output_tokens", None)
-        or params.pop("max_completion_tokens", None)
-        or params.pop("max_tokens", None)
-    )
-    temp = params.pop("temperature", None)
+    safe_model = "gpt-5-mini"
 
-    # GPT-5 系は Responses API を使う
-    use_responses = model.startswith(("gpt-5",))
+    # max token 引数は何で渡されても拾って Responses 用に合わせる
+    mot = (kwargs.pop("max_output_tokens", None)
+           or kwargs.pop("max_completion_tokens", None)
+           or kwargs.pop("max_tokens", None))
 
-    # openai_chat 内、use_responses 分岐を置き換え
-    if use_responses:
+    # 呼び出し側が他モデルを指定してきたらログだけ出して無視
+    if (model or "").strip() != safe_model:
         try:
-            inp = messages
-            # 念のため、文字列だけ渡されたときも対応
-            if isinstance(messages, str):
-                inp = [{"role": "user", "content": messages}]
-            rparams = {"model": model, "input": inp}
-            if mot is not None:
-                rparams["max_output_tokens"] = mot
-            resp = client.responses.create(**rparams)
-            return getattr(resp, "output_text", "") or ""
-        except Exception as e:
-            print("[OpenAI error - responses]", e)
-            return ""
+            app.logger.warning("[openai_chat] model=%r を %s に置換します", model, safe_model)
+        except Exception:
+            pass
 
-    # それ以外のモデルは Chat Completions を優先
+    # 入力の正規化（文字列 or chat形式どちらもOKにする）
+    if isinstance(messages, str):
+        inp = [{"role": "user", "content": messages}]
+    elif isinstance(messages, list):
+        inp = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in messages]
+    else:
+        inp = messages  # 念のため
+
     try:
-        chat_params = {}
+        rparams = {"model": safe_model, "input": inp}
         if mot is not None:
-            chat_params["max_tokens"] = mot
-        if temp is not None:
-            chat_params["temperature"] = temp
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            **chat_params,
-        )
-        return resp.choices[0].message.content
-    except Exception as e1:
-        print("[OpenAI error - chat.completions]", e1)
-        # 念のため Responses API にもフォールバック（4 系でも通ることがある）
+            rparams["max_output_tokens"] = int(mot)
+        resp = client.responses.create(**rparams)
+        return (getattr(resp, "output_text", "") or "").strip()
+    except Exception as e:
         try:
-            rparams = {"model": model, "input": messages}
-            if mot is not None:
-                rparams["max_output_tokens"] = mot
-            resp = client.responses.create(**rparams)
-            return getattr(resp, "output_text", "") or ""
-        except Exception as e2:
-            print("[OpenAI error - responses fallback]", e2)
-            return ""
+            app.logger.exception("openai_chat failed: %s", e)
+        except Exception:
+            pass
+        return ""
 
 # 言語検出＆翻訳
 OPENAI_MODEL_TRANSLATE = os.environ.get("OPENAI_MODEL_TRANSLATE", OPENAI_MODEL_HIGH)
@@ -3640,6 +3758,11 @@ def admin_entry():
                 prev_img = None
                 idx_edit = None
 
+        # ★ 追加: 透かしの“種類”を保存（フォームが無い場合は既存の wm_on から補完）
+        wm_choice = (request.form.get("wm_external_choice") or "").strip().lower()
+        if wm_choice not in ("none", "fully", "city"):
+            wm_choice = "fully" if ('wm_on' in request.form) else "none"
+
         # 新規エントリの骨格
         new_entry = {
             "category": category,
@@ -3660,6 +3783,7 @@ def admin_entry():
             "extras": extras,
             "source": source,           # ← 出典フィールド（任意）
             "source_url": source_url,   # ← 出典URL（任意）
+            "wm_external_choice": wm_choice,  # ★ 追加（後方互換のためここで確定）
         }
         new_entry = _norm_entry(new_entry)
 
@@ -3707,7 +3831,7 @@ def admin_entry():
         if lat is not None: new_entry["lat"] = lat
         if lng is not None: new_entry["lng"] = lng
 
-        # 透かしON/OFF
+        # 透かし（旧UI互換のON/OFFは保持しておく：テンプレ側で使用中のため）
         new_entry["wm_on"] = ('wm_on' in request.form)
 
         # === 保存 ===
@@ -3754,7 +3878,6 @@ def admin_entry():
         role=session.get("role", ""),
         global_paused=_is_global_paused(),
     )
-
 
 @app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
 @app.route("/admin/entry/delete/<int:idx>", methods=["POST"])
