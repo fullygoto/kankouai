@@ -4699,6 +4699,9 @@ def build_refine_suggestions(question):
 @login_required
 def admin_entry():
     import os  # ローカルimportで安全に
+    import re as _re
+    from werkzeug.exceptions import RequestEntityTooLarge  # ★ 追加：except用に確実に定義
+
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
 
@@ -4706,16 +4709,6 @@ def admin_entry():
     def _image_meta(img_name: str | None):
         """
         画像ファイルの存在/サイズ/解像度とURLを返す。
-        戻り値例:
-        {
-          "name": "abcd.jpg",
-          "exists": True/False,
-          "url": "https://.../media/img/abcd.jpg",
-          "bytes": 123456,
-          "kb": 121,  # 切り上げKB
-          "width": 1080,
-          "height": 720
-        }
         """
         if not img_name:
             return None
@@ -4756,8 +4749,6 @@ def admin_entry():
             }
 
     # ---- 座標ユーティリティ（全角/URL/DMSなど何でも受ける）----
-    import re as _re
-
     def _zen2han(s: str) -> str:
         if not s:
             return s
@@ -4927,10 +4918,6 @@ def admin_entry():
             if k:
                 extras[k] = v
 
-        if not areas:
-            flash("エリアは1つ以上選択してください")
-            return redirect(url_for("admin_entry"))
-
         # 編集時の既存エントリ/画像名
         edit_hidden = request.form.get("edit_id")
         prev_img = None
@@ -4952,6 +4939,13 @@ def admin_entry():
         if wm_choice not in ("none", "fully", "city"):
             wm_choice = "fully" if ('wm_on' in request.form) else "none"
 
+        if not areas:
+            flash("エリアは1つ以上選択してください")
+            # ★ 失敗時も編集中行を維持
+            if idx_edit is not None:
+                return redirect(url_for("admin_entry", edit=idx_edit))
+            return redirect(url_for("admin_entry"))
+
         # 新規エントリの骨格
         new_entry = {
             "category": category,
@@ -4972,7 +4966,7 @@ def admin_entry():
             "extras": extras,
             "source": source,           # ← 出典フィールド（任意）
             "source_url": source_url,   # ← 出典URL（任意）
-            "wm_external_choice": wm_choice,  # ★ 追加（後方互換のためここで確定）
+            "wm_external_choice": wm_choice,  # ★ 後方互換のためここで確定
         }
         new_entry = _norm_entry(new_entry)
 
@@ -4982,10 +4976,10 @@ def admin_entry():
         try:
             result = _save_jpeg_1080_350kb(upload, previous=prev_img, delete=delete_flag)
         except RequestEntityTooLarge:
-            # グローバルの 413 ハンドラに任せるなら再送出:
-            # raise
-            # もしくは、ここで画面に戻すなら↓
             flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
+            # ★ エラー時も編集中行を維持
+            if idx_edit is not None:
+                return redirect(url_for("admin_entry", edit=idx_edit))
             return redirect(url_for("admin_entry"))
         except Exception:
             result = None
@@ -5024,16 +5018,19 @@ def admin_entry():
         new_entry["wm_on"] = ('wm_on' in request.form)
 
         # === 保存 ===
-        if idx_edit is not None:
+        if (idx_edit is not None) and (0 <= idx_edit < len(entries)):
             try:
                 entries[idx_edit] = new_entry
                 flash("編集しました")
+                idx_after = idx_edit
             except Exception:
                 entries.append(new_entry)
                 flash("編集ID不正のため新規で追加しました")
+                idx_after = len(entries) - 1
         else:
             entries.append(new_entry)
             flash("登録しました")
+            idx_after = len(entries) - 1
 
         # 保存（重複統合も内部で実行）
         save_entries(entries)
@@ -5049,7 +5046,8 @@ def admin_entry():
         except Exception:
             pass
 
-        return redirect(url_for("admin_entry"))
+        # ★ 保存後も編集中の行を開いた状態に戻す
+        return redirect(url_for("admin_entry", edit=idx_after))
 
     # ---- 一覧用: “サムネ/容量/サイズ” を各エントリに付加（テンプレ未使用なら無害） ----
     entries_view = []
