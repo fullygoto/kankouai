@@ -185,6 +185,17 @@ MEDIA_ROOT = os.getenv("MEDIA_ROOT", "media/img")
 WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
 IMAGE_PROTECT    = os.getenv("IMAGE_PROTECT",    "0").lower() in {"1","true","on","yes"}
 
+# ==== 画像保存/配信のディレクトリ統一（互換アライメント） ====
+MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img")
+IMAGES_DIR = os.getenv("IMAGES_DIR") or MEDIA_ROOT
+MEDIA_ROOT = IMAGES_DIR  # ← 配信・保存とも同じ実体を指すように統一
+try:
+    app.logger.info("[media] MEDIA_ROOT=%s  IMAGES_DIR=%s  URL_PREFIX=%s",
+                    MEDIA_ROOT, IMAGES_DIR, MEDIA_URL_PREFIX)
+except Exception:
+    pass
+
+
 def _wm_choice_from_entries(filename_only: str) -> str | None:
     """エントリ側のラジオ選択から既定の透かしモードを推定。None=透かし無し"""
     try:
