@@ -360,6 +360,22 @@ def serve_image(filename):
         return send_file(path)
 # ==== /画像配信 =================================================
 
+# 別名プレフィックス（環境変数で差し替え可）
+MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img").rstrip("/")
+
+# 上の serve_image を 1つだけ残した状態で、この追記を入れる
+if MEDIA_URL_PREFIX != "/media/img":
+    try:
+        app.add_url_rule(
+            f"{MEDIA_URL_PREFIX}/<path:filename>",
+            endpoint="serve_image_alias",   # ← エンドポイント名は重複させない
+            view_func=serve_image,          # ← 上で定義済みの関数を再利用
+            methods=["GET", "HEAD"]
+        )
+    except AssertionError:
+        pass
+
+
 # ==== My Maps 共通（VIEWER化） ==================================
 def _normalize_mymaps_url(u: str) -> str:
     if not u:
@@ -2678,97 +2694,6 @@ def _apply_text_watermark(im, text: str):
         draw.text((x + pad, y + pad), text, fill=(255, 255, 255, opa), font=font)
 
     return base.convert("RGB")
-
-
-@app.route(f"{MEDIA_URL_PREFIX}/<path:filename>", methods=["GET","HEAD"])
-def serve_image(filename):
-    _, ext = os.path.splitext(filename.lower())
-    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
-        abort(404)
-
-    # --- 署名チェック（管理ログイン時は免除） ---
-    is_signed = False
-    exp = 0
-    if IMAGE_PROTECT:
-        is_admin_view = bool(session.get("user_id"))
-        if not is_admin_view:
-            sig = request.args.get("sig", "")
-            try:
-                exp = int(request.args.get("exp", "0"))
-            except Exception:
-                exp = 0
-            now = int(time.time())
-            if (not sig) or (now > exp) or (not hmac.compare_digest(sig, _img_sig(filename, exp))):
-                abort(404)
-            is_signed = True
-
-    # --- 実ファイルパス確認 ---
-    try:
-        path = safe_join(IMAGES_DIR, filename)
-    except NotFound:
-        abort(404)
-    if (not path) or (not os.path.isfile(path)):
-        abort(404)
-
-    # --- wm= の正規化（fully/city も受理） ---
-    wm_arg = (request.args.get("wm") or "").strip().lower()
-    if wm_arg in {"fully", "fullygoto"}:
-        wm_arg = "fullygoto"
-    elif wm_arg in {"city", "gotocity"}:
-        wm_arg = "gotocity"
-
-    wm_text = None
-    if WATERMARK_ENABLE:
-        if wm_arg in {"fullygoto", "gotocity"}:
-            wm_text = WM_TEXTS.get(wm_arg)
-        elif wm_arg in {"1", "true", "on", "yes"}:
-            wm_text = WATERMARK_TEXT or WM_TEXTS.get("gotocity")
-        else:
-            wm_text = None
-
-    # --- Cache-Control（署名 exp に追従／未署名は数日） ---
-    if is_signed and exp > 0:
-        now = int(time.time())
-        remain = max(0, exp - now - int(SIGNED_IMAGE_CACHE_SAFETY_SEC))
-        cache_max_age = int(remain)
-    else:
-        cache_max_age = int(UNSIGNED_IMAGE_MAX_AGE_SEC)
-
-    # --- HEAD は素のファイルを高速返却（透かし無し時のみ） ---
-    if request.method == "HEAD" and not wm_text:
-        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False)
-        resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
-        resp.headers["Cache-Control"] = f"public, max-age={cache_max_age}"
-        return resp
-
-    # --- 本体返却（必要なら透かしを合成） ---
-    if wm_text:
-        try:
-            with Image.open(path) as im:
-                im = ImageOps.exif_transpose(im)
-                im = _apply_text_watermark(im, wm_text)
-                buf = io.BytesIO()
-                im.save(buf, format="JPEG", quality=85, optimize=True, progressive=True, subsampling=2)
-                buf.seek(0)
-            resp = send_file(buf, mimetype="image/jpeg")
-        except Exception:
-            resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False)
-    else:
-        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False)
-
-    resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
-    resp.headers["Cache-Control"] = f"public, max-age={cache_max_age}"
-    return resp
-
-# 1080px / 350KBに正規化してJPEG保存（出力は常に .jpg）
-TARGET_JPEG_MAX_W      = 1080
-TARGET_JPEG_MAX_KB     = 350
-TARGET_JPEG_MAX_BYTES  = TARGET_JPEG_MAX_KB * 1024
-
-try:
-    RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
-except AttributeError:
-    RESAMPLE_LANCZOS = Image.LANCZOS
 
 
 def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool=False) -> str|None:
