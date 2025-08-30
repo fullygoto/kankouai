@@ -499,35 +499,44 @@ def _build_image_urls(img_name: str | None):
 
 def _build_image_urls_for_entry(e: dict):
     """
-    サムネ: 常に透かし（従来どおり）
-    原寸: entry['wm_external_choice'] に応じて none/fully/city
-          （後方互換: 旧フラグ wm_external 等が True なら fully）
+    サムネ: 常に透かし（wm=True）
+    原寸: entry['wm_external_choice'] に応じて none / fullygoto / gotocity
+         （後方互換: 旧 'fully' / 'city' は 'gotocity' に、旧真偽フラグが立っていれば 'gotocity'）
     """
     img_name = (e.get("image_file") or e.get("image") or "").strip()
     if not img_name:
         return {"thumb": "", "image": ""}
 
-    # 先に choice を確定（例外が起きても参照できるように）
-    choice = (e.get("wm_external_choice") or "").strip().lower()
-    if choice not in ("none", "fully", "city"):
-        # 後方互換：旧フラグが True なら fully、無ければ none
-        legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
-        choice = "fully" if legacy else "none"
+    # 選択肢の正規化
+    choice_raw = (e.get("wm_external_choice") or "").strip().lower()
+    valid_choices = {"none", "fullygoto", "gotocity"}
+
+    if choice_raw in valid_choices:
+        choice = choice_raw
+    else:
+        # 旧値の移行（fully / city → gotocity）
+        if choice_raw in {"fully", "city"}:
+            choice = "gotocity"
+        else:
+            # 旧フラグ（bool系）が True なら @Goto City を既定採用
+            legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
+            choice = "gotocity" if legacy else "none"
 
     try:
         # サムネは常に透かし（wm=True）
         thumb = build_signed_image_url(img_name, wm=True, external=True)
 
+        # 原寸は選択肢に応じて
         if choice == "none":
             orig = build_signed_image_url(img_name, wm=False, external=True)
         else:
-            # wm=fully / wm=city を付与
+            # "fullygoto" / "gotocity" をそのままクエリに乗せる
             orig = build_signed_image_url(img_name, wm=choice, external=True)
 
         return {"thumb": thumb, "image": orig}
 
     except Exception:
-        # 例外時は（可能なら）署名URLでフォールバック
+        # フォールバック（署名URL生成ユーティリティ）
         try:
             thumb = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True, wm=1)
             if choice == "none":
@@ -1352,7 +1361,7 @@ def safe_url_for(endpoint, **values):
             if WATERMARK_ENABLE:
                 if isinstance(wm_val, str):
                     v = wm_val.strip().lower()
-                    if v in {"fully", "city"}:
+                    if v in {"fullygoto", "gotocity"}:
                         wm_q = v
                     elif _boolish(v):
                         wm_q = "1"
@@ -1981,12 +1990,13 @@ WATERMARK_SCALE   = float(os.getenv("WATERMARK_SCALE", "0.035"))   # 画像幅�
 # 例) WATERMARK_FONT_PATH=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
 WATERMARK_FONT_PATH = os.getenv("WATERMARK_FONT_PATH", "").strip()
 
-# 透かしプリセット（既存の "wm=fully" / "wm=city" も英語表記に）
+# 透かしプリセット（内部キー → 実際に描く文言）
 WM_TEXTS = {
-    "none":  None,
-    "fully": "@Goto City",
-    "city":  "@Goto City",
+    "none":      None,
+    "fullygoto": "@fullyGOTO",
+    "gotocity":  "@Goto City",
 }
+
 
 def _load_wm_font(base_size: int):
     """
@@ -2024,7 +2034,7 @@ def _img_sig(filename: str, exp: int) -> str:
 def build_signed_image_url(filename: str, *, ttl_sec: int|None=None, wm: bool|str=True, external: bool=True) -> str:
     """
     署名付きURLを生成。
-    wm: True/False に加え "fully"/"city" も可（クエリ wm=fully / wm=city を付与）
+    wm: True/False に加え "fullygoto" / "gotocity" も可（クエリ wm=fullygoto / wm=gotocity を付与）
     """
     if not filename:
         return ""
@@ -2135,14 +2145,12 @@ def serve_image(filename):
     wm_arg = (request.args.get("wm") or "").strip().lower()
     wm_text = None
     if WATERMARK_ENABLE:
-        if wm_arg in {"fully", "city"}:
-            # 文字列指定（例：wm=city）
+        if wm_arg in {"fullygoto", "gotocity"}:
             wm_text = WM_TEXTS.get(wm_arg)
         elif wm_arg in {"1", "true", "on", "yes"}:
-            # 旧来の真偽フラグ → 既定テキスト（環境変数が優先）
-            wm_text = WATERMARK_TEXT or WM_TEXTS.get("fully")
+            # 真偽指定のときは既定テキスト（環境変数があればそれ、無ければ @Goto City）
+            wm_text = WATERMARK_TEXT or WM_TEXTS.get("gotocity")
         else:
-            # 0/空/その他 → 透かし無し
             wm_text = None
     # --- ここまで ---
 
