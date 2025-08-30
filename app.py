@@ -247,14 +247,28 @@ def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = No
     """
     単一マップのバブル or カルーセル（1枚）。
     subtitle が空/None のときは2行目を入れない（LINEの空text禁止対策）。
+    サムネは署名URL化（ファイル名想定）。http(s) のときのみ素通し。
     """
     title = (title or "マップ").strip()
     if not url:
         return None
 
-    body_contents = [
-        {"type": "text", "text": title, "weight": "bold", "wrap": True},
-    ]
+    # 署名付きサムネ（ファイル名想定）。http(s) の場合だけ素通し。
+    hero = None
+    thumb_url = ""
+    t = (thumb or "").strip()
+    if t:
+        try:
+            if t.startswith("http://") or t.startswith("https://"):
+                thumb_url = t
+            else:
+                thumb_url = build_signed_image_url(t, wm=True, external=True)
+        except Exception:
+            thumb_url = ""
+    if thumb_url:
+        hero = {"type": "image", "url": thumb_url, "size": "full", "aspectMode": "cover", "aspectRatio": "16:9"}
+
+    body_contents = [{"type": "text", "text": title, "weight": "bold", "wrap": True}]
     if subtitle:
         st = str(subtitle).strip()
         if st:
@@ -262,12 +276,12 @@ def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = No
 
     bubble = {
         "type": "bubble",
-        **({"hero": {"type":"image","url":thumb,"size":"full","aspectMode":"cover","aspectRatio":"16:9"}} if thumb else {}),
+        **({"hero": hero} if hero else {}),
         "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body_contents},
         "footer": {
-            "type":"box","layout":"vertical","spacing":"sm","contents":[
-                {"type":"button","style":"primary","action":{"type":"uri","label":"マップを開く","uri":url}}
-            ]
+            "type": "box", "layout": "vertical", "spacing": "sm",
+            "contents": [{"type": "button", "style": "primary",
+                          "action": {"type": "uri", "label": "マップを開く", "uri": url}}]
         }
     }
     return {"type": "carousel", "contents": [bubble]}
@@ -501,42 +515,34 @@ def _build_image_urls_for_entry(e: dict):
     """
     サムネ: 常に透かし（wm=True）
     原寸: entry['wm_external_choice'] に応じて none / fullygoto / gotocity
-         （後方互換: 旧 'fully' / 'city' は 'gotocity' に、旧真偽フラグが立っていれば 'gotocity'）
+          （後方互換: 旧 'fully'→'fullygoto'、旧 'city'→'gotocity'。旧フラグが True なら 'gotocity'）
     """
     img_name = (e.get("image_file") or e.get("image") or "").strip()
     if not img_name:
         return {"thumb": "", "image": ""}
 
-    # 選択肢の正規化
-    choice_raw = (e.get("wm_external_choice") or "").strip().lower()
-    valid_choices = {"none", "fullygoto", "gotocity"}
-
-    if choice_raw in valid_choices:
-        choice = choice_raw
-    else:
-        # 旧値の移行（fully / city → gotocity）
-        if choice_raw in {"fully", "city"}:
-            choice = "gotocity"
+    # choice 決定（legacy を正しくマップ）
+    choice = (e.get("wm_external_choice") or "").strip().lower()
+    if choice not in ("none", "fullygoto", "gotocity"):
+        if choice in ("fully", "city"):
+            choice = "fullygoto" if choice == "fully" else "gotocity"
         else:
-            # 旧フラグ（bool系）が True なら @Goto City を既定採用
             legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
             choice = "gotocity" if legacy else "none"
 
     try:
-        # サムネは常に透かし（wm=True）
+        # サムネは常に透かし
         thumb = build_signed_image_url(img_name, wm=True, external=True)
 
-        # 原寸は選択肢に応じて
         if choice == "none":
             orig = build_signed_image_url(img_name, wm=False, external=True)
         else:
-            # "fullygoto" / "gotocity" をそのままクエリに乗せる
             orig = build_signed_image_url(img_name, wm=choice, external=True)
 
         return {"thumb": thumb, "image": orig}
 
     except Exception:
-        # フォールバック（署名URL生成ユーティリティ）
+        # 例外時フォールバック（署名URL）
         try:
             thumb = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True, wm=1)
             if choice == "none":
@@ -552,12 +558,18 @@ def _nearby_core(
     lat: float,
     lng: float,
     *,
-    radius_m:int = 1500,
-    cat_filter:set[str] | None = None,
-    limit:int = 20,
-    record_sources: bool = False,   # ← 追加
+    radius_m: int = 1500,
+    cat_filter: set[str] | None = None,
+    limit: int = 20,
+    record_sources: bool = False,
 ):
-    # entries 取得（既存のロード関数を使用）
+    """
+    現在地 (lat, lng) から半径 radius_m[m] 以内の entries を距離昇順で返す。
+    - cat_filter: {カテゴリー名,...} を指定すると一致するものだけに絞り込み
+    - limit: 返す件数（最低1件）
+    - record_sources: True のとき、ヒットした各エントリの「出典」テキストを
+      g.response_sources に登録（フォームの 'source' が空なら何もしない）
+    """
     try:
         items = [_norm_entry(x) for x in load_entries()]
     except Exception:
@@ -570,37 +582,49 @@ def _nearby_core(
         if cat_filter and cat not in cat_filter:
             continue
 
+        # 位置取得（エントリのlat/lng or map URLから推定）
         elat, elng = _entry_latlng(e)
         if elat is None or elng is None:
             continue
+
+        # 距離フィルタ
         d_km = _haversine_km(lat, lng, elat, elng)
         if d_km * 1000 > radius_m:
             continue
 
-        img = e.get("image_file") or e.get("image") or ""
+        # 画像URL（サムネは透かし、原寸は外部公開ポリシーに従う）
         imgs = _build_image_urls_for_entry(e)
 
         row = {
             "idx": i,
-            "title": e.get("title",""),
-            "desc": e.get("desc",""),
-            "address": e.get("address",""),
+            "title": e.get("title", ""),
+            "desc": e.get("desc", ""),
+            "address": e.get("address", ""),
             "category": cat,
             "areas": e.get("areas") or [],
             "tags": e.get("tags") or [],
-            "lat": elat, "lng": elng,
-            "distance_m": int(round(d_km*1000)),
+            "lat": elat,
+            "lng": elng,
+            "distance_m": int(round(d_km * 1000)),
             "google_url": entry_open_map_url(e, lat=elat, lng=elng),
             "mymap_url": mymap_view_url(lat=elat, lng=elng) if MYMAP_MID else "",
-            "image_thumb": imgs["thumb"],
-            "image_url": imgs["image"],
+            "image_thumb": imgs.get("thumb", ""),
+            "image_url": imgs.get("image", ""),
         }
-        record_source_from_entry(e)
+
+        # ★ 出典登録はフラグで制御（フォームの「出典」テキストが空なら何もしない）
+        if record_sources:
+            record_source_from_entry(e)
+
         rows.append(row)
 
     rows.sort(key=lambda x: x["distance_m"])
-    return rows[:max(1, int(limit))]
-
+    # limit は最低 1 件返す
+    try:
+        lim = int(limit)
+    except Exception:
+        lim = 20
+    return rows[:max(1, lim)]
 
 def _nearby_flex(items: list[dict]):
     bubbles = []
@@ -893,10 +917,15 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
     # === 透かし選択（後方互換）===
     # 文字列化してから正規化（bool 等が来ても落ちないように）
     wm_choice = str(e.get("wm_external_choice") or "").strip().lower()
-    if wm_choice not in ("none", "fully", "city"):
-        # 旧フラグを厳密に bool 解釈（"false"/"0" などは False に）
+    # 新旧トークンを正規化
+    if wm_choice in ("fully", "fullygoto"):
+        wm_choice = "fullygoto"
+    elif wm_choice in ("city", "gotocity"):
+        wm_choice = "gotocity"
+    elif wm_choice not in ("none", "fullygoto", "gotocity"):
+        # 旧ブール系フラグが True なら "gotocity" を既定に
         legacy = any(_boolish(e.get(k)) for k in ("wm_external", "wm_ext_fully", "wm_ext"))
-        wm_choice = "fully" if legacy else "none"
+        wm_choice = "gotocity" if legacy else "none"
     e["wm_external_choice"] = wm_choice
 
     return e
@@ -1339,12 +1368,12 @@ def _boolish(x) -> bool:
 
 def safe_url_for(endpoint, **values):
     """
-    既存の url_for を安全化 + 画像エンドポイントだけ“おまかせ署名”対応。
-    - endpoint == "serve_image" のとき：
-        * デフォルトで、未ログインの外部アクセス時は署名URLを返す（IMAGE_PROTECT 有効時）
-        * _sign=True で強制的に署名、_sign=False で署名しない
-        * wm は True/1 だけでなく "fully" / "city" も可
-        * _external=True で絶対URLに
+    url_for の安全版 + 画像エンドポイントだけ“おまかせ署名”対応。
+    - endpoint == "serve_image":
+        * _sign=True で署名URL、_sign=False で素URL
+        * デフォルトは「外部(未ログイン)アクセス時は署名」
+        * wm は True/1/“fully”/“city”/“fullygoto”/“gotocity”を受け付ける
+        * _external=True で絶対URL
     - それ以外は通常の url_for。BuildError は "#" を返す
     """
     try:
@@ -1353,42 +1382,41 @@ def safe_url_for(endpoint, **values):
             if not filename:
                 return "#"
 
-            # url_for と衝突しないよう先に吸い出す
             external = bool(values.pop("_external", False))
             wm_val   = values.pop("wm", values.pop("_wm", None))
-            # wm クエリの決定（bool か "fully"/"city"）
+
+            # wm の正規化（fully/city を新キーにマップ）
             wm_q = None
             if WATERMARK_ENABLE:
                 if isinstance(wm_val, str):
                     v = wm_val.strip().lower()
-                    if v in {"fullygoto", "gotocity"}:
-                        wm_q = v
-                    elif _boolish(v):
+                    if v in {"fully", "fullygoto"}:
+                        wm_q = "fullygoto"
+                    elif v in {"city", "gotocity"}:
+                        wm_q = "gotocity"
+                    elif _boolish(v):  # "1","true"等
                         wm_q = "1"
                 elif wm_val is not None and _boolish(wm_val):
                     wm_q = "1"
 
-            # 署名するか判断
+            # 署名するか（外部＝未ログインは既定で署名）
             must_sign = IMAGE_PROTECT and not session.get("user_id")
             sign      = _boolish(values.pop("_sign", must_sign))
 
             if sign:
-                # build_signed_image_url は wm に bool か文字列("fully"/"city"/"1")を受け付ける
                 return build_signed_image_url(filename, wm=(wm_q or False), external=external)
 
-            # 署名しない（＝管理画面など）。wm 指定があればクエリとして付与
+            # 署名しない（管理画面など）。wm はクエリ付与
             if wm_q:
                 values["wm"] = wm_q
             values["_external"] = external
             return url_for(endpoint, **values)
 
-        # 通常のエンドポイント
         return url_for(endpoint, **values)
 
     except BuildError:
-        return "#"  # 未実装リンクはダミーへ
+        return "#"
     except Exception:
-        # 念のためのフォールバック
         try:
             return url_for(endpoint, **values)
         except Exception:
@@ -1417,6 +1445,45 @@ ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1"
 
 # OpenAI v1 クライアント
 client = OpenAI(timeout=15)
+
+
+# --- OpenAIラッパ（モデル切替を一元管理：正規版） ---
+if 'openai_chat' not in globals():
+    def openai_chat(model, messages, **kwargs):
+        """
+        Responses API で常に gpt-5-mini を使う軽量ラッパ。
+        messages: str か [{"role","content"}] のどちらもOK。
+        max_tokens 系は max_output_tokens に正規化。
+        """
+        if not os.environ.get("OPENAI_API_KEY"):
+            return ""
+        safe_model = "gpt-5-mini"
+        mot = (kwargs.pop("max_output_tokens", None)
+               or kwargs.pop("max_completion_tokens", None)
+               or kwargs.pop("max_tokens", None))
+        max_tokens = int(mot) if mot else 600
+
+        if isinstance(messages, str):
+            msgs = [{"role": "user", "content": messages}]
+        elif isinstance(messages, list):
+            msgs = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in messages]
+        else:
+            msgs = [{"role": "user", "content": str(messages)}]
+
+        try:
+            res = client.responses.create(
+                model=safe_model,
+                input=[{"role": m["role"], "content": m["content"]} for m in msgs],
+                max_output_tokens=max_tokens,
+            )
+            return (getattr(res, "output_text", "") or "").strip()
+        except Exception as e:
+            try:
+                app.logger.exception("openai_chat failed: %s", e)
+            except Exception:
+                pass
+            return ""
+
 
 # LINE Bot
 
@@ -1979,6 +2046,12 @@ ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 IMAGE_PROTECT = os.getenv("IMAGE_PROTECT","1").lower() in {"1","true","on","yes"}
 IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or app.secret_key or "change-me").encode("utf-8")
 SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
+# 署名URLのキャッシュ安全マージン（exp までの残時間から引く秒数）
+SIGNED_IMAGE_CACHE_SAFETY_SEC = int(os.getenv("SIGNED_IMAGE_CACHE_SAFETY_SEC", "300"))  # 既定: 5分
+
+# 未署名アクセス（管理画面など）時のキャッシュ秒数（数日推奨）
+UNSIGNED_IMAGE_MAX_AGE_SEC = int(os.getenv("UNSIGNED_IMAGE_MAX_AGE_SEC", "259200"))  # 既定: 3日
+
 
 # === Watermark (英語表記に統一) =========================================
 WATERMARK_ENABLE  = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
@@ -2114,12 +2187,13 @@ def _apply_text_watermark(im, text: str):
 
 @app.route(f"{MEDIA_URL_PREFIX}/<path:filename>", methods=["GET","HEAD"])
 def serve_image(filename):
-    # 互換のため jpeg/png/webp を許容（保存は常にjpgの想定）
     _, ext = os.path.splitext(filename.lower())
     if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
         abort(404)
 
-    # 署名チェック（管理画面ログイン中は通す／外部は必須）
+    # --- 署名チェック（管理ログイン時は免除） ---
+    is_signed = False
+    exp = 0
     if IMAGE_PROTECT:
         is_admin_view = bool(session.get("user_id"))
         if not is_admin_view:
@@ -2130,10 +2204,10 @@ def serve_image(filename):
                 exp = 0
             now = int(time.time())
             if (not sig) or (now > exp) or (not hmac.compare_digest(sig, _img_sig(filename, exp))):
-                # 存在漏えいを避けるため 404 にする
                 abort(404)
+            is_signed = True
 
-    # ★ IMAGES_DIR 配下に固定し、ディレクトリ・トラバーサルを遮断
+    # --- 実ファイルパス確認 ---
     try:
         path = safe_join(IMAGES_DIR, filename)
     except NotFound:
@@ -2141,45 +2215,54 @@ def serve_image(filename):
     if (not path) or (not os.path.isfile(path)):
         abort(404)
 
-    # --- ここから：wm= の解釈（なし/fully/city/1） ---
+    # --- wm= の正規化（fully/city も受理） ---
     wm_arg = (request.args.get("wm") or "").strip().lower()
+    if wm_arg in {"fully", "fullygoto"}:
+        wm_arg = "fullygoto"
+    elif wm_arg in {"city", "gotocity"}:
+        wm_arg = "gotocity"
+
     wm_text = None
     if WATERMARK_ENABLE:
         if wm_arg in {"fullygoto", "gotocity"}:
             wm_text = WM_TEXTS.get(wm_arg)
         elif wm_arg in {"1", "true", "on", "yes"}:
-            # 真偽指定のときは既定テキスト（環境変数があればそれ、無ければ @Goto City）
             wm_text = WATERMARK_TEXT or WM_TEXTS.get("gotocity")
         else:
             wm_text = None
-    # --- ここまで ---
 
-    # HEAD はボディ不要（ただし 透かし無しのときだけ早期返却）
+    # --- Cache-Control（署名 exp に追従／未署名は数日） ---
+    if is_signed and exp > 0:
+        now = int(time.time())
+        remain = max(0, exp - now - int(SIGNED_IMAGE_CACHE_SAFETY_SEC))
+        cache_max_age = int(remain)
+    else:
+        cache_max_age = int(UNSIGNED_IMAGE_MAX_AGE_SEC)
+
+    # --- HEAD は素のファイルを高速返却（透かし無し時のみ） ---
     if request.method == "HEAD" and not wm_text:
-        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False)
         resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
-        resp.headers["Cache-Control"] = "public, max-age=86400"
+        resp.headers["Cache-Control"] = f"public, max-age={cache_max_age}"
         return resp
 
-    # 本体配信
+    # --- 本体返却（必要なら透かしを合成） ---
     if wm_text:
         try:
             with Image.open(path) as im:
                 im = ImageOps.exif_transpose(im)
-                im = _apply_text_watermark(im, wm_text)  # ★ 可変テキスト透かしを適用
+                im = _apply_text_watermark(im, wm_text)
                 buf = io.BytesIO()
                 im.save(buf, format="JPEG", quality=85, optimize=True, progressive=True, subsampling=2)
                 buf.seek(0)
-            resp = send_file(buf, mimetype="image/jpeg", max_age=3600)
+            resp = send_file(buf, mimetype="image/jpeg")
         except Exception:
-            # 透かし失敗時は素の画像にフォールバック
-            resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+            resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False)
     else:
-        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False, max_age=86400)
+        resp = send_from_directory(IMAGES_DIR, filename, as_attachment=False)
 
-    # 追加ヘッダ（検索避け & キャッシュ）
     resp.headers["X-Robots-Tag"] = "noindex, noimageindex, nofollow"
-    resp.headers["Cache-Control"] = "public, max-age=86400"
+    resp.headers["Cache-Control"] = f"public, max-age={cache_max_age}"
     return resp
 
 # 1080px / 350KBに正規化してJPEG保存（出力は常に .jpg）
@@ -2356,7 +2439,7 @@ def _get_image_meta(filename: str):
         pass
 
     try:
-        url = url_for("serve_image", filename=filename, _external=True)
+        url = build_signed_image_url(filename, wm=True, external=True)
     except Exception:
         url = f"{MEDIA_URL_PREFIX}/{filename}"
 
@@ -2997,49 +3080,6 @@ def _messages_to_prompt(messages):
     return "\n".join(lines)
 
 
-# OpenAIラッパ（モデル切替を一元管理）
-def openai_chat(model, messages, **kwargs):
-    """
-    コスト固定版:
-    - 常に gpt-5-mini（Responses API）で実行
-    - temperature 等は送らず、max_* は max_output_tokens に正規化
-    - 他モデル名が来ても mini に強制
-    """
-    safe_model = "gpt-5-mini"
-
-    # max token 引数は何で渡されても拾って Responses 用に合わせる
-    mot = (kwargs.pop("max_output_tokens", None)
-           or kwargs.pop("max_completion_tokens", None)
-           or kwargs.pop("max_tokens", None))
-
-    # 呼び出し側が他モデルを指定してきたらログだけ出して無視
-    if (model or "").strip() != safe_model:
-        try:
-            app.logger.warning("[openai_chat] model=%r を %s に置換します", model, safe_model)
-        except Exception:
-            pass
-
-    # 入力の正規化（文字列 or chat形式どちらもOKにする）
-    if isinstance(messages, str):
-        inp = [{"role": "user", "content": messages}]
-    elif isinstance(messages, list):
-        inp = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in messages]
-    else:
-        inp = messages  # 念のため
-
-    try:
-        rparams = {"model": safe_model, "input": inp}
-        if mot is not None:
-            rparams["max_output_tokens"] = int(mot)
-        resp = client.responses.create(**rparams)
-        return (getattr(resp, "output_text", "") or "").strip()
-    except Exception as e:
-        try:
-            app.logger.exception("openai_chat failed: %s", e)
-        except Exception:
-            pass
-        return ""
-
 # 言語検出＆翻訳
 OPENAI_MODEL_TRANSLATE = os.environ.get("OPENAI_MODEL_TRANSLATE", OPENAI_MODEL_HIGH)
 
@@ -3087,78 +3127,92 @@ def translate_text(text: str, target_lang: str) -> str:
 # =========================
 #  スモールトーク／使い方（スタブ）
 # =========================
-def smalltalk_or_help_reply(text: str):
-    """
-    TODO: 後で本実装に差し替え。
-    ここでは '使い方' などの簡単なキーワードだけ返す簡易版。
-    未ヒットなら None を返す（ハンドラ側で通常フロー継続）。
-    """
-    t = (text or "").strip()
-    if not t:
+if 'get_weather_reply' not in globals():
+    def get_weather_reply(text: str):
+        return None, False
+
+if 'get_transport_reply' not in globals():
+    def get_transport_reply(text: str):
+        return None, False
+
+if 'build_refine_suggestions' not in globals():
+    def build_refine_suggestions(text: str):
+        return "キーワードを増やす（例：地名＋カテゴリ）／別表記でもう一度お試しください。", []
+
+if 'smalltalk_or_help_reply' not in globals():
+    def smalltalk_or_help_reply(text: str):
+        t = _n(text)
+        if t in {"help", "使い方", "ヘルプ"}:
+            return "使い方：施設名やカテゴリで聞いてください。現在地から探す場合は「近く」と送ると位置情報ボタンが出ます。"
+        if t in {"こんにちは", "こんちは", "hi", "hello"}:
+            return "こんにちは！五島の情報をお探しですか？"
         return None
-
-    # かんたんヘルプ
-    help_kw = ["使い方", "ヘルプ", "help", "つかいかた"]
-    if any(k in t for k in help_kw):
-        return (
-            "使い方のヒント:\n"
-            "・「天気」→各エリアの天気リンク\n"
-            "・「フェリー」「飛行機」→運行状況リンク\n"
-            "・スポット名や「教会」「うどん」などで検索できます"
-        )
-
-    # 軽いあいづち（必要に応じて増減OK）
-    smalltalk = {
-        "こんにちは": "こんにちは！ご用件をどうぞ。",
-        "ありがとう": "どういたしまして！",
-        "はじめまして": "はじめまして。五島のことなら任せてください！",
-    }
-    for k, v in smalltalk.items():
-        if k in t:
-            return v
-
-    return None
 
 # =========================
 #  お知らせ・データI/O
 # =========================
 def load_notices():
-    return _safe_read_json(NOTICES_FILE, [])
+    """お知らせ一覧（必ず list を返す）"""
+    data = _safe_read_json(NOTICES_FILE, [])
+    return data if isinstance(data, list) else []
 
 def save_notices(notices):
-    _atomic_json_dump(NOTICES_FILE, notices)
+    """お知らせ一覧をアトミック保存（不正値でも list 化）"""
+    _atomic_json_dump(NOTICES_FILE, list(notices or []))
+
 
 def load_entries():
+    """スポット一覧（正規化して返す）"""
     raw = _safe_read_json(ENTRIES_FILE, [])
-    return [_norm_entry(e) for e in raw]
+    return [_norm_entry(e) for e in raw if isinstance(e, dict)]
 
 def save_entries(entries):
-    """保存前に正規化＋タイトル重複を統合（DEDUPE_ON_SAVE=1 なら）"""
-    entries = [_norm_entry(e) for e in (entries or [])]
+    """
+    保存前に正規化＋（設定オンなら）タイトル重複統合。
+    壊れ値が混じっても dict のみ採用して落ちないように。
+    """
+    items = [_norm_entry(e) for e in (entries or []) if isinstance(e, dict)]
     if DEDUPE_ON_SAVE:
         try:
-            entries, stats, _ = dedupe_entries_by_title(entries, use_ai=DEDUPE_USE_AI, dry_run=False)
-            app.logger.info(f"[dedupe] merged_groups={stats['merged_groups']} removed={stats['removed']} total_after={stats['total_after']}")
-        except Exception as e:
-            app.logger.exception(f"[dedupe] failed: {e}")
-    _atomic_json_dump(ENTRIES_FILE, entries)
+            items, stats, _ = dedupe_entries_by_title(items, use_ai=DEDUPE_USE_AI, dry_run=False)
+            app.logger.info(
+                "[dedupe] merged_groups=%s removed=%s total_after=%s",
+                stats.get("merged_groups"), stats.get("removed"), stats.get("total_after")
+            )
+        except Exception:
+            app.logger.exception("[dedupe] failed")
+    _atomic_json_dump(ENTRIES_FILE, items)
+
 
 def load_synonyms():
-    return _safe_read_json(SYNONYM_FILE, {})
+    """タグ類義語辞書（必ず dict を返す）"""
+    data = _safe_read_json(SYNONYM_FILE, {})
+    return data if isinstance(data, dict) else {}
 
 def save_synonyms(synonyms):
-    _atomic_json_dump(SYNONYM_FILE, synonyms)
+    """類義語辞書をアトミック保存（不正値でも dict 化）"""
+    _atomic_json_dump(SYNONYM_FILE, dict(synonyms or {}))
+
 
 def load_shop_info(user_id):
+    """
+    店舗用プロフィール情報を取得（必ず dict）
+    ※ user_id は JSON キーとして文字列化して扱う
+    """
     infos = _safe_read_json(SHOP_INFO_FILE, {})
-    return infos.get(user_id, {})
+    if not isinstance(infos, dict):
+        return {}
+    rec = infos.get(str(user_id)) or {}
+    return rec if isinstance(rec, dict) else {}
 
 def save_shop_info(user_id, info):
-    infos = {}
-    if os.path.exists(SHOP_INFO_FILE):
-        with open(SHOP_INFO_FILE, "r", encoding="utf-8") as f:
-            infos = json.load(f)
-    infos[user_id] = info
+    """
+    店舗用プロフィール情報を保存（アトミック・壊れた JSON 自己修復）
+    """
+    infos = _safe_read_json(SHOP_INFO_FILE, {})
+    if not isinstance(infos, dict):
+        infos = {}
+    infos[str(user_id)] = dict(info or {})
     _atomic_json_dump(SHOP_INFO_FILE, infos)
 
 # =========================
@@ -5114,35 +5168,47 @@ def _debug_line_status():
         "webhook_url_hint": "/callback (POST)",  # LINEコンソールにこのパスで登録されているか確認
     })
 
+# LINE webhook（可視化＆Rate Limit付き・1本化）
 @app.route("/callback", methods=["POST"])
+@limit_deco(ASK_LIMITS)  # ← ここで Rate Limit を適用（limiter無い環境ではノーオペ関数）
 def callback():
     """
-    LINE Webhook 受け口。可視化のためログとカウンタを追加。
-    - キー未設定や初期化失敗時: 200 'LINE disabled' を返す（LINE側の再試行抑止）
-    - 署名不正: 400 'NG'（Channel secret違いが濃厚）
+    LINE Webhook 受け口（統合版）
+    - キー未設定や初期化失敗時: 200 'LINE disabled'（LINE側の再試行を抑止）
+    - 署名不正: 400 'NG'
+    - 予期せぬ例外: 500 'NG'（LINE側に再試行させる）
+    - Rate Limit: ASK_LIMITS を適用
     """
-    global LAST_CALLBACK_AT, CALLBACK_HIT_COUNT, LAST_LINE_ERROR, LAST_SIGNATURE_BAD
-    CALLBACK_HIT_COUNT += 1
-    LAST_CALLBACK_AT = datetime.datetime.utcnow().isoformat() + "Z"
+    # 軽量メトリクス（未定義でも壊れないように安全更新）
+    try:
+        globals()["CALLBACK_HIT_COUNT"] = int(globals().get("CALLBACK_HIT_COUNT", 0)) + 1
+        globals()["LAST_CALLBACK_AT"] = datetime.datetime.utcnow().isoformat() + "Z"
+    except Exception:
+        pass
 
     # キー未設定や初期化失敗
     if not _line_enabled() or not handler:
         app.logger.warning("[LINE] callback hit but LINE disabled (check env vars / init)")
         return "LINE disabled", 200
 
-    signature = request.headers.get("X-Line-Signature", "")
+    signature = request.headers.get("X-Line-Signature", "") or ""
     body = request.get_data(as_text=True)
 
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        LAST_SIGNATURE_BAD += 1
+        try:
+            globals()["LAST_SIGNATURE_BAD"] = int(globals().get("LAST_SIGNATURE_BAD", 0)) + 1
+        except Exception:
+            pass
         app.logger.warning("[LINE] Invalid signature. Check LINE_CHANNEL_SECRET / webhook origin.")
         return "NG", 400
     except Exception as e:
-        LAST_LINE_ERROR = f"{type(e).__name__}: {e}"
+        try:
+            globals()["LAST_LINE_ERROR"] = f"{type(e).__name__}: {e}"
+        except Exception:
+            pass
         app.logger.exception("[LINE] handler error")
-        # エラーでも 200 を返すとLINE側が再試行しないので 500 を返す
         return "NG", 500
 
     return "OK", 200
@@ -5185,15 +5251,15 @@ def admin_line_test_push():
 def _answer_from_entries_min(question: str):
     import unicodedata, re
     # 文字正規化（NFKC + 空白つぶし + 小文字）
-    def _n(s: str) -> str:
+    def _n_local(s: str) -> str:
         return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", (s or "")).strip()).lower()
 
     q = (question or "").strip()
     if not q:
         return "（内容が読み取れませんでした）", False, ""
 
-    qn = _n(q)
-    es = load_entries()
+    qn = _n_local(q)
+    es = [ _norm_entry(e) for e in load_entries() ]  # 念のため正規化
 
     # --- タイトル最優先のスコアリング ---
     ranked = []  # (score, tie_breaker, entry)
@@ -5204,9 +5270,9 @@ def _answer_from_entries_min(question: str):
         tags  = e.get("tags", []) or []
         areas = e.get("areas", []) or []
 
-        tn = _n(title)
-        dn = _n(desc)
-        an = _n(addr)
+        tn = _n_local(title)
+        dn = _n_local(desc)
+        an = _n_local(addr)
 
         score = None
         # 優先度：タイトル完全一致＞タイトル部分一致＞説明＞住所＞タグ・エリア
@@ -5218,9 +5284,9 @@ def _answer_from_entries_min(question: str):
             score = 60
         elif qn and qn in an:
             score = 50
-        elif any(qn in _n(t) for t in tags):
+        elif any(qn in _n_local(t) for t in tags):
             score = 40
-        elif any(qn in _n(a) for a in areas):
+        elif any(qn in _n_local(a) for a in areas):
             score = 30
 
         if score is not None:
@@ -5228,7 +5294,6 @@ def _answer_from_entries_min(question: str):
             tie = abs(len(tn) - len(qn))
             ranked.append((score, tie, e))
 
-    # ・・・ ranked が空のとき
     if not ranked:
         # 即返し（天気 / 運行）
         m, ok = get_weather_reply(q)
@@ -5240,7 +5305,7 @@ def _answer_from_entries_min(question: str):
         refine, _meta = build_refine_suggestions(q)
         return "該当が見つかりませんでした。\n" + refine, False, ""
 
-    # スコア降順 → タイトル長の近さ昇順 → もとの順の安定性
+    # スコア降順 → タイトル長の近さ昇順
     ranked.sort(key=lambda t: (-t[0], t[1]))
     hits = [e for _, __, e in ranked]
 
@@ -5253,41 +5318,46 @@ def _answer_from_entries_min(question: str):
     if len(hits) == 1:
         e = hits[0]
 
-        # 画像URL（file名があれば生成）
-        img_url = ""
-        img_name = e.get("image_file") or e.get("image") or ""
-        if img_name:
-            try:
-                img_url = build_signed_image_url(img_name, wm=True, external=True)
-            except Exception:
-                img_url = ""
+        # ★ 出典（フォームの「出典」テキストがあればのみ付与）
+        record_source_from_entry(e)
 
-        # 本文は「タイトル1行＋説明1行」→以降に項目（仕様どおり）
+        # ★ 画像URL（wm_external_choice を尊重）
+        urls = _build_image_urls_for_entry(e)
+        img_url = urls.get("image") or urls.get("thumb") or ""
+
+        # ★ 地図URL（place_id/共有URL優先 → 無ければ緯度経度/名称から生成）
+        lat, lng = _entry_latlng(e)
+        murl = entry_open_map_url(e, lat=lat, lng=lng)
+
+        # 本文は「タイトル1行＋説明1行」→以降に項目
         lines = []
         title = (e.get("title","") or "").strip()
         desc  = (e.get("desc","")  or "").strip()
         if title: lines.append(title)
         if desc:  lines.append(desc)
 
-        def add(label, key):
-            v = (e.get(key) or "")
-            if isinstance(v, list):
-                v = " / ".join(v)
-            v = v.strip()
+        def add(label, val):
+            if isinstance(val, list):
+                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
+            else:
+                v = (val or "").strip()
             if v:
                 lines.append(f"{label}：{v}")
 
-        add("住所", "address")
-        add("電話", "tel")
-        add("地図", "map")
-        add("エリア", "areas")
-        add("休み", "holiday")
-        add("営業時間", "open_hours")
-        add("駐車場", "parking")
-        add("支払方法", "payment")
-        add("備考", "remark")
-        add("リンク", "links")
-        add("カテゴリー", "category")
+        add("住所", e.get("address"))
+        add("電話", e.get("tel"))
+        if murl:
+            add("地図", murl)  # ← map文字列ではなく最適URL
+        else:
+            add("地図", e.get("map"))
+        add("エリア", e.get("areas") or [])
+        add("休み", e.get("holiday"))
+        add("営業時間", e.get("open_hours"))
+        add("駐車場", e.get("parking"))
+        add("支払方法", e.get("payment") or [])
+        add("備考", e.get("remark"))
+        add("リンク", e.get("links") or [])
+        add("カテゴリー", e.get("category"))
 
         # タグは返信に入れない（現状維持）
         return "\n".join(lines), True, img_url
@@ -6425,7 +6495,7 @@ def _reply_or_push(event, text: str, *, reqgen: int | None = None):
 # ========================================================================
 
 def _send_messages(event, messages):
-    """テキスト/画像など複合メッセージ送信"""
+    """テキスト/画像など複合メッセージ送信（出典フッターは line_bot_api のプロキシで付与されます）"""
     if not _line_enabled() or not line_bot_api:
         for m in messages:
             app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
@@ -6445,7 +6515,7 @@ def _send_messages(event, messages):
         app.logger.exception("LINE send failed: %s", e)
 
 
-# --- LINE 送信先IDの取得ヘルパー ---
+# --- LINE 送信先IDの取得ヘルパー（_line_target_id もありますが、こちらは on-demand で使う場合用） ---
 def _target_id_from_event(event):
     return (
         getattr(event.source, "user_id", None)
@@ -6454,42 +6524,29 @@ def _target_id_from_event(event):
     )
 
 
-WAIT_CANDIDATES = [
-    "探してみますね。",
-    "候補を確認しています…",
-    "少々お時間ください、最適な情報を集めています。"
-]
-def pick_wait_message(q: str) -> str:
-    # キーワードで少しだけ言い回しを変える（なくてもOK）
-    if any(w in q for w in ["フェリー", "船", "ジェットフォイル", "太古"]):
-        return "航路の運行状況を確認しています…"
-    if any(w in q for w in ["営業時間", "開店", "閉店", "定休"]):
-        return "営業時間を確認しています…"
-    # 乱数を使わず、内容に応じて安定した揺らぎ
-    return WAIT_CANDIDATES[hash(q) % len(WAIT_CANDIDATES)]
-
 # ===== 送信ユーティリティ（長文分割・複数送信） =====
 from linebot.models import TextSendMessage
 
-LINE_MAX_PER_REQUEST = 5         # LINEは1リクエスト最大5メッセージ
-LINE_SAFE_CHARS = 3800           # 1通あたり安全な文字数目安（改行・句点で分割）
+LINE_MAX_PER_REQUEST = 5  # 1リクエスト最大5メッセージ（※ LINE_SAFE_CHARS は上位の正規版を使用）
 
-def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[str]:
+def _split_for_messaging(text: str, chunk_size: int = None) -> List[str]:
     """長文を自然な区切り（段落→句点）で2〜複数通に分割。最低1通は返す。"""
+    # 上位で定義済みの安全値を使う
+    lim = int(chunk_size) if chunk_size else int(globals().get("LINE_SAFE_CHARS", 3800))
     if not text:
         return [""]
     text = text.strip()
-    if len(text) <= chunk_size:
+    if len(text) <= lim:
         return [text]
 
     parts: List[str] = []
     rest = text
-    while len(rest) > chunk_size:
-        cut = rest.rfind("\n\n", 0, chunk_size)
-        if cut < int(chunk_size * 0.5):
-            cut = rest.rfind("。", 0, chunk_size)
-        if cut < int(chunk_size * 0.5):
-            cut = chunk_size
+    while len(rest) > lim:
+        cut = rest.rfind("\n\n", 0, lim)
+        if cut < int(lim * 0.5):
+            cut = rest.rfind("。", 0, lim)
+        if cut < int(lim * 0.5):
+            cut = lim
         parts.append(rest[:cut].rstrip())
         rest = rest[cut:].lstrip()
     if rest:
@@ -6497,80 +6554,9 @@ def _split_for_messaging(text: str, chunk_size: int = LINE_SAFE_CHARS) -> List[s
     return parts
 
 
+# === LINE 返信ユーティリティ（安全送信 + エラー計測）
+# ※ 正規版 _reply_or_push（force_push 対応／出典フッター対応）は既に上で定義済みなのでここでは定義しません。
 
-# === LINE 返信ユーティリティ（安全送信 + エラー計測） ===
-def _reply_or_push(event, text: str):
-    """長文は自動分割して返信。5通上限を厳守。超過分は結合しつつ、余りはpushで後送。"""
-    if not _line_enabled() or not line_bot_api:
-        app.logger.info("[LINE disabled] would send: %r", text)
-        return
-
-    def _compress_to(parts: list[str], lim: int) -> list[str]:
-        """分割済みpartsを、1通あたりlim文字以内でできるだけ結合して個数を減らす"""
-        out, buf = [], ""
-        for p in parts:
-            if not buf:
-                buf = p
-                continue
-            if len(buf) + 1 + len(p) <= lim:
-                buf += "\n" + p
-            else:
-                out.append(buf)
-                buf = p
-        if buf:
-            out.append(buf)
-        return out
-
-    lim = LINE_SAFE_CHARS
-    parts = _split_for_line(text, lim) or [""]
-    parts = _compress_to(parts, lim)  # できるだけ結合して通数を減らす
-
-    MAX_PER_CALL = 5  # reply/push とも5通/呼び出し
-
-    def _do_reply(msgs: list[str]) -> None:
-        line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=m) for m in msgs])
-
-    def _do_push(tid: str, msgs: list[str]) -> None:
-        line_bot_api.push_message(tid, [TextSendMessage(text=m) for m in msgs])
-
-    try:
-        reply_token = getattr(event, "reply_token", None)
-        if reply_token:
-            head = parts[:MAX_PER_CALL]
-            _do_reply(head)
-            rest = parts[MAX_PER_CALL:]
-        else:
-            # reply_tokenが無ければ push のみで分割送信
-            tid = _line_target_id(event)
-            if tid:
-                for i in range(0, len(parts), MAX_PER_CALL):
-                    _do_push(tid, parts[i:i + MAX_PER_CALL])
-            return
-
-        # 余りは push で後送（ベストエフォート）
-        if rest:
-            tid = _line_target_id(event)
-            if tid:
-                for i in range(0, len(rest), MAX_PER_CALL):
-                    try:
-                        _do_push(tid, rest[i:i + MAX_PER_CALL])
-                    except LineBotApiError as e:
-                        # push 側の個別失敗も記録
-                        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-                        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-                        app.logger.warning("LINE push failed on chunk %s: %s", i // MAX_PER_CALL, e)
-                        break
-
-    # ここから例外処理：個別→汎用の順でキャッチ
-    except LineBotApiError as e:
-        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE send failed")
-
-    except Exception as e:
-        globals()["SEND_FAIL_COUNT"]  = globals().get("SEND_FAIL_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE send failed (unexpected)")
 
 def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
     """複数テキストを順に push。重複抑止＋世代ガード付き。"""
@@ -6596,7 +6582,8 @@ def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
                 return
             time.sleep(0.1)
 
-# --- 最終回答を計算して push する非同期処理 ---
+
+# --- 最終回答を計算して push する非同期処理（環境に応じて使用。未使用なら残っていても無害） ---
 def _compute_and_push_async(event, user_message: str, reqgen=None):
     from linebot.models import TextSendMessage
     target_id = _target_id_from_event(event)
@@ -6622,14 +6609,13 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
             pass
 
 
-
-
 # =========================
 #  お知らせ管理
 # =========================
 @app.route("/admin/notices", methods=["GET", "POST"])
 @login_required
 def admin_notices():
+    # 必要なら _require_admin() を使ってもOK
     if session.get("role") != "admin":
         flash("権限がありません")
         return redirect(url_for("login"))
@@ -6692,6 +6678,7 @@ def admin_notices():
         return redirect(url_for("admin_notices"))
     return render_template("admin_notices.html", notices=notices, edit_notice=edit_notice)
 
+
 @app.route("/admin/notices/delete/<int:idx>", methods=["POST"])
 @login_required
 def delete_notice(idx):
@@ -6704,15 +6691,194 @@ def delete_notice(idx):
     flash("お知らせを削除しました")
     return redirect(url_for("admin_notices"))
 
+
 @app.route("/notices")
 def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
 
 
-# =========================
-#  エントリーポイント
-# =========================
+# ---- 管理: ログイン/ログアウト（超簡易） ----
+@app.route("/login", methods=["GET","POST"])
+def login():
+    if request.method == "POST":
+        uid = request.form.get("user_id","").strip()
+        pw  = request.form.get("password","")
+        for u in load_users():
+            if u.get("user_id")==uid and check_password_hash(u.get("password_hash",""), pw):
+                session["user_id"] = uid
+                flash("ログインしました")
+                return redirect(url_for("admin_entry"))
+        flash("ユーザーIDまたはパスワードが違います")
+    return render_template_string("""
+    <h1>ログイン</h1>
+    <form method="post">
+      <div>ID <input name="user_id"></div>
+      <div>PW <input name="password" type="password"></div>
+      <button type="submit">ログイン</button>
+    </form>""")
+
+@app.route("/logout")
+def logout():
+    session.pop("user_id", None)
+    flash("ログアウトしました")
+    return redirect(url_for("login"))
+
+# ---- 管理: 登録/編集（HTML テンプレは admin_entry.html を想定） ----
+@app.route("/admin/entry", methods=["GET","POST"])
+@login_required
+def admin_entry():
+    user = _current_user() or {}
+    role = user.get("role","shop")
+
+    if request.method == "POST":
+        entries = load_entries()
+
+        edit_id = request.form.get("edit_id")
+        is_edit = edit_id is not None and str(edit_id).strip() != ""
+        if is_edit:
+            try:
+                idx = int(edit_id)
+            except Exception:
+                idx = None
+        else:
+            idx = None
+
+        # 共通項目
+        category = (request.form.get("category") or "観光").strip()
+        title    = (request.form.get("title") or "").strip()
+        desc     = (request.form.get("desc") or "").strip()
+        address  = (request.form.get("address") or "").strip()
+        tel      = (request.form.get("tel") or "").strip()
+        holiday  = (request.form.get("holiday") or "").strip()
+        open_hours = (request.form.get("open_hours") or "").strip()
+        parking    = (request.form.get("parking") or "").strip()
+        parking_num= (request.form.get("parking_num") or "").strip()
+        remark     = (request.form.get("remark") or "").strip()
+        map_url  = (request.form.get("map") or "").strip()
+        source   = (request.form.get("source") or "").strip()
+        source_url = (request.form.get("source_url") or "").strip()
+        wm_choice  = (request.form.get("wm_external_choice") or "").strip().lower()  # "none"/"fully"/"city"
+
+        tags   = _split_lines_commas(request.form.get("tags",""))
+        areas  = request.form.getlist("areas")
+        payment= request.form.getlist("payment")
+
+        # 追加情報
+        ek = request.form.getlist("extras_key[]")
+        ev = request.form.getlist("extras_val[]")
+        extras = {}
+        for k,v in zip(ek, ev):
+            k = (k or "").strip()
+            v = (v or "").strip()
+            if k:
+                extras[k] = v
+
+        # 座標（コピペ優先）
+        raw_coords = request.form.get("coords","")
+        lat, lng = normalize_latlng(raw_coords, request.form.get("lat",""), request.form.get("lng",""))
+
+        # 画像
+        file_storage = request.files.get("image_file")
+        delete_img = request.form.get("image_delete") == "1"
+        previous = None
+        if is_edit and idx is not None and 0 <= idx < len(entries):
+            previous = entries[idx].get("image_file") or entries[idx].get("image")
+
+        new_name = _save_jpeg_1080_350kb(file_storage, previous=previous, delete=delete_img)
+        image_file = previous
+        if new_name is None:
+            image_file = previous  # 変更なし
+        elif new_name == "":
+            image_file = ""        # 削除
+        else:
+            image_file = new_name  # 新規/置換
+
+        rec = _norm_entry({
+            "category": category, "title": title, "desc": desc,
+            "address": address, "tel": tel, "holiday": holiday, "open_hours": open_hours,
+            "parking": parking, "parking_num": parking_num, "remark": remark,
+            "map": map_url, "tags": tags, "areas": areas, "links": _split_lines_commas(request.form.get("links","")),
+            "payment": payment, "extras": extras, "source": source, "source_url": source_url,
+            "lat": lat, "lng": lng,
+            "image_file": image_file,
+            "wm_external_choice": wm_choice,  # ← フロントのラジオ値をそのまま保存（互換維持）
+        })
+
+        if is_edit and idx is not None and 0 <= idx < len(entries):
+            entries[idx] = rec
+            flash("編集を保存しました")
+        else:
+            entries.append(rec)
+            flash("登録しました")
+
+        save_entries(entries)
+        return redirect(url_for("admin_entry"))
+
+    # GET（一覧 + 編集フォーム）
+    entries = load_entries()
+    edit_q = request.args.get("edit")
+    entry_edit = None
+    edit_id = None
+    if edit_q is not None:
+        try:
+            edit_id = int(edit_q)
+            if 0 <= edit_id < len(entries):
+                entry_edit = entries[edit_id]
+        except Exception:
+            pass
+
+    # HTML テンプレ名はあなたの環境に合わせて変更してください
+    return render_template(
+        "admin_entry.html",
+        role=role,
+        entries=[_norm_entry(e) for e in entries],
+        entry_edit=entry_edit,
+        edit_id=edit_id,
+        cat_list=CATEGORIES,  # 使っても使わなくてもOK（テンプレ側でマージロジックあり）
+        area_opts=["五島市","新上五島町","宇久町","小値賀町"],
+        global_paused=_is_global_paused(),
+    )
+
+# 削除（管理者のみ）
+@app.route("/admin/delete", methods=["POST"])
+@login_required
+def delete_entry():
+    _require_admin()
+    try:
+        idx = int(request.form.get("idx","-1"))
+    except Exception:
+        abort(400)
+    entries = load_entries()
+    if 0 <= idx < len(entries):
+        # 画像ファイルも可能なら削除
+        img = entries[idx].get("image_file") or entries[idx].get("image")
+        if img:
+            try: os.remove(os.path.join(IMAGES_DIR, img))
+            except Exception: pass
+        del entries[idx]
+        save_entries(entries)
+        flash("削除しました")
+    return redirect(url_for("admin_entry"))
+
+# LINE 一時停止/再開（管理者のみ）
+@app.route("/admin/line/pause", methods=["POST"])
+@login_required
+def admin_line_pause():
+    _require_admin()
+    _set_global_paused(True)
+    flash("LINE応答を一時停止しました")
+    return redirect(url_for("admin_entry"))
+
+@app.route("/admin/line/resume", methods=["POST"])
+@login_required
+def admin_line_resume():
+    _require_admin()
+    _set_global_paused(False)
+    flash("LINE応答を再開しました")
+    return redirect(url_for("admin_entry"))
+
+# メイン起動（重複禁止：これ1つだけ残す）
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.getenv("PORT","5000"))
+    app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))
