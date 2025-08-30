@@ -4752,13 +4752,11 @@ def internal_backup():
     return jsonify({"ok": True, "saved": path})
 
 
-# ===== LINE 緊急一括停止（管理者のみ） =====
-
+# LINE 一時停止（管理者のみ）
 @app.route("/admin/line/pause", methods=["POST"])
 @login_required
 def admin_line_pause():
-    if session.get("role") != "admin":
-        abort(403)
+    _require_admin()  # 既存の管理者チェックを統一利用
     _set_global_paused(True)
     flash("LINE応答を一時停止しました（再開するまで完全サイレンス）")
     return redirect(request.referrer or url_for("admin_entry"))
@@ -6697,14 +6695,6 @@ def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
 
-# LINE 一時停止/再開（管理者のみ）
-@app.route("/admin/line/pause", methods=["POST"])
-@login_required
-def admin_line_pause():
-    _require_admin()
-    _set_global_paused(True)
-    flash("LINE応答を一時停止しました")
-    return redirect(url_for("admin_entry"))
 
 @app.route("/admin/line/resume", methods=["POST"])
 @login_required
