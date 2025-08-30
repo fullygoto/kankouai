@@ -4890,7 +4890,11 @@ def admin_entry():
         if _re.search(r'[S南]', s, _re.I): hemi = 'S'
         if _re.search(r'[E東]', s, _re.I): hemi = 'E'
         if _re.search(r'[W西]', s, _re.I): hemi = 'W'
-        m = _re.search(r'(\d+(?:\.\d+)?)\\s*[°度]\\s*(\\d+(?:\\.\\d+)?)?\\s*[\\'’′分]?\\s*(\\d+(?:\\.\\d+)?)?\\s*[\"”″秒]?', s)
+        # ★ ここを「ダブルクォートの raw 文字列」に修正
+        m = _re.search(
+            r"(\d+(?:\.\d+)?)\s*[°度]\s*(\d+(?:\.\d+)?)?\s*['’′分]?\s*(\d+(?:\.\d+)?)?\s*[\"”″秒]?",
+            s
+        )
         if not m:
             return None, None
         deg = float(m.group(1))
@@ -4911,12 +4915,12 @@ def admin_entry():
         if not text:
             return (None, None)
         s = _zen2han(text).strip()
-        s = _re.sub(r'\\s+', ' ', s)
+        s = _re.sub(r'\s+', ' ', s)
 
         # 1) Google Maps URL: /@lat,lng または ?q= / ?query= / ?ll=
-        m = _re.search(r'/@(-?\\d+(?:\\.\\d+)?),\\s*(-?\\d+(?:\\.\\d+)?)', s)
+        m = _re.search(r'/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)', s)
         if not m:
-            m = _re.search(r'(?:[?&](?:q|query|ll)=)\\s*(-?\\d+(?:\\.\\d+)?)[,\\s]+(-?\\d+(?:\\.\\d+)?)', s)
+            m = _re.search(r'(?:[?&](?:q|query|ll)=)\s*(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)', s)
         if m:
             try:
                 return float(m.group(1)), float(m.group(2))
@@ -4924,7 +4928,7 @@ def admin_entry():
                 pass
 
         # 2) 純粋な「lat,lng」（カンマ/空白区切り）
-        m = _re.search(r'(-?\\d+(?:\\.\\d+)?)\\s*[, ]\\s*(-?\\d+(?:\\.\\d+)?)', s)
+        m = _re.search(r'(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)', s)
         if m:
             a, b = float(m.group(1)), float(m.group(2))
             # 万一順序が逆っぽい場合の救済（>90 は経度とみなす）
@@ -4932,9 +4936,9 @@ def admin_entry():
                 a, b = b, a
             return a, b
 
-        # 3) DMS ブロック×2
+        # 3) DMS ブロック×2（★ ここもダブルクォートの raw 文字列）
         dms_blocks = _re.findall(
-            r'(\\d+(?:\\.\\d+)?\\s*[°度]\\s*\\d*(?:\\.\\d+)?\\s*[\\'’′分]?\\s*\\d*(?:\\.\\d+)?\\s*[\"”″秒]?\\s*[NSEW北南東西]?)',
+            r"(\d+(?:\.\d+)?\s*[°度]\s*\d*(?:\.\d+)?\s*['’′分]?\s*\d*(?:\.\d+)?\s*[\"”″秒]?\s*[NSEW北南東西]?)",
             s, flags=_re.I
         )
         if len(dms_blocks) >= 2:
@@ -4949,8 +4953,8 @@ def admin_entry():
                 return lat, lng
 
         # 4) 「緯度: xx / 経度: yy」
-        mlat = _re.search(r'緯度[:：]\\s*(-?\\d+(?:\\.\\d+)?)', s)
-        mlng = _re.search(r'経度[:：]\\s*(-?\\d+(?:\\.\\d+)?)', s)
+        mlat = _re.search(r'緯度[:：]\s*(-?\d+(?:\.\d+)?)', s)
+        mlng = _re.search(r'経度[:：]\s*(-?\d+(?:\.\d+)?)', s)
         if mlat and mlng:
             return float(mlat.group(1)), float(mlng.group(1))
 
