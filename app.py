@@ -4761,11 +4761,11 @@ def admin_line_pause():
     flash("LINE応答を一時停止しました（再開するまで完全サイレンス）")
     return redirect(request.referrer or url_for("admin_entry"))
 
+# LINE 再開（管理者のみ）
 @app.route("/admin/line/resume", methods=["POST"])
 @login_required
 def admin_line_resume():
-    if session.get("role") != "admin":
-        abort(403)
+    _require_admin()  # なければ: if session.get("role") != "admin": abort(403)
     _set_global_paused(False)
     flash("LINE応答を再開しました")
     return redirect(request.referrer or url_for("admin_entry"))
@@ -6694,15 +6694,6 @@ def delete_notice(idx):
 def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
-
-
-@app.route("/admin/line/resume", methods=["POST"])
-@login_required
-def admin_line_resume():
-    _require_admin()
-    _set_global_paused(False)
-    flash("LINE応答を再開しました")
-    return redirect(url_for("admin_entry"))
 
 # メイン起動（重複禁止：これ1つだけ残す）
 if __name__ == "__main__":
