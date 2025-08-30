@@ -308,6 +308,53 @@ def _infer_mimetype(path: str) -> tuple[str, str]:
     if ext in {".webp"}:         return "WEBP", "image/webp"
     return "PNG", "image/png"
 
+
+# === Watermark helpers (ADD) ================================================
+def _wm_normalize(v) -> str | None:
+    """
+    透かしモードの正規化:
+      入力: "fullygoto"/"gotocity"/"fully"/"city"/"1"/True/False/"none"... など
+      出力: "fullygoto" / "gotocity" / None
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return "gotocity" if v else None
+    s = str(v).strip().lower()
+    if s in {"fullygoto", "fully"}:
+        return "fullygoto"
+    if s in {"gotocity", "city"}:
+        return "gotocity"
+    if s in {"1", "true", "on", "yes"}:
+        return "gotocity"
+    if s in {"0", "false", "off", "none", ""}:
+        return None
+    # 未知値は保守的に None
+    return None
+
+
+def _wm_choice_from_entries(arg) -> str | None:
+    """
+    エントリ既定の透かしモードを返す。引数はエントリdict or 画像ファイル名（文字列）。
+    返り値は "fullygoto" / "gotocity" / None（未設定）。
+    """
+    try:
+        if isinstance(arg, dict):
+            raw = arg.get("wm_external_choice")
+            return _wm_normalize(raw)
+        fn = str(arg).strip()
+        if not fn:
+            return None
+        # entries.json から該当画像を探す
+        for e in load_entries():
+            img = (e.get("image_file") or e.get("image") or "").strip()
+            if img and img == fn:
+                return _wm_normalize(e.get("wm_external_choice"))
+    except Exception:
+        pass
+    return None
+# ============================================================================
+
 @app.route("/media/img/<path:filename>")
 def serve_image(filename):
     """
@@ -2761,6 +2808,9 @@ USERS_FILE     = os.path.join(BASE_DIR, "users.json")
 NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
 SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 
+# ★ 一度だけ案内フラグの保存先 & TTL（秒）
+PAUSED_NOTICE_FILE    = os.path.join(BASE_DIR, "paused_notice.json")  # もしくは DATA_DIR に置いても可
+PAUSED_NOTICE_TTL_SEC = int(os.getenv("PAUSED_NOTICE_TTL_SEC", "86400"))  # 既定: 24時間
 
 
 # === Images: config + route + normalized save (唯一の正) ===
@@ -3570,6 +3620,22 @@ def _atomic_json_dump(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+# ★ここから追加：一度だけ案内 用の保存/読込/クリア
+def _load_paused_notices() -> dict:
+    """{ target_id: last_notified_ts } を返す"""
+    return _safe_read_json(PAUSED_NOTICE_FILE, {})
+
+def _save_paused_notices(obj: dict):
+    _atomic_json_dump(PAUSED_NOTICE_FILE, obj or {})
+
+def _clear_paused_notices():
+    """キャッシュ全消し（全体一時停止 解除時に呼ぶ）"""
+    try:
+        if os.path.exists(PAUSED_NOTICE_FILE):
+            os.remove(PAUSED_NOTICE_FILE)
+    except Exception:
+        app.logger.exception("clear paused notices failed")
+
 def _safe_read_json(path: str, default_obj):
     """
     JSONを安全に読み込む。壊れていたら .bad-YYYYmmdd-HHMMSS に退避し、
@@ -3662,6 +3728,7 @@ def _set_global_paused(paused: bool):
         else:
             if os.path.exists(GLOBAL_LINE_PAUSE_FILE):
                 os.remove(GLOBAL_LINE_PAUSE_FILE)
+            _clear_paused_notices()    
     except Exception:
         app.logger.exception("set_global_paused failed")
 
@@ -3843,6 +3910,27 @@ def _extract_json_object(text: str):
         return None
 
 
+# === 透かしモード正規化（共通 util） ===
+WM_CANON_MAP = {
+    "none": "none", "no": "none", "off": "none", "0": "none", False: "none",
+    "fully": "fully", "full": "fully", "all": "fully", "1": "fully", True: "fully",
+    "city": "city",
+    # 互換（旧名称の吸収）
+    "fullygoto": "fully",
+    "gotocity": "city",
+}
+
+def _wm_normalize(v) -> str | None:
+    """
+    透かしモードの入力値を正規化して 'none' / 'fully' / 'city' のいずれかにする。
+    不明値は None を返す（呼び出し側で既定値を決める）。
+    """
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in {"true","false"}:
+        return "fully" if (s == "true") else "none"
+    return WM_CANON_MAP.get(s, None)
 
 # =========================
 #  重複統合（タイトル基準）
@@ -4009,17 +4097,22 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
         return _mode_or_longest(cands)
 
     def _pick_best_wm_choice(group):
-        # wm_external_choice を正規化して最頻。無ければ wm_on から推測
-        allowed = {"none", "fully", "city"}
+        """
+        wm_external_choice を _wm_normalize() で正規化して最頻値を採用。
+        値が無い場合は wm_on から推測（True→fully / False→none）。
+        何も得られなければ 'none'。
+        """
         vals = []
         for g in group:
-            w = (g.get("wm_external_choice") or "").strip().lower()
-            if w in allowed:
+            w_raw = g.get("wm_external_choice")
+            w = _wm_normalize(w_raw)
+            if w:
                 vals.append(w)
             else:
                 # 後方互換：wm_on が True なら fully / False なら none
                 if isinstance(g.get("wm_on"), bool):
                     vals.append("fully" if g.get("wm_on") else "none")
+
         best = _mode_or_longest(vals) if vals else ""
         return best or "none"
 
@@ -4934,10 +5027,17 @@ def admin_entry():
                 prev_img = None
                 idx_edit = None
 
-        # ★ 追加: 透かしの“種類”を保存（フォームが無い場合は既存の wm_on から補完）
-        wm_choice = (request.form.get("wm_external_choice") or "").strip().lower()
-        if wm_choice not in ("none", "fully", "city"):
-            wm_choice = "fully" if ('wm_on' in request.form) else "none"
+
+        # ★ 透かしモードを canonical に正規化して保存
+        wm_choice = _wm_normalize(request.form.get("wm_external_choice"))
+
+        # 旧UIのチェックボックス 'wm_on' だけが来た場合の救済：
+        # （テンプレにラジオが無いときの既定値を 'city' にする／運用で 'fully' にしてもOK）
+        if wm_choice is None and ('wm_on' in request.form):
+            wm_choice = "city"
+
+        new_entry["wm_external_choice"] = wm_choice  # 'none' / 'fully' / 'city' / None
+        new_entry["wm_on"] = ('wm_on' in request.form)  # 後方互換のためブールも保持
 
         if not areas:
             flash("エリアは1つ以上選択してください")
@@ -5890,8 +5990,9 @@ def admin_line_pause():
 @app.route("/admin/line/resume", methods=["POST"])
 @login_required
 def admin_line_resume():
-    _require_admin()  # なければ: if session.get("role") != "admin": abort(403)
+    _require_admin()
     _set_global_paused(False)
+    _clear_paused_notices()   # ★ ここを追加
     flash("LINE応答を再開しました")
     return redirect(request.referrer or url_for("admin_entry"))
 
@@ -6696,31 +6797,6 @@ def _format_entry_messages(e: dict):
             # 呼び出し側で TextSendMessage を期待しているためここでは append しない
 
     return msgs
-
-
-def _send_messages(event, messages):
-    """テキスト/画像など複合メッセージをまとめて送る"""
-    if not _line_enabled() or not line_bot_api:
-        # ログ出力のみ（開発/LINE無効時）
-        for m in messages:
-            try:
-                app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
-            except Exception:
-                pass
-        return
-    try:
-        reply_token = getattr(event, "reply_token", None)
-        if reply_token:
-            line_bot_api.reply_message(reply_token, messages)
-        else:
-            tid = _line_target_id(event)
-            if tid:
-                line_bot_api.push_message(tid, messages)
-    except LineBotApiError as e:
-        global LAST_SEND_ERROR, SEND_ERROR_COUNT
-        SEND_ERROR_COUNT += 1
-        LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE send failed: %s", e)
 
 
 def _search_entries_prioritized(q: str):
@@ -7622,13 +7698,17 @@ def _reply_or_push(event, text: str, *, reqgen: int | None = None):
 def _send_messages(event, messages):
     """テキスト/画像など複合メッセージ送信（出典フッターは line_bot_api のプロキシで付与されます）"""
     if not _line_enabled() or not line_bot_api:
-        for m in messages:
-            app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
+        # ログ出力のみ（開発/LINE無効時）
+        for m in (messages or []):
+            try:
+                app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
+            except Exception:
+                pass
         return
     try:
-        rt = getattr(event, "reply_token", None)
-        if rt:
-            line_bot_api.reply_message(rt, messages)
+        reply_token = getattr(event, "reply_token", None)
+        if reply_token:
+            line_bot_api.reply_message(reply_token, messages)
         else:
             tid = _line_target_id(event)
             if tid:
@@ -7638,6 +7718,56 @@ def _send_messages(event, messages):
         SEND_ERROR_COUNT += 1
         LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
         app.logger.exception("LINE send failed: %s", e)
+
+
+def _notice_paused_once(event, target_id: str) -> bool:
+    """
+    全体一時停止中に『一度だけ案内』を送る。
+    同じ target_id には TTL 以内は再送しない。
+    戻り値: 送ったら True、スキップなら False
+    """
+    try:
+        cache = _load_paused_notices()
+    except Exception:
+        cache = {}
+
+    now = time.time()
+    last = float(cache.get(target_id) or 0)
+    if (now - last) < PAUSED_NOTICE_TTL_SEC:
+        # まだTTL内なので今回は案内しない
+        return False
+
+    # メッセージ文面（ALLOW_RESUME_WHEN_PAUSED によって注記を変える）
+    if ALLOW_RESUME_WHEN_PAUSED:
+        text = (
+            "現在は『全体一時停止』中です。管理者が解除するまで返信は原則止まります。\n"
+            "※ この会話のミュート解除は「再開」で可能ですが、全体停止中は返信が届かないことがあります。"
+        )
+    else:
+        text = (
+            "現在は『全体一時停止』中です。管理者が再開するまで返信は停止します。\n"
+            "※ この会話のミュート解除は「再開」で可能ですが、全体停止中は返信は戻りません。"
+        )
+
+    # 送信（_reply_or_push があれば優先。なければ _send_messages にフォールバック）
+    try:
+        if "_reply_or_push" in globals() and callable(_reply_or_push):
+            _reply_or_push(event, text)
+        else:
+            parts = _split_for_line(text, LINE_SAFE_CHARS)
+            msgs = [TextSendMessage(text=p) for p in parts]
+            _send_messages(event, msgs)
+    except Exception:
+        app.logger.exception("paused notice send failed")
+
+    # 送った印として時刻を保存
+    try:
+        cache[target_id] = now
+        _save_paused_notices(cache)
+    except Exception:
+        app.logger.exception("paused notice save failed")
+
+    return True
 
 
 # --- LINE 送信先IDの取得ヘルパー（_line_target_id もありますが、こちらは on-demand で使う場合用） ---
