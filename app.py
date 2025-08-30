@@ -650,26 +650,79 @@ def _series_text_for_reply(exclude_key: str | None = None) -> str:
 
 def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -> str:
     """
-    1) エントリの map フィールドが Google系の共有URLならそれを優先（店名が出やすい）
-    2) place_id があれば API1 の query_place_id で “店名つき”で開く
-    3) どちらも無ければ、名前/住所または緯度経度で検索URLを作る（従来どおり）
+    1) エントリの map / map_url が Google の共有URLならそれを優先（店名が出やすい）
+    2) place_id があれば API=1 の query_place_id で “店名つき”検索URLを生成
+    3) どちらも無ければ、名前/住所 or 緯度経度で Google Maps の検索URLを組み立てる
     """
-    m = (e.get("map") or "").strip()
-    if m and _MAP_HOST_RE.match(m):
+    import urllib.parse as _u
+
+    if not isinstance(e, dict):
+        return ""
+
+    # map / map_url を優先採用（Googleの共有URLならそのまま返す）
+    def _is_google_maps_url(u: str) -> bool:
+        try:
+            pu = _u.urlparse(u)
+            host = (pu.netloc or "").lower()
+            path = (pu.path or "")
+            # よく使われる Google Maps ホスト群
+            if host.endswith(".google.com") or host.endswith(".google.co.jp") or host == "google.com":
+                return "/maps" in path or "maps" in host
+            # 短縮・モバイル共有
+            if host in {"maps.app.goo.gl", "goo.gl", "g.co"}:
+                return True
+        except Exception:
+            pass
+        return False
+
+    m = (e.get("map") or e.get("map_url") or "").strip()
+    if m and _is_google_maps_url(m):
         return m
 
+    # place_id があれば “店名つき”で開く（API=1）
     pid = (e.get("place_id") or "").strip()
     if pid:
+        title = (e.get("title") or "").strip()
+        addr  = (e.get("address") or "").strip()
+        q = title or addr
+        # タイトル・住所が空なら座標で検索名を埋める
+        if not q:
+            # 引数で来なければエントリから推定
+            if lat is None or lng is None:
+                try:
+                    la, ln = _entry_latlng(e)
+                    lat = lat if lat is not None else la
+                    lng = lng if lng is not None else ln
+                except Exception:
+                    pass
+            if lat is not None and lng is not None:
+                q = f"{lat},{lng}"
         base = "https://www.google.com/maps/search/?api=1"
-        q = _u.quote((e.get("title") or e.get("address") or "").strip())
-        return f"{base}&query={q}&query_place_id={_u.quote(pid)}"
+        q_enc = _u.quote(q) if q else ""
+        return f"{base}&query={q_enc}&query_place_id={_u.quote(pid)}"
 
-    # フォールバック（従来の生成）
-    return gmaps_url(
-        name=e.get("title",""),
-        address=e.get("address",""),
-        lat=lat, lng=lng
-    )
+    # フォールバック：検索URLを生成
+    # 1) 座標が無ければエントリから推定
+    if lat is None or lng is None:
+        try:
+            la, ln = _entry_latlng(e)
+            lat = lat if lat is not None else la
+            lng = lng if lng is not None else ln
+        except Exception:
+            pass
+
+    base = "https://www.google.com/maps/search/?api=1"
+    if lat is not None and lng is not None:
+        # 座標があれば座標検索
+        return f"{base}&query={_u.quote(f'{lat},{lng}')}"
+    else:
+        # 名前＋住所で検索（店名が空でも住所だけで可）
+        name = (e.get("title") or "").strip()
+        addr = (e.get("address") or "").strip()
+        q = " ".join(x for x in [name, addr] if x).strip()
+        if not q:
+            return ""  # 生成できる材料が無い
+        return f"{base}&query={_u.quote(q)}"
 
 def _extract_latlng_from_map(map_url: str|None):
     if not map_url:
@@ -693,12 +746,107 @@ def _extract_latlng_from_map(map_url: str|None):
     return (None, None)
 
 def _entry_latlng(e: dict):
-    lat = _float(e.get("lat"))
-    lng = _float(e.get("lng"))
-    if lat is not None and lng is not None:
-        return (lat, lng)
-    # map URL から推定
-    return _extract_latlng_from_map(e.get("map"))
+    """
+    エントリから (lat, lng) を堅牢に取り出す。
+    優先順:
+      1) e['lat'], e['lng']（数値化＋範囲チェック）
+      2) extras['lat'], extras['lng']
+      3) _extract_latlng_from_map(e['map']) があればそれ
+      4) map / map_url 文字列からのローカル抽出（/@lat,lng / ?q= / ?ll= / 純粋 lat,lng）
+    最後に (lat,lng) を 6桁に丸めて返す。見つからなければ (None, None)。
+    """
+    if not isinstance(e, dict):
+        return (None, None)
+
+    def _num(v):
+        try:
+            if v is None or v == "":
+                return None
+            return float(str(v).replace(",", "."))
+        except Exception:
+            return None
+
+    def _in_range(lat, lng):
+        if lat is None or lng is None:
+            return False
+        try:
+            lat = float(lat); lng = float(lng)
+            return (-90.0 <= lat <= 90.0) and (-180.0 <= lng <= 180.0)
+        except Exception:
+            return False
+
+    # 1) 直接フィールド
+    lat = _num(e.get("lat"))
+    lng = _num(e.get("lng"))
+    if _in_range(lat, lng):
+        return (round(lat, 6), round(lng, 6))
+
+    # 2) extras 経由（ある場合のみ）
+    ex = e.get("extras") or {}
+    lat2 = lat if lat is not None else _num(ex.get("lat"))
+    lng2 = lng if lng is not None else _num(ex.get("lng"))
+    if _in_range(lat2, lng2):
+        return (round(lat2, 6), round(lng2, 6))
+
+    # 3) 既存の抽出関数があれば優先
+    try:
+        _extract = globals().get("_extract_latlng_from_map")
+        if callable(_extract):
+            a, b = _extract(e.get("map") or e.get("map_url") or "")
+            if _in_range(a, b):
+                return (round(a, 6), round(b, 6))
+    except Exception:
+        pass
+
+    # 4) ローカル解析（/@lat,lng / ?q= / ?ll= / 純粋 lat,lng）
+    import re
+    from urllib.parse import urlparse, parse_qs
+
+    def _from_text(s: str):
+        if not s:
+            return (None, None)
+        s = str(s).strip()
+
+        # /@lat,lng
+        m = re.search(r"/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)", s)
+        if m:
+            try:
+                return (float(m.group(1)), float(m.group(2)))
+            except Exception:
+                pass
+
+        # ?q=lat,lng / ?query= / ?ll=
+        try:
+            pu = urlparse(s)
+            qs = parse_qs(pu.query or "")
+            for key in ("q", "query", "ll"):
+                if key in qs and qs[key]:
+                    val = qs[key][0]
+                    m = re.search(r"(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)", val)
+                    if m:
+                        return (float(m.group(1)), float(m.group(2)))
+        except Exception:
+            pass
+
+        # 純粋 lat,lng（カンマ or 空白）
+        m = re.search(r"(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)", s)
+        if m:
+            try:
+                return (float(m.group(1)), float(m.group(2)))
+            except Exception:
+                pass
+
+        return (None, None)
+
+    a, b = _from_text(e.get("map") or e.get("map_url") or "")
+    # lat/lng の取り違え救済（片側だけ >90 のとき）
+    if a is not None and b is not None:
+        if abs(a) > 90 and abs(b) <= 90:
+            a, b = b, a
+        if _in_range(a, b):
+            return (round(a, 6), round(b, 6))
+
+    return (None, None)
 
 def _haversine_km(lat1, lon1, lat2, lon2) -> float:
     # 地球半径(キロ)
@@ -733,47 +881,40 @@ def _build_image_urls(img_name: str | None):
 
     return {"thumb": thumb, "image": orig}
 
-def _build_image_urls_for_entry(e: dict):
+def _build_image_urls_for_entry(e: dict) -> dict:
     """
-    サムネ: 常に透かし（wm=True）
-    原寸: entry['wm_external_choice'] に応じて none / fullygoto / gotocity
-          （後方互換: 旧 'fully'→'fullygoto'、旧 'city'→'gotocity'。旧フラグが True なら 'gotocity'）
+    エントリから画像URL（署名付き）を作る。
+    戻り値例: {"image": "...", "thumb": "..."}
+    - wm_external_choice が 'fully' → fullygoto, 'city' → gotocity
+    - 旧フラグ wm_on=True の場合は gotocity を既定採用
     """
-    img_name = (e.get("image_file") or e.get("image") or "").strip()
-    if not img_name:
-        return {"thumb": "", "image": ""}
-
-    # choice 決定（legacy を正しくマップ）
-    choice = (e.get("wm_external_choice") or "").strip().lower()
-    if choice not in ("none", "fullygoto", "gotocity"):
-        if choice in ("fully", "city"):
-            choice = "fullygoto" if choice == "fully" else "gotocity"
-        else:
-            legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
-            choice = "gotocity" if legacy else "none"
-
     try:
-        # サムネは常に透かし
-        thumb = build_signed_image_url(img_name, wm=True, external=True)
-
-        if choice == "none":
-            orig = build_signed_image_url(img_name, wm=False, external=True)
+        img_name = (e.get("image_file") or e.get("image") or "").strip()
+        if not img_name:
+            return {}
+        # 透かしの既定
+        choice = (e.get("wm_external_choice") or "").strip().lower()
+        if choice in ("fullygoto", "gotocity"):
+            mode = choice
+        elif choice == "fully":
+            mode = "fullygoto"
+        elif choice == "city":
+            mode = "gotocity"
+        elif e.get("wm_on"):
+            mode = "gotocity"  # 旧UIのONは市ロゴ既定
         else:
-            orig = build_signed_image_url(img_name, wm=choice, external=True)
+            mode = None
 
-        return {"thumb": thumb, "image": orig}
+        if mode:
+            s = build_signed_image_url(img_name, wm=mode, external=True)
+        else:
+            s = build_signed_image_url(img_name, wm=False, external=True)
 
+        return {"image": s, "thumb": s}
     except Exception:
-        # 例外時フォールバック（署名URL）
-        try:
-            thumb = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True, wm=1)
-            if choice == "none":
-                orig = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True)
-            else:
-                orig = safe_url_for("serve_image", filename=img_name, _external=True, _sign=True, wm=choice)
-            return {"thumb": thumb, "image": orig}
-        except Exception:
-            return {"thumb": "", "image": ""}
+        app.logger.exception("_build_image_urls_for_entry failed")
+        return {}
+
 
 def line_image_pair_for_entry(e: dict) -> tuple[str|None, str|None]:
     """
@@ -2103,7 +2244,7 @@ if _line_enabled() and handler:
 
         return False
 
-# ==== ここから：統合した TextMessage ハンドラ（1本だけ残す） ====
+# ==== ここから：統合した TextMessage ハンドラ（1本だけ残す・修正版） ====
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     try:
@@ -2204,18 +2345,20 @@ def handle_message(event):
             uid2 = _line_target_id(event)
             if "_LAST" in globals():
                 _LAST["mode"][uid2] = mode
-            # 位置情報のお願いを reply/push
+            # 位置情報のお願いを reply、失敗時は push でフォールバック（※ force_push は使わない）
             try:
                 line_bot_api.reply_message(
                     event.reply_token,
                     _ask_location("現在地から近い順で探します。位置情報を送ってください。")
                 )
             except Exception:
-                _reply_or_push(
-                    event,
-                    "現在地から近い順で探します。位置情報を送ってください。",
-                    force_push=True
-                )
+                try:
+                    line_bot_api.push_message(
+                        uid2,
+                        TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。")
+                    )
+                except Exception:
+                    pass
             return
     except Exception:
         app.logger.exception("nearby keyword handler failed")
@@ -2265,20 +2408,15 @@ def handle_message(event):
             # 旧実装：引数を受け取れない場合は従来通り
             ans, hit, img_url = _answer_from_entries_min(text)
 
-        # --- ⑥ DB回答（画像→テキストを1回の reply にまとめる） ---
-        # 直前で uid3 / wm_mode は取得済み
+        # --- 画像URL（署名＆透かし適用） ---
         msgs = []
 
-        # LINE 画像の original / preview を同じ透かしモードで作るヘルパ（完全版で置換）
         def _line_img_pair_from_url(img_url_in: str, wm_mode_in: str | None):
             """
+            LINE用: original / preview の2本を同じモードで作る。
+            優先順位: URLの ?wm=xxx ＞ 引数 wm_mode_in ＞ エントリ側設定(_wm_choice_from_entries)
+            - 自サイト配信（/media/img/<name>）以外は元URLをそのまま返す
             戻り値: (original_url, preview_url)
-            仕様:
-            - URL に ?wm=... が付いていれば **それを最優先**（ラジオボタンの選択を尊重）
-            - 付いていなければ引数 wm_mode_in を採用（'none' | 'fullygoto' | 'gotocity'）
-            - それでも決まらない場合は **エントリ側の選択(_wm_choice_from_entries) をフォールバック**
-            - mode=None/'none' → 透かし無し。'fullygoto'/'gotocity' → 指定透かし。
-            - 自サイト配信（/media/img/…）以外の画像URLは触らずそのまま返す。
             """
             try:
                 if not img_url_in:
@@ -2290,12 +2428,12 @@ def handle_message(event):
                 pu = urlparse(img_url_in)
                 m = _re.search(r"/media/img/([^/?#]+)$", pu.path)
                 if not m:
-                    # 自サイト配信でない（外部URLなど）はそのまま
+                    # 外部URLは触らない
                     return img_url_in, img_url_in
 
                 filename = unquote(m.group(1))
 
-                # 1) URL に wm パラメータがあれば最優先
+                # 1) URLパラメータ優先
                 qs = parse_qs(pu.query or "")
                 wm_in_url = (qs.get("wm", [None])[0] or "").strip().lower()
 
@@ -2307,12 +2445,11 @@ def handle_message(event):
                 elif wm_in_url in ("city",):
                     mode = "gotocity"
                 elif wm_in_url in ("1", "true"):
-                    # 旧形式の真偽値のときの既定（必要なら fullygoto に変更OK）
-                    mode = "gotocity"
+                    mode = "gotocity"  # 旧真偽値互換の既定
                 elif wm_in_url in ("none", "0", "off", "false"):
                     mode = None
 
-                # 2) URLに無ければ引数のモード
+                # 2) 引数モード
                 if mode is None and wm_mode_in:
                     v = (wm_mode_in or "").strip().lower()
                     if v in ("fullygoto", "gotocity"):
@@ -2324,25 +2461,25 @@ def handle_message(event):
                     elif v in ("none", "0", "off", "false"):
                         mode = None
 
-                # 2.5) それでも決まらなければ **エントリ側の選択** を採用（ここが今回の追加）
+                # 3) まだ決まらなければエントリ側の選択
                 if mode is None:
                     try:
                         choice = _wm_choice_from_entries(filename)
                         if choice in ("fullygoto", "gotocity"):
                             mode = choice
                     except Exception:
-                        pass  # 見つからなければ None のまま（＝透かし無し）
+                        pass
 
-                # 3) 署名URLを生成（original / preview とも同じモード）
+                # 4) 署名URL生成（original/preview同一）
                 if mode in ("fullygoto", "gotocity"):
-                    s = build_signed_image_url(filename, wm=mode,  external=True)
+                    s = build_signed_image_url(filename, wm=mode, external=True)
                     return s, s
                 else:
                     s = build_signed_image_url(filename, wm=False, external=True)
                     return s, s
 
             except Exception:
-                # 失敗時は元URLをそのまま
+                app.logger.exception("_line_img_pair_from_url failed; fallback to original")
                 return img_url_in, img_url_in
 
         # 署名URL＋透かしモードを強制（URLに wm が無ければ wm_mode を採用）
@@ -2369,6 +2506,7 @@ def handle_message(event):
                 preview_image_url    = prev_url  or img_url
             ))
 
+        # 本文は安全分割して複数通に
         for p in _split_for_line(ans, LINE_SAFE_CHARS):
             msgs.append(TextSendMessage(text=p))
 
@@ -2638,38 +2776,102 @@ def _img_sig(filename: str, exp: int) -> str:
         hmac.new(IMAGES_SIGNING_KEY, msg, hashlib.sha256).digest()
     ).rstrip(b"=").decode("ascii")
 
-def build_signed_image_url(filename: str, *, ttl_sec: int|None=None, wm: bool|str=True, external: bool=True) -> str:
+def build_signed_image_url(filename: str,
+                           *,
+                           wm: str | bool | None = None,
+                           external: bool = True,
+                           ttl_sec: int | None = None) -> str:
     """
-    署名付きURLを生成。
-    wm: True/False に加え "fullygoto" / "gotocity" も可（クエリ wm=fullygoto / wm=gotocity を付与）
+    署名付きURLを生成（従来互換＋拡張版）。
+    - 署名機構: safe_url_for(_sign=True) があれば使用。無ければ従来の IMAGE_PROTECT + _img_sig にフォールバック。
+    - wm 引数:
+        * 文字列: "fullygoto"/"gotocity" はそのままクエリに付与。
+                  "fully"→"fullygoto", "city"→"gotocity" に正規化。
+        * True:   旧来互換として wm=1 を付与（デフォルト透かし扱い）
+        * False/None: wm を付けない（透かし無し）
     """
     if not filename:
         return ""
-    if not IMAGE_PROTECT:
-        try:
+
+    # --- wm 正規化（文字列の同義語を統一） -------------------------
+    wm_q = None
+    try:
+        if isinstance(wm, str):
+            v = wm.strip().lower()
+            if v in ("fullygoto", "gotocity"):
+                wm_q = v
+            elif v == "fully":
+                wm_q = "fullygoto"
+            elif v == "city":
+                wm_q = "gotocity"
+            elif v in ("none", "0", "off", "false", ""):
+                wm_q = None
+            else:
+                # 不明な文字列はそのまま（後方互換）
+                wm_q = v
+        elif wm is True:
+            # 旧実装での「ON」を踏襲（値は '1'）
+            wm_q = "1"
+        else:
+            wm_q = None
+    except Exception:
+        wm_q = None
+
+    # --- 1) safe_url_for があれば署名付きで（新方式） ---------------
+    try:
+        # safe_url_for が未定義の環境もあるので try
+        kwargs = {"filename": filename, "_external": external, "_sign": True}
+        if wm_q:
+            kwargs["wm"] = wm_q
+        return safe_url_for("serve_image", **kwargs)  # type: ignore[name-defined]
+    except Exception:
+        pass  # フォールバックへ
+
+    # --- 2) 従来方式: IMAGE_PROTECT / _img_sig ----------------------
+    try:
+        if not IMAGE_PROTECT:
+            # 署名不要環境：そのまま url_for へ
             q = {}
-            if isinstance(wm, str) and wm:
-                q["wm"] = wm
-            elif wm:
-                q["wm"] = "1"
+            if wm_q:
+                q["wm"] = wm_q
+            try:
+                return url_for("serve_image", filename=filename, _external=external, **q)
+            except Exception:
+                base = f"{MEDIA_URL_PREFIX}/{filename}"
+                if q:
+                    from urllib.parse import urlencode
+                    return f"{base}?{urlencode(q)}"
+                return base
+
+        # 署名あり
+        ttl = int(ttl_sec or SIGNED_IMAGE_TTL_SEC)
+        exp = int(time.time()) + max(60, ttl)
+        sig = _img_sig(filename, exp)
+        q = {"sig": sig, "exp": exp}
+        if wm_q:
+            q["wm"] = wm_q
+
+        try:
             return url_for("serve_image", filename=filename, _external=external, **q)
         except Exception:
-            return f"{MEDIA_URL_PREFIX}/{filename}"
+            # url_for が使えない状況（テスト等）への最終フォールバック
+            wm_val = q.get("wm")
+            wm_part = f"&wm={wm_val}" if wm_val is not None else ""
+            return f"{MEDIA_URL_PREFIX}/{filename}?sig={sig}&exp={exp}{wm_part}"
 
-    ttl = int(ttl_sec or SIGNED_IMAGE_TTL_SEC)
-    exp = int(time.time()) + max(60, ttl)
-    sig = _img_sig(filename, exp)
-    q = {"sig": sig, "exp": exp}
-    if isinstance(wm, str) and wm:
-        q["wm"] = wm
-    elif wm:
-        q["wm"] = 1
-
-    try:
-        return url_for("serve_image", filename=filename, _external=external, **q)
     except Exception:
-        wm_q = q.get("wm", 0)
-        return f"{MEDIA_URL_PREFIX}/{filename}?sig={sig}&exp={exp}&wm={wm_q}"
+        app.logger.exception("build_signed_image_url failed (fallback)")
+        # 最後の最後の保険（署名無し）
+        try:
+            q = {}
+            if wm_q:
+                q["wm"] = wm_q
+            return url_for("serve_image", filename=filename, _external=external, **q)
+        except Exception:
+            base = f"{MEDIA_URL_PREFIX}/{filename}"
+            if wm_q:
+                return f"{base}?wm={wm_q}"
+            return base
 
 
 def _apply_text_watermark(im, text: str):
@@ -2722,133 +2924,167 @@ def _apply_text_watermark(im, text: str):
 def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool=False) -> str|None:
     """
     画像アップロードを『横1080px, JPEG, 350KB以下』に正規化して保存。
-    - 新規/置換時は .jpg で保存してファイル名（例: "abcd1234.jpg"）を返す
-    - 削除時は "" を返す
-    - 変更なしは None を返す
-    - 極端に巨大なピクセル数の画像は 413 RequestEntityTooLarge を送出
+    - 新規/置換時: .jpg で保存してファイル名（例: "abcd1234.jpg"）を返す
+    - 削除時   : "" を返す
+    - 変更なし : None を返す
+    - 極端に巨大なピクセル数は 413 (RequestEntityTooLarge) を送出
     """
-    # 関数内インポートでコピペ耐性を上げる（上位で import済みなら二重でもOK）
-    from werkzeug.exceptions import RequestEntityTooLarge, NotFound
-    from PIL import UnidentifiedImageError
+    import os, io, uuid
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    from werkzeug.utils import secure_filename
+    from werkzeug.exceptions import RequestEntityTooLarge
+
+    # ===== デフォルト値（外部定数が無くても動く） =====
+    try:
+        TARGET_W = int(globals().get("TARGET_JPEG_MAX_W", 1080))
+    except Exception:
+        TARGET_W = 1080
+    try:
+        TARGET_BYTES = int(globals().get("TARGET_JPEG_MAX_BYTES", 350 * 1024))
+    except Exception:
+        TARGET_BYTES = 350 * 1024
+    try:
+        IMAGES_DIR = globals()["IMAGES_DIR"]
+    except KeyError:
+        # 通常はグローバルにありますが、保険
+        IMAGES_DIR = os.path.join(os.getcwd(), "data", "images")
+    # Pillow のランチョス補間（無ければ BICUBIC）
+    try:
+        RESAMPLE = globals().get("RESAMPLE_LANCZOS", Image.LANCZOS)
+    except Exception:
+        RESAMPLE = getattr(Image, "LANCZOS", Image.BICUBIC)
+
+    # 拡張子チェック（HEIC 等も許容。Pillow が開けなければ除外）
+    try:
+        ALLOWED_EXTS = set(globals().get("ALLOWED_IMAGE_EXTS", {
+            ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"
+        }))
+    except Exception:
+        ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
+
+    # ===== 削除指定 =====
+    if delete:
+        if previous:
+            try:
+                os.remove(os.path.join(IMAGES_DIR, previous))
+            except Exception:
+                # 失敗しても致命ではない
+                pass
+        return ""
+
+    # ===== アップロード無し =====
+    if not file_storage or not getattr(file_storage, "filename", ""):
+        return None
+
+    # ファイル名から拡張子確認（厳密には使わず、Pillow で最終判定）
+    fname = secure_filename(file_storage.filename or "")
+    _, ext = os.path.splitext(fname)
+    ext = ext.lower().strip()
 
     try:
-        # 削除指定
-        if delete:
-            if previous:
-                try:
-                    os.remove(os.path.join(IMAGES_DIR, previous))
-                except Exception:
-                    pass
-            return ""
-
-        # アップロード無し
-        if not file_storage or not getattr(file_storage, "filename", ""):
-            return None
-
-        # 元拡張子ざっくりチェック（受け付けフォーマット）
-        fname = secure_filename(file_storage.filename or "")
-        _, ext = os.path.splitext(fname)
-        ext = ext.lower()
-        if ext not in ALLOWED_IMAGE_EXTS:
-            return None
-
-        # 画像読み込み＋向き補正（ここで Pillow の爆弾検知を拾う）
+        # 画像読み込み（爆弾対策もここで拾う）
         file_storage.stream.seek(0)
-        try:
-            im = Image.open(file_storage.stream)
-            im = ImageOps.exif_transpose(im)
+        im = Image.open(file_storage.stream)
+        im = ImageOps.exif_transpose(im)  # 向き補正
 
-            # ピクセル数ガード（二重の安全策）
-            w, h = im.size
-            limit = getattr(Image, "MAX_IMAGE_PIXELS", None)
-            if not limit:
-                try:
-                    limit = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))  # フォールバック: 40MP
-                except Exception:
-                    limit = 40000000
-            if (w * h) > int(limit):
-                raise RequestEntityTooLarge(f"pixels={w*h} > MAX_IMAGE_PIXELS={limit}")
-
-        except (Image.DecompressionBombError, Image.DecompressionBombWarning) as e:
-            app.logger.warning("Pillow decompression bomb blocked: %s", e)
-            # 413 でハンドラに渡す
-            raise RequestEntityTooLarge("Image pixel count too large")
-        except UnidentifiedImageError:
-            app.logger.warning("Uploaded file is not a valid image")
-            return None
-
-        # RGB化（JPEG保存のため）
-        if im.mode not in ("RGB", "L"):
-            im = im.convert("RGB")
-        elif im.mode == "L":
-            im = im.convert("RGB")
-
-        # 横幅1080pxまで縮小（※小さいものは拡大しない）
+        # ピクセル数ガード
         w, h = im.size
-        if w > TARGET_JPEG_MAX_W:
-            new_h = int(h * TARGET_JPEG_MAX_W / w)
-            im = im.resize((TARGET_JPEG_MAX_W, new_h), RESAMPLE_LANCZOS)
+        limit = getattr(Image, "MAX_IMAGE_PIXELS", None)
+        if not limit:
+            try:
+                limit = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))  # 40MP 目安
+            except Exception:
+                limit = 40000000
+        if (w * h) > int(limit):
+            raise RequestEntityTooLarge(f"pixels={w*h} > MAX_IMAGE_PIXELS={limit}")
 
-        # 品質自動調整で <=350KB を狙う（バイナリサイズを見ながら圧縮）
-        def encode(quality, img):
-            buf = io.BytesIO()
-            img.save(
-                buf, format="JPEG",
-                quality=int(quality),
-                optimize=True,
-                progressive=True,
-                subsampling=2  # 4:2:0
-            )
-            return buf.getvalue()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as e:
+        app.logger.warning("Pillow decompression bomb blocked: %s", e)
+        raise RequestEntityTooLarge("Image pixel count too large")
+    except UnidentifiedImageError:
+        # 画像ではない
+        app.logger.warning("Uploaded file is not a valid image: %r", fname)
+        return None
+    except Exception:
+        app.logger.exception("failed to open uploaded image")
+        return None
 
-        # まず高めで試す → バイナリサーチ
-        lo, hi = 40, 88
-        best_bytes = None
+    # 拡張子が未知でも Pillow で開ければ続行（従来の厳しすぎる拡張子判定が登録不可の原因になりやすいため）
+    if ext and ext not in ALLOWED_EXTS:
+        app.logger.info("unknown ext but image opened by Pillow: %s", ext)
 
-        first = encode(85, im)
-        if len(first) <= TARGET_JPEG_MAX_BYTES:
-            best_bytes = first
+    # JPEG保存用に RGB 化
+    if im.mode not in ("RGB", "L"):
+        im = im.convert("RGB")
+    elif im.mode == "L":
+        im = im.convert("RGB")
+
+    # 横幅 1080px まで縮小（小さいものは拡大しない）
+    w, h = im.size
+    if w > TARGET_W:
+        new_h = int(h * TARGET_W / w)
+        im = im.resize((TARGET_W, new_h), RESAMPLE)
+
+    # エンコード関数
+    def encode(quality: int, img: Image.Image) -> bytes:
+        buf = io.BytesIO()
+        img.save(
+            buf, format="JPEG",
+            quality=int(quality),
+            optimize=True,
+            progressive=True,
+            subsampling=2  # 4:2:0
+        )
+        return buf.getvalue()
+
+    # まず品質85で試す → バイナリサーチで TARGET_BYTES 以下に
+    try:
+        best = None
+        data = encode(85, im)
+        if len(data) <= TARGET_BYTES:
+            best = data
         else:
+            lo, hi = 40, 88
             while lo <= hi:
                 mid = (lo + hi) // 2
                 data = encode(mid, im)
-                if len(data) <= TARGET_JPEG_MAX_BYTES:
-                    best_bytes = data
+                if len(data) <= TARGET_BYTES:
+                    best = data
                     lo = mid + 1
                 else:
                     hi = mid - 1
 
-            # まだ大きい場合は少しずつ再縮小して再探索（最大2回）
+            # それでも大きい場合は段階的に 90% 縮小しつつ再探索（最大2回）
             shrink_try = 0
-            cur_im = im
-            while (best_bytes is None or len(best_bytes) > TARGET_JPEG_MAX_BYTES) and shrink_try < 2:
+            cur = im
+            while (best is None or len(best) > TARGET_BYTES) and shrink_try < 2:
                 shrink_try += 1
-                w, h = cur_im.size
-                cur_im = cur_im.resize((int(w*0.9), int(h*0.9)), RESAMPLE_LANCZOS)
+                cw, ch = cur.size
+                cur = cur.resize((max(1, int(cw * 0.9)), max(1, int(ch * 0.9))), RESAMPLE)
                 lo, hi = 40, 85
                 candidate = None
                 while lo <= hi:
                     mid = (lo + hi) // 2
-                    data = encode(mid, cur_im)
-                    if len(data) <= TARGET_JPEG_MAX_BYTES:
+                    data = encode(mid, cur)
+                    if len(data) <= TARGET_BYTES:
                         candidate = data
                         lo = mid + 1
                     else:
                         hi = mid - 1
                 if candidate:
-                    best_bytes = candidate
+                    best = candidate
 
-            if best_bytes is None:
-                best_bytes = encode(75, cur_im)
+            if best is None:
+                best = encode(75, cur)
 
-        # 保存（常に .jpg）
-        new_name  = f"{uuid.uuid4().hex}.jpg"
-        save_path = os.path.join(IMAGES_DIR, new_name)
+        # 保存（.jpg 固定）
         os.makedirs(IMAGES_DIR, exist_ok=True)
-        with open(save_path, "wb") as f:
-            f.write(best_bytes)
+        new_name = f"{uuid.uuid4().hex}.jpg"
+        save_path = os.path.join(IMAGES_DIR, new_name)
+        with open(save_path, "wb") as wf:
+            wf.write(best)
 
-        # 古いファイル削除
+        # 旧ファイル削除（置換）
         if previous and previous != new_name:
             try:
                 os.remove(os.path.join(IMAGES_DIR, previous))
@@ -2858,7 +3094,7 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
         return new_name
 
     except RequestEntityTooLarge:
-        # 413 は外へ伝播（グローバルハンドラに拾わせる）
+        # 413 は上位ハンドラに
         raise
     except Exception:
         app.logger.exception("image normalize & save failed")
@@ -3402,18 +3638,47 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
     - 説明: AI（任意）で統合、失敗時は最長
     - タグ/エリア/リンク/支払い: ユニーク結合
     - 住所/電話/営業時間/定休/駐車/備考/地図等: 最頻→最長
+    - 画像/透かし/緯度経度/出典/ユーザーID も保全
     - extras: キー単位で最頻→最長
     戻り値: (新entries, stats, preview)
     """
+    import os
+
+    def _first_number(x):
+        try:
+            if x is None or x == "":
+                return None
+            return float(x)
+        except Exception:
+            return None
+
+    def _pick_best_image_name(names):
+        # ベース名＋空白除去 → 最頻→最長
+        cands = [os.path.basename(str(n).strip()) for n in names if str(n or "").strip()]
+        return _mode_or_longest(cands)
+
+    def _pick_best_wm_choice(group):
+        # wm_external_choice を正規化して最頻。無ければ wm_on から推測
+        allowed = {"none", "fully", "city"}
+        vals = []
+        for g in group:
+            w = (g.get("wm_external_choice") or "").strip().lower()
+            if w in allowed:
+                vals.append(w)
+            else:
+                # 後方互換：wm_on が True なら fully / False なら none
+                if isinstance(g.get("wm_on"), bool):
+                    vals.append("fully" if g.get("wm_on") else "none")
+        best = _mode_or_longest(vals) if vals else ""
+        return best or "none"
+
     groups = {}
     for e in entries:
-        e0 = _norm_entry(e)  # ★ 追加：先に正規化
+        e0 = _norm_entry(e)  # 先に正規化
         k = _title_key(e0.get("title", ""))
-        if not k:  # ★ 追加：空タイトルは統合対象にしない
-            # id(e0)で一意キー化（辞書内の一時キーなので可）
+        if not k:
             groups[f"__keep_{id(e0)}"] = [e0]
             continue
-        
         groups.setdefault(k, []).append(e0)
 
     new_list = []
@@ -3427,9 +3692,10 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
             continue
 
         merged_groups += 1
+
         titles = [g.get("title","") for g in group]
-        # タイトルは最頻→最長
-        title = _mode_or_longest(titles)
+        title = _mode_or_longest(titles)  # タイトル：最頻→最長
+
         # 主要文字列項目
         address     = _pick_best_string([g.get("address","")     for g in group])
         tel         = _pick_best_string([g.get("tel","")         for g in group])
@@ -3438,18 +3704,58 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
         parking     = _pick_best_string([g.get("parking","")     for g in group])
         parking_num = _pick_best_string([g.get("parking_num","") for g in group])
         remark      = _pick_best_string([g.get("remark","")      for g in group])
-        # map は Google系など好ましいURLを優先採用
-        map_url     = _pick_best_map_url([g.get("map","")        for g in group])
-        category    = _mode_or_longest([g.get("category","")    for g in group]) or "観光"
+        map_url     = _pick_best_map_url([g.get("map","")        for g in group])  # Google系優先
+        category    = _mode_or_longest([g.get("category","")     for g in group]) or "観光"
+        # 追記：出典の保全
+        source      = _pick_best_string([g.get("source","")      for g in group])
+        source_url  = _pick_best_string([g.get("source_url","")  for g in group])
 
         # リスト系は結合ユニーク
-        tags   = _uniq_keep_order(itertools.chain.from_iterable([g.get("tags",[])   for g in group]))
-        areas  = _uniq_keep_order(itertools.chain.from_iterable([g.get("areas",[])  for g in group])) or ["五島市"]
-        links  = _uniq_keep_order(itertools.chain.from_iterable([g.get("links",[])  for g in group]))
-        pay    = _uniq_keep_order(itertools.chain.from_iterable([g.get("payment",[])for g in group]))
+        tags   = _uniq_keep_order(itertools.chain.from_iterable([g.get("tags",[])    for g in group]))
+        areas  = _uniq_keep_order(itertools.chain.from_iterable([g.get("areas",[])   for g in group])) or ["五島市"]
+        links  = _uniq_keep_order(itertools.chain.from_iterable([g.get("links",[])   for g in group]))
+        pay    = _uniq_keep_order(itertools.chain.from_iterable([g.get("payment",[]) for g in group]))
 
-        # extras
+        # extras をマージ
         extras = _merge_extras([g.get("extras",{}) for g in group])
+
+        # --- 画像名の保全（image_file / image のどちらでも） ---
+        img_names = []
+        for g in group:
+            v = (g.get("image_file") or g.get("image") or "").strip()
+            if v:
+                img_names.append(v)
+        best_image = _pick_best_image_name(img_names) if img_names else ""
+
+        # --- 透かし設定の保全 ---
+        wm_choice = _pick_best_wm_choice(group)
+        wm_on = any(bool(g.get("wm_on")) for g in group)  # 互換フラグは「どれかTrueならTrue」
+
+        # --- 緯度・経度の保全（両方揃っている候補を優先） ---
+        lat = lng = None
+        # 1) lat/lng 両方あるレコードを優先
+        for g in group:
+            la = _first_number(g.get("lat"))
+            ln = _first_number(g.get("lng"))
+            if la is not None and ln is not None:
+                lat, lng = la, ln
+                break
+        # 2) 片方しか無い場合の救済
+        if lat is None:
+            for g in group:
+                la = _first_number(g.get("lat"))
+                if la is not None:
+                    lat = la
+                    break
+        if lng is None:
+            for g in group:
+                ln = _first_number(g.get("lng"))
+                if ln is not None:
+                    lng = ln
+                    break
+
+        # --- user_id の保全（最頻→最長）---
+        user_id = _mode_or_longest([g.get("user_id","") for g in group])
 
         # 説明はAI統合（フォールバックあり）
         desc_candidates = [g.get("desc","") for g in group if (g.get("desc","").strip())]
@@ -3464,7 +3770,8 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
         else:
             desc = _mode_or_longest(desc_candidates)
 
-        merged = _norm_entry({
+        # 統合結果
+        merged = {
             "category": category,
             "title": title,
             "desc": desc,
@@ -3481,7 +3788,33 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
             "parking_num": parking_num,
             "remark": remark,
             "extras": extras,
-        })
+        }
+
+        # 追記：出典
+        if source:     merged["source"] = source
+        if source_url: merged["source_url"] = source_url
+
+        # 追記：画像（両フィールドを揃えて保持）
+        if best_image:
+            merged["image_file"] = best_image
+            merged["image"] = best_image
+
+        # 追記：透かし
+        if wm_choice:
+            merged["wm_external_choice"] = wm_choice
+        merged["wm_on"] = bool(wm_on)
+
+        # 追記：緯度経度
+        if lat is not None: merged["lat"] = round(float(lat), 6)
+        if lng is not None: merged["lng"] = round(float(lng), 6)
+
+        # 追記：user_id
+        if user_id:
+            merged["user_id"] = user_id
+
+        # 最後に正規化（ここで画像やwmが落ちないよう、_norm_entry の後付けパッチが有効）
+        merged = _norm_entry(merged)
+
         new_list.append(merged)
         removed += (len(group) - 1)
         preview.append({"title": title, "merged_from": len(group)})
@@ -7139,6 +7472,78 @@ def delete_notice(idx):
 def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
+
+
+# ===== 正規化の後付けパッチ（画像系フィールドが消えるのを防ぐ）=====
+# 既存の _norm_entry を壊さず、結果を補正するラッパーです。
+# 貼り付け位置：ファイル末尾の「メイン起動」直前が安全
+try:
+    if '_norm_entry' in globals() and callable(_norm_entry):
+        __orig_norm_entry = _norm_entry  # 退避
+
+        def _norm_entry(entry):
+            # まず元の正規化を実行
+            try:
+                e = __orig_norm_entry(entry)
+            except Exception:
+                # 万一でも壊さない
+                e = {}
+            if not isinstance(e, dict):
+                try:
+                    e = dict(e or {})
+                except Exception:
+                    e = {}
+
+            # ---- 画像フィールドの保全（image_file / image）----
+            src_img = None
+            try:
+                for k in ('image_file', 'image'):
+                    v = (entry or {}).get(k)
+                    if isinstance(v, str) and v.strip():
+                        src_img = v.strip()
+                        break
+            except Exception:
+                pass
+
+            # 正規化後に消えていたら復元。どちらか一方しか無ければ揃える
+            if src_img:
+                if not (e.get('image_file') or e.get('image')):
+                    e['image_file'] = src_img
+                    e['image'] = src_img
+                else:
+                    cur = (e.get('image_file') or e.get('image') or '').strip()
+                    if cur:
+                        e['image_file'] = cur
+                        e['image'] = cur
+
+            # ---- 透かし指定の保全（wm_external_choice / wm_on）----
+            wm_choice_in = (entry or {}).get('wm_external_choice')
+            if isinstance(wm_choice_in, str) and wm_choice_in.strip():
+                e['wm_external_choice'] = wm_choice_in.strip().lower()
+            elif 'wm_external_choice' not in e:
+                # 旧UIの wm_on から導出（後方互換）
+                wm_on_in = (entry or {}).get('wm_on')
+                if isinstance(wm_on_in, bool):
+                    e['wm_external_choice'] = 'fully' if wm_on_in else 'none'
+
+            if isinstance((entry or {}).get('wm_on'), bool) and 'wm_on' not in e:
+                e['wm_on'] = bool((entry or {}).get('wm_on'))
+
+            # ---- lat/lng の取りこぼし救済（任意）----
+            for k in ('lat', 'lng'):
+                v_in = (entry or {}).get(k)
+                if (k not in e or e.get(k) in (None, "")) and v_in not in (None, ""):
+                    try:
+                        e[k] = float(v_in)
+                    except Exception:
+                        e[k] = v_in
+
+            return e
+except Exception:
+    # ここで失敗してもアプリ動作は継続
+    app.logger.exception("norm-entry post patch failed")
+# ===== ここまでパッチ =====
+
 
 # メイン起動（重複禁止：これ1つだけ残す）
 if __name__ == "__main__":
