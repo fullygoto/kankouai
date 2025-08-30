@@ -314,12 +314,28 @@ def serve_image(filename):
     if not _verify_sig_if_available(filename, request.args):
         abort(403)
 
-    # 実ファイルを特定
-    try:
-        path = safe_join(MEDIA_ROOT, filename)
-    except Exception:
-        abort(404)
-    if not path or not os.path.isfile(path):
+    # --- 実ファイルを特定（MEDIA_ROOT を優先しつつ互換フォールバック） ---
+    def _find_image_path(fn: str) -> str | None:
+        candidates = []
+        # まず統一先
+        if MEDIA_ROOT:
+            candidates.append(MEDIA_ROOT)
+        # 互換: 旧実装で使っていた可能性のある場所も順に
+        for d in {IMAGES_DIR, os.getenv("MEDIA_ROOT", "media/img"), "media/img", "media"}:
+            if d and d not in candidates:
+                candidates.append(d)
+        # safe_join で順に探す
+        for base in candidates:
+            try:
+                p = safe_join(base, fn)
+            except Exception:
+                continue
+            if p and os.path.isfile(p):
+                return p
+        return None
+
+    path = _find_image_path(filename)
+    if not path:
         abort(404)
 
     # 透かしモード決定（URL優先 → エントリ既定）
@@ -332,7 +348,7 @@ def serve_image(filename):
     elif wm_q in {"city"}:
         mode = "gotocity"
     elif wm_q in {"1", "true"}:
-        # 真偽値だけ来た場合の既定（必要なら fullygoto に変えてOK）
+        # 真偽値だけ来た場合の既定（必要なら fullygoto に変更可）
         mode = "gotocity"
     elif wm_q in {"none", "0", "false", ""}:
         mode = None
@@ -342,7 +358,6 @@ def serve_image(filename):
 
     # 透かし不要 or 全体無効 → 素のファイルを返す
     if (not WATERMARK_ENABLE) or (mode is None):
-        # そのまま（静的配信互換）
         return send_file(path)
 
     # 透かし合成して返す
@@ -353,21 +368,18 @@ def serve_image(filename):
         buf = io.BytesIO()
         save_kwargs = {}
         if fmt == "JPEG":
-            # JPEG保存にはRGBへ
             out = out.convert("RGB")
             save_kwargs["quality"] = int(os.getenv("WM_JPEG_QUALITY", "88"))
             save_kwargs["optimize"] = True
         out.save(buf, fmt, **save_kwargs)
         buf.seek(0)
         resp = send_file(buf, mimetype=mime)
-        # 軽いキャッシュ
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
     except UnidentifiedImageError:
         abort(415)
     except Exception:
         app.logger.exception("serve_image failed")
-        # フォールバック：素のファイル
         return send_file(path)
 # ==== /画像配信 =================================================
 
