@@ -178,6 +178,188 @@ def send_viewpoints_map(event):
     _reply_or_push(event, f"展望所マップはこちら：\n{url}")
 
 
+# ==== 画像配信（署名 + 透かし対応）=============================
+# 依存: Pillow, safe_join, send_file, load_entries(), app など
+# 既存の設定が無い場合のデフォルト
+MEDIA_ROOT = os.getenv("MEDIA_ROOT", "media/img")
+WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
+IMAGE_PROTECT    = os.getenv("IMAGE_PROTECT",    "0").lower() in {"1","true","on","yes"}
+
+def _wm_choice_from_entries(filename_only: str) -> str | None:
+    """エントリ側のラジオ選択から既定の透かしモードを推定。None=透かし無し"""
+    try:
+        for e in load_entries():
+            img = (e.get("image_file") or e.get("image") or "").strip()
+            if img == filename_only:
+                raw = (e.get("wm_external_choice") or "").strip().lower()
+                if raw in {"fully", "fullygoto"}:
+                    return "fullygoto"
+                if raw in {"city", "gotocity"}:
+                    return "gotocity"
+                # 旧ブール互換
+                legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
+                return "gotocity" if legacy else None
+    except Exception:
+        app.logger.exception("wm choice lookup failed")
+    return None
+
+def _verify_sig_if_available(filename: str, args) -> bool:
+    """
+    署名検証。既存の検証関数があれば使う。無ければ（または IMAGE_PROTECT=False なら）通す。
+    既存候補: verify_signed_media_url(filename, args) / verify_signed_query(filename, args)
+    """
+    if not IMAGE_PROTECT:
+        return True
+    try:
+        vf = (globals().get("verify_signed_media_url")
+              or globals().get("verify_signed_query")
+              or None)
+        if vf:
+            return bool(vf(filename, args))
+        # 既存関数が無い場合は通す（既存URLを壊さないため）
+        return True
+    except Exception:
+        app.logger.exception("signature verify failed")
+        return False
+
+def _load_image_safe(path: str):
+    with Image.open(path) as im:
+        return im.convert("RGBA")
+
+def _overlay_png_or_text(base_rgba: Image.Image, mode: str) -> Image.Image:
+    """
+    右下にロゴPNG（あれば）を重ねる。無ければテキストで代替。
+    mode: 'fullygoto' | 'gotocity'
+    """
+    W, H = base_rgba.size
+    # ロゴファイル探す（任意）：static/wm_fullygoto.png / static/wm_gotocity.png
+    logo_path = None
+    cand = {
+        "fullygoto": ["static/wm_fullygoto.png", "static/wm_fully.png"],
+        "gotocity":  ["static/wm_gotocity.png", "static/wm_city.png"],
+    }.get(mode, [])
+    for p in cand:
+        if os.path.isfile(p):
+            logo_path = p
+            break
+
+    out = base_rgba.copy()
+    margin = max(6, int(min(W, H) * 0.02))
+
+    if logo_path:
+        try:
+            with Image.open(logo_path) as wm:
+                wm = wm.convert("RGBA")
+                # 幅の 18% 目安
+                target_w = max(64, int(W * 0.18))
+                scale = target_w / wm.width
+                wm = wm.resize((target_w, int(wm.height * scale)), Image.LANCZOS)
+                x = W - wm.width - margin
+                y = H - wm.height - margin
+                out.alpha_composite(wm, dest=(x, y))
+                return out
+        except Exception:
+            app.logger.warning("wm logo load failed, fallback to text")
+
+    # テキスト透かし（ロゴが無い時の簡易版）
+    try:
+        txt = "@fullyGOTO" if mode == "fullygoto" else "@Goto City"
+        overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        # フォント（無ければデフォルト）
+        try:
+            # 任意に NotoSansJP 等を置いていれば使う
+            font_path = os.getenv("WM_FONT_PATH", "")
+            size = max(18, int(min(W, H) * 0.045))
+            font = ImageFont.truetype(font_path, size) if font_path else ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+
+        # テキストサイズ
+        tw, th = draw.textbbox((0, 0), txt, font=font)[2:]
+        # 背景プレート
+        pad = max(4, int(th * 0.25))
+        box_w, box_h = tw + pad * 2, th + pad * 2
+        bx = W - box_w - margin
+        by = H - box_h - margin
+        draw.rounded_rectangle((bx, by, bx + box_w, by + box_h), radius=int(pad * 1.2), fill=(0, 0, 0, 76))
+        # テキスト（白）
+        draw.text((bx + pad, by + pad), txt, font=font, fill=(255, 255, 255, 230))
+        out.alpha_composite(overlay)
+    except Exception:
+        app.logger.exception("text watermark failed")
+    return out
+
+def _infer_mimetype(path: str) -> tuple[str, str]:
+    ext = (os.path.splitext(path)[1] or "").lower()
+    if ext in {".jpg", ".jpeg"}: return "JPEG", "image/jpeg"
+    if ext in {".png"}:          return "PNG",  "image/png"
+    if ext in {".webp"}:         return "WEBP", "image/webp"
+    return "PNG", "image/png"
+
+@app.route("/media/img/<path:filename>")
+def serve_image(filename):
+    # 署名検証（在れば）
+    if not _verify_sig_if_available(filename, request.args):
+        abort(403)
+
+    # 実ファイルを特定
+    try:
+        path = safe_join(MEDIA_ROOT, filename)
+    except Exception:
+        abort(404)
+    if not path or not os.path.isfile(path):
+        abort(404)
+
+    # 透かしモード決定（URL優先 → エントリ既定）
+    wm_q = (request.args.get("wm") or "").strip().lower()
+    mode = None
+    if wm_q in {"fullygoto", "gotocity"}:
+        mode = wm_q
+    elif wm_q in {"fully"}:
+        mode = "fullygoto"
+    elif wm_q in {"city"}:
+        mode = "gotocity"
+    elif wm_q in {"1", "true"}:
+        # 真偽値だけ来た場合の既定（必要なら fullygoto に変えてOK）
+        mode = "gotocity"
+    elif wm_q in {"none", "0", "false", ""}:
+        mode = None
+    else:
+        # URLが無指定 → エントリ側ラジオを既定に
+        mode = _wm_choice_from_entries(os.path.basename(filename))
+
+    # 透かし不要 or 全体無効 → 素のファイルを返す
+    if (not WATERMARK_ENABLE) or (mode is None):
+        # そのまま（静的配信互換）
+        return send_file(path)
+
+    # 透かし合成して返す
+    try:
+        base = _load_image_safe(path)  # RGBA
+        out = _overlay_png_or_text(base, mode=mode)
+        fmt, mime = _infer_mimetype(path)
+        buf = io.BytesIO()
+        save_kwargs = {}
+        if fmt == "JPEG":
+            # JPEG保存にはRGBへ
+            out = out.convert("RGB")
+            save_kwargs["quality"] = int(os.getenv("WM_JPEG_QUALITY", "88"))
+            save_kwargs["optimize"] = True
+        out.save(buf, fmt, **save_kwargs)
+        buf.seek(0)
+        resp = send_file(buf, mimetype=mime)
+        # 軽いキャッシュ
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+    except UnidentifiedImageError:
+        abort(415)
+    except Exception:
+        app.logger.exception("serve_image failed")
+        # フォールバック：素のファイル
+        return send_file(path)
+# ==== /画像配信 =================================================
+
 # ==== My Maps 共通（VIEWER化） ==================================
 def _normalize_mymaps_url(u: str) -> str:
     if not u:
@@ -553,6 +735,43 @@ def _build_image_urls_for_entry(e: dict):
             return {"thumb": thumb, "image": orig}
         except Exception:
             return {"thumb": "", "image": ""}
+
+def line_image_pair_for_entry(e: dict) -> tuple[str|None, str|None]:
+    """
+    LINEのImageSendMessage用に (original_url, preview_url) を返す。
+    - サムネは使わず、ラジオ選択（wm_external_choice）をそのまま原寸に反映
+    - 'none' のときは wm なし（=透かし無し）
+    """
+    img = (e.get("image_file") or e.get("image") or "").strip()
+    if not img:
+        return None, None
+
+    choice = (e.get("wm_external_choice") or "").strip().lower()
+    if choice in ("fully", "city"):
+        choice = "fullygoto" if choice == "fully" else "gotocity"
+    elif choice not in ("none", "fullygoto", "gotocity"):
+        legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
+        choice = "gotocity" if legacy else "none"
+
+    try:
+        if choice == "none":
+            # 透かしなし
+            u = build_signed_image_url(img, wm=False, external=True)
+            return u, u
+        else:
+            # 指定の透かしを入れる
+            u = build_signed_image_url(img, wm=choice, external=True)
+            return u, u
+    except Exception:
+        # フォールバック（safe_url_forで署名 + wmを明示）
+        try:
+            if choice == "none":
+                u = safe_url_for("serve_image", filename=img, _external=True, _sign=True)
+            else:
+                u = safe_url_for("serve_image", filename=img, _external=True, _sign=True, wm=choice)
+            return u, u
+        except Exception:
+            return None, None
 
 
 def _nearby_core(
@@ -2011,15 +2230,16 @@ def handle_message(event):
         # 直前で uid3 / wm_mode は取得済み
         msgs = []
 
-        # LINE 画像の original / preview を同じ透かしモードで作るヘルパ
+        # LINE 画像の original / preview を同じ透かしモードで作るヘルパ（完全版で置換）
         def _line_img_pair_from_url(img_url_in: str, wm_mode_in: str | None):
             """
             戻り値: (original_url, preview_url)
             仕様:
-            - エントリ側の URL に ?wm=... があれば **それを最優先**（ラジオ選択を尊重）
-            - 無ければ引数 wm_mode_in（'none'|'fullygoto'|'gotocity'）を採用
+            - URL に ?wm=... が付いていれば **それを最優先**（ラジオボタンの選択を尊重）
+            - 付いていなければ引数 wm_mode_in を採用（'none' | 'fullygoto' | 'gotocity'）
+            - それでも決まらない場合は **エントリ側の選択(_wm_choice_from_entries) をフォールバック**
             - mode=None/'none' → 透かし無し。'fullygoto'/'gotocity' → 指定透かし。
-            - 自サイト配信以外の画像URLはそのまま返す。
+            - 自サイト配信（/media/img/…）以外の画像URLは触らずそのまま返す。
             """
             try:
                 if not img_url_in:
@@ -2031,47 +2251,80 @@ def handle_message(event):
                 pu = urlparse(img_url_in)
                 m = _re.search(r"/media/img/([^/?#]+)$", pu.path)
                 if not m:
-                    # 外部URL等は触らない
+                    # 自サイト配信でない（外部URLなど）はそのまま
                     return img_url_in, img_url_in
 
                 filename = unquote(m.group(1))
 
-                # 1) URL の wm を最優先
+                # 1) URL に wm パラメータがあれば最優先
                 qs = parse_qs(pu.query or "")
                 wm_in_url = (qs.get("wm", [None])[0] or "").strip().lower()
 
                 mode = None
-                if wm_in_url in ("fullygoto", "fully"):
+                if wm_in_url in ("fullygoto", "gotocity"):
+                    mode = wm_in_url
+                elif wm_in_url in ("fully",):
                     mode = "fullygoto"
-                elif wm_in_url in ("gotocity", "city"):
+                elif wm_in_url in ("city",):
                     mode = "gotocity"
-                elif wm_in_url in ("none", "0", "false"):
-                    mode = None
                 elif wm_in_url in ("1", "true"):
-                    # 旧真偽値 → 既定先（必要なら "fullygoto" に変更）
+                    # 旧形式の真偽値のときの既定（必要なら fullygoto に変更OK）
                     mode = "gotocity"
+                elif wm_in_url in ("none", "0", "off", "false"):
+                    mode = None
 
-                # 2) URLに無ければ呼び出し元モード
-                if mode is None:
-                    if wm_mode_in in ("fullygoto", "gotocity"):
-                        mode = wm_mode_in
-                    elif (wm_mode_in or "").lower() in ("none", "0", "false"):
+                # 2) URLに無ければ引数のモード
+                if mode is None and wm_mode_in:
+                    v = (wm_mode_in or "").strip().lower()
+                    if v in ("fullygoto", "gotocity"):
+                        mode = v
+                    elif v in ("fully",):
+                        mode = "fullygoto"
+                    elif v in ("city",):
+                        mode = "gotocity"
+                    elif v in ("none", "0", "off", "false"):
                         mode = None
 
-                # 3) 署名URLを生成（original / preview 同一モード）
+                # 2.5) それでも決まらなければ **エントリ側の選択** を採用（ここが今回の追加）
+                if mode is None:
+                    try:
+                        choice = _wm_choice_from_entries(filename)
+                        if choice in ("fullygoto", "gotocity"):
+                            mode = choice
+                    except Exception:
+                        pass  # 見つからなければ None のまま（＝透かし無し）
+
+                # 3) 署名URLを生成（original / preview とも同じモード）
                 if mode in ("fullygoto", "gotocity"):
-                    url = build_signed_image_url(filename, wm=mode, external=True)
-                    return url, url
+                    s = build_signed_image_url(filename, wm=mode,  external=True)
+                    return s, s
                 else:
-                    url = build_signed_image_url(filename, wm=False, external=True)
-                    return url, url
+                    s = build_signed_image_url(filename, wm=False, external=True)
+                    return s, s
 
             except Exception:
                 # 失敗時は元URLをそのまま
                 return img_url_in, img_url_in
 
+        # 署名URL＋透かしモードを強制（URLに wm が無ければ wm_mode を採用）
         if img_url:
             orig_url, prev_url = _line_img_pair_from_url(img_url, wm_mode)
+            if not orig_url or not prev_url:
+                # 自サイト画像ならファイル名から再生成（wm_mode を確実に反映）
+                try:
+                    from urllib.parse import urlparse, unquote
+                    import re
+                    m = re.search(r"/media/img/([^/?#]+)$", urlparse(img_url).path)
+                    if m:
+                        fn = unquote(m.group(1))
+                        if wm_mode in ("fullygoto", "gotocity"):
+                            s = safe_url_for("serve_image", filename=fn, _external=True, _sign=True, wm=wm_mode)
+                        else:
+                            s = safe_url_for("serve_image", filename=fn, _external=True, _sign=True)
+                        orig_url = prev_url = s
+                except Exception:
+                    pass
+
             msgs.append(ImageSendMessage(
                 original_content_url = orig_url or img_url,
                 preview_image_url    = prev_url  or img_url
@@ -5788,9 +6041,11 @@ def _format_entry_messages(e: dict):
 
         if img_url:
             try:
+                # img_url に wm= が付いていれば最優先、無ければ透かし無し扱いで署名URL化
+                orig_url, prev_url = _line_img_pair_from_url(img_url, None)
                 msgs.append(ImageSendMessage(
-                    original_content_url=img_url,
-                    preview_image_url=img_url
+                    original_content_url = orig_url or img_url,
+                    preview_image_url    = prev_url  or img_url
                 ))
             except Exception:
                 # LINE SDKの型エラー等は握りつぶしてテキストのみ送る
