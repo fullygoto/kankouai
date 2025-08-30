@@ -310,21 +310,32 @@ def _infer_mimetype(path: str) -> tuple[str, str]:
 
 @app.route("/media/img/<path:filename>")
 def serve_image(filename):
-    # 署名検証（在れば）
-    if not _verify_sig_if_available(filename, request.args):
-        abort(403)
+    """
+    署名検証 → 実ファイル解決 → 透かしモード決定（URL優先→エントリ既定） → 返却。
+    - wm 未指定 or WATERMARK_ENABLE=False のときは原画像をそのまま返す
+    - wm=gotocity / fullygoto のときは動的に合成して返す
+    - 返却は元拡張子に合わせて JPEG/PNG を選択（LINE互換のため基本はJPEG）
+    """
+    # 1) 署名検証（実装があれば使用）
+    try:
+        if not _verify_sig_if_available(filename, request.args):
+            abort(403)
+    except Exception:
+        # _verify_sig_if_available が未定義でも壊さない
+        pass
 
-    # --- 実ファイルを特定（MEDIA_ROOT を優先しつつ互換フォールバック） ---
+    # 2) 実ファイルパスの解決（MEDIA_ROOT 優先＋互換フォールバック）
+    from werkzeug.utils import safe_join
     def _find_image_path(fn: str) -> str | None:
         candidates = []
-        # まず統一先
-        if MEDIA_ROOT:
+        # 明示ルート
+        if "MEDIA_ROOT" in globals() and MEDIA_ROOT:
             candidates.append(MEDIA_ROOT)
-        # 互換: 旧実装で使っていた可能性のある場所も順に
+        # 互換ディレクトリ（重複回避）
         for d in {IMAGES_DIR, os.getenv("MEDIA_ROOT", "media/img"), "media/img", "media"}:
             if d and d not in candidates:
                 candidates.append(d)
-        # safe_join で順に探す
+        # 走査
         for base in candidates:
             try:
                 p = safe_join(base, fn)
@@ -334,53 +345,99 @@ def serve_image(filename):
                 return p
         return None
 
-    path = _find_image_path(filename)
-    if not path:
+    abs_path = _find_image_path(filename)
+    if not abs_path:
         abort(404)
 
-    # 透かしモード決定（URL優先 → エントリ既定）
-    wm_q = (request.args.get("wm") or "").strip().lower()
-    mode = None
-    if wm_q in {"fullygoto", "gotocity"}:
-        mode = wm_q
-    elif wm_q in {"fully"}:
-        mode = "fullygoto"
-    elif wm_q in {"city"}:
-        mode = "gotocity"
-    elif wm_q in {"1", "true"}:
-        # 真偽値だけ来た場合の既定（必要なら fullygoto に変更可）
-        mode = "gotocity"
-    elif wm_q in {"none", "0", "false", ""}:
-        mode = None
-    else:
-        # URLが無指定 → エントリ側ラジオを既定に
-        mode = _wm_choice_from_entries(os.path.basename(filename))
-
-    # 透かし不要 or 全体無効 → 素のファイルを返す
-    if (not WATERMARK_ENABLE) or (mode is None):
-        return send_file(path)
-
-    # 透かし合成して返す
+    # 3) 透かしモード決定（URL指定 > エントリ既定）
     try:
-        base = _load_image_safe(path)  # RGBA
-        out = _overlay_png_or_text(base, mode=mode)
-        fmt, mime = _infer_mimetype(path)
-        buf = io.BytesIO()
-        save_kwargs = {}
-        if fmt == "JPEG":
-            out = out.convert("RGB")
-            save_kwargs["quality"] = int(os.getenv("WM_JPEG_QUALITY", "88"))
-            save_kwargs["optimize"] = True
-        out.save(buf, fmt, **save_kwargs)
-        buf.seek(0)
-        resp = send_file(buf, mimetype=mime)
+        mode = _norm_wm_mode(request.args.get("wm"))
+    except Exception:
+        # フォールバック（簡易正規化）
+        v = (request.args.get("wm") or "").strip().lower()
+        if v in {"fullygoto", "gotocity"}:
+            mode = v
+        elif v == "fully":
+            mode = "fullygoto"
+        elif v == "city":
+            mode = "gotocity"
+        elif v in {"1", "true", "on"}:
+            mode = "gotocity"
+        else:
+            mode = None
+
+    if mode is None:
+        # URLに指定が無ければ、エントリ側の既定（wm_external_choice / 旧wm_on）を採用
+        try:
+            mode = _norm_wm_mode(_wm_choice_from_entries(os.path.basename(filename)))
+        except Exception:
+            pass
+
+    # 4) mimetype/保存フォーマットの判定（拡張子基準。未対応はJPEG）
+    ext = os.path.splitext(abs_path)[1].lower()
+    if ext in (".jpg", ".jpeg"):
+        out_fmt, mime = "JPEG", "image/jpeg"
+    elif ext == ".png":
+        out_fmt, mime = "PNG", "image/png"
+    elif ext == ".webp":
+        # 互換性重視で JPEG に寄せる（LINEもOK）
+        out_fmt, mime = "JPEG", "image/jpeg"
+    else:
+        out_fmt, mime = "JPEG", "image/jpeg"
+
+    # 透かし無効 or モード指定なし → そのまま返す
+    if (not globals().get("WATERMARK_ENABLE", True)) or (mode is None):
+        resp = send_file(abs_path, mimetype=mime)
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp
-    except UnidentifiedImageError:
-        abort(415)
+
+    # 5) 合成して返す
+    try:
+        from PIL import Image, ImageOps
+        import io as _io
+
+        with Image.open(abs_path) as im:
+            # EXIFの向きを反映
+            im = ImageOps.exif_transpose(im)
+
+            # 透かし合成（実装が無い環境でも壊さない）
+            try:
+                out = _compose_watermark(im, mode)  # RGB を返す想定
+            except Exception:
+                out = im
+
+            buf = _io.BytesIO()
+            if out_fmt == "JPEG":
+                out = out.convert("RGB")
+                out.save(
+                    buf, format="JPEG",
+                    quality=int(os.getenv("WM_JPEG_QUALITY", "88")),
+                    optimize=True,
+                    progressive=True,
+                    subsampling=2
+                )
+            elif out_fmt == "PNG":
+                # PNGは透過があってもOK。なければRGB→RGBAへ
+                if out.mode != "RGBA":
+                    out = out.convert("RGBA")
+                out.save(buf, format="PNG", optimize=True)
+            else:
+                # 念のためのフォールバック（ほぼ通らない）
+                out = out.convert("RGB")
+                out.save(buf, format="JPEG", quality=88, optimize=True, progressive=True, subsampling=2)
+
+            buf.seek(0)
+            resp = send_file(buf, mimetype=mime, download_name=os.path.basename(abs_path))
+            resp.headers["Cache-Control"] = "public, max-age=86400"
+            return resp
+
     except Exception:
-        app.logger.exception("serve_image failed")
-        return send_file(path)
+        app.logger.exception("serve_image watermark compose failed; fallback to raw")
+        # 合成に失敗しても“画像は返す”
+        resp = send_file(abs_path, mimetype=mime)
+        resp.headers["Cache-Control"] = "public, max-age=86400"
+        return resp
+
 # ==== /画像配信 =================================================
 
 # 別名プレフィックス（環境変数で差し替え可）
@@ -2847,6 +2904,57 @@ def safe_url_for(endpoint: str, **values) -> str:
         return _force_https_abs(u)
 
 
+# ========== helper: 相対/HTTP を HTTPS の絶対URLに補正 ==========
+def _force_https_abs(u: str) -> str:
+    """
+    - 絶対URL(http/https)なら https に置換して返す
+    - 相対URLなら PUBLIC_BASE_URL/EXTERNAL_BASE_URL/BASE_URL または request.url_root を基に絶対化
+    - request コンテキストが無い場合でも安全に動作（LINEのpush生成など）
+    """
+    try:
+        if not u:
+            return u
+        from urllib.parse import urlparse, urlunparse
+        import os
+
+        p = urlparse(u)
+
+        # 既にスキームがある場合
+        if p.scheme in ("http", "https"):
+            scheme = "https"
+            # netloc が空のケースは稀だが念のため温存
+            return urlunparse((scheme, p.netloc, p.path, p.params, p.query, p.fragment))
+
+        # 相対URL → ベースURLを探す
+        base = (os.environ.get("PUBLIC_BASE_URL")
+                or os.environ.get("EXTERNAL_BASE_URL")
+                or os.environ.get("BASE_URL")
+                or "")
+        if not base:
+            # リクエスト中なら url_root を使う（失敗したら相対のまま返す）
+            try:
+                from flask import request
+                base = request.url_root  # 例: http://xxx/
+            except Exception:
+                return u
+
+        bp = urlparse(base)
+        netloc = bp.netloc
+        if not netloc:
+            return u  # ベースが不正
+
+        scheme = "https"
+        base_prefix = urlunparse((scheme, netloc, "", "", "", ""))  # https://host
+
+        if u.startswith("/"):
+            return base_prefix.rstrip("/") + u
+        else:
+            return base_prefix.rstrip("/") + "/" + u
+    except Exception:
+        return u
+
+
+# ========== 置換版 build_signed_image_url ==========
 def build_signed_image_url(
     filename: str,
     *,
@@ -2890,7 +2998,7 @@ def build_signed_image_url(
         kwargs = {"filename": filename, "_external": external, "_sign": True}
         if wm_q:
             kwargs["wm"] = wm_q
-        u = safe_url_for("serve_image", **kwargs)  # noqa: F821  (存在しない環境は except へ)
+        u = safe_url_for("serve_image", **kwargs)  # 存在しない環境は except へ
         return _force_https_abs(u)
     except Exception:
         pass
@@ -3172,6 +3280,176 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
     except Exception:
         app.logger.exception("image normalize & save failed")
         return None
+
+
+# ========= WM helpers: 透かしモード正規化・ユーザー／エントリ参照 =========
+def _norm_wm_mode(v) -> str | None:
+    """
+    入力を 'fullygoto' / 'gotocity' / None に正規化。
+    受け付ける同義語: 'fully'→fullygoto, 'city'→gotocity, '1'→デフォルトは gotocity
+    """
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in {"fullygoto", "gotocity"}:
+        return s
+    if s in {"fully"}:
+        return "fullygoto"
+    if s in {"city"}:
+        return "gotocity"
+    if s in {"1", "true", "on"}:
+        # 旧実装の「ON」を既定として city ロゴに合わせる（必要なら fullygoto に変更可）
+        return "gotocity"
+    if s in {"0", "off", "false", "none", ""}:
+        return None
+    return s  # 未知値はそのまま（将来拡張用）
+
+# --- per-user の透かしモードを簡易保存（JSON） ---
+_WM_PREFS_FILE = os.path.join(DATA_DIR, "user_prefs.json")
+
+def _load_user_prefs() -> dict:
+    try:
+        if os.path.exists(_WM_PREFS_FILE):
+            with open(_WM_PREFS_FILE, "r", encoding="utf-8") as rf:
+                return json.load(rf) or {}
+    except Exception:
+        app.logger.exception("load user_prefs failed")
+    return {}
+
+def _save_user_prefs(d: dict):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = _WM_PREFS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as wf:
+            json.dump(d, wf, ensure_ascii=False, indent=2)
+        os.replace(tmp, _WM_PREFS_FILE)
+    except Exception:
+        app.logger.exception("save user_prefs failed")
+
+def _get_user_wm(user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+    prefs = _load_user_prefs()
+    return _norm_wm_mode((prefs.get("wm_choices") or {}).get(user_id))
+
+def _set_user_wm(user_id: str | None, choice: str | None):
+    if not user_id:
+        return
+    prefs = _load_user_prefs()
+    prefs.setdefault("wm_choices", {})
+    prefs["wm_choices"][user_id] = _norm_wm_mode(choice)
+    _save_user_prefs(prefs)
+
+def parse_wm_command(text: str) -> str | None:
+    """
+    ユーザーがチャットで透かしを切り替えるコマンドを検出。
+    返り値: 'fullygoto'|'gotocity'|'none'|None
+    """
+    t = (text or "").strip().lower()
+    if "@fullygoto" in t or "fullygoto" in t:
+        return "fullygoto"
+    if "@goto city" in t or "@gotocity" in t or "gotocity" in t:
+        return "gotocity"
+    if "@wm off" in t or "@wm none" in t or "@wm: none" in t:
+        return "none"
+    return None
+
+def _wm_choice_from_entries(filename: str) -> str | None:
+    """
+    画像ファイル名→ entries.json 内の該当エントリを探し、wm_external_choice/ wm_on を見て既定を返す。
+    """
+    if not filename:
+        return None
+    name = filename.strip()
+    for e in load_entries():
+        img = (e.get("image_file") or e.get("image") or "").strip()
+        if img == name:
+            v = e.get("wm_external_choice")
+            v = _norm_wm_mode(v)
+            if v:
+                return v
+            # 後方互換（旧 ON/OFF）
+            if e.get("wm_on"):
+                return "gotocity"
+            return None
+    return None
+
+# ========= WM compose: 透かし画像の場所と合成ユーティリティ =========
+# デフォルトの透かし画像のパス（必要に応じて配置先を調整）
+_WM_DIR = os.path.join(BASE_DIR, "static", "wm")
+_WM_FILES = {
+    "fullygoto": os.path.join(_WM_DIR, "wm_fullygoto.png"),
+    "gotocity":  os.path.join(_WM_DIR, "wm_gotocity.png"),
+}
+# 合成時の基本パラメータ（お好みで調整可）
+_WM_OPACITY = 0.85      # 0.0〜1.0
+_WM_SCALE_W = 0.32      # 透かし幅を元画像幅の何倍に縮尺
+_WM_PAD_RATIO = 0.03    # 右下余白（元画像幅に対する比）
+
+def _load_wm_image(mode: str):
+    """
+    透かし画像(PNG, RGBA推奨)を読み込んで RGBA で返す。見つからなければ None。
+    """
+    try:
+        path = _WM_FILES.get(mode or "", "")
+        if not path or not os.path.isfile(path):
+            return None
+        from PIL import Image
+        wm = Image.open(path)
+        if wm.mode != "RGBA":
+            wm = wm.convert("RGBA")
+        return wm
+    except Exception:
+        app.logger.exception("load watermark image failed")
+        return None
+
+def _compose_watermark(base_im, mode: str):
+    """
+    base_im: Pillow Image (RGB/RGBA/L 不問)。返り値は RGB。
+    右下に半透明ロゴを重ねる。
+    """
+    from PIL import Image, ImageOps
+
+    if base_im is None or not mode:
+        return base_im
+
+    wm = _load_wm_image(mode)
+    if wm is None:
+        return base_im
+
+    # RGB 化（最終JPEG想定）
+    if base_im.mode not in ("RGB", "L"):
+        base = base_im.convert("RGB")
+    elif base_im.mode == "L":
+        base = base_im.convert("RGB")
+    else:
+        base = base_im
+
+    bw, bh = base.size
+    if bw < 10 or bh < 10:
+        return base
+
+    # スケール・位置
+    target_w = max(1, int(bw * _WM_SCALE_W))
+    scale = target_w / wm.width
+    target_h = max(1, int(wm.height * scale))
+    wm_resized = wm.resize((target_w, target_h), RESAMPLE_LANCZOS)
+
+    # 透明度
+    if _WM_OPACITY < 1.0:
+        alpha = wm_resized.split()[3]  # A
+        alpha = alpha.point(lambda a: int(a * _WM_OPACITY))
+        wm_resized.putalpha(alpha)
+
+    pad = int(bw * _WM_PAD_RATIO)
+    x = max(0, bw - wm_resized.width - pad)
+    y = max(0, bh - wm_resized.height - pad)
+
+    # 合成
+    base_rgba = base.convert("RGBA")
+    base_rgba.paste(wm_resized, (x, y), wm_resized)
+    return base_rgba.convert("RGB")
+
 
 def _get_image_meta(filename: str):
     """画像ファイルの URL / バイト数 / 幅高さ(px) / KB を返す（なければ None）"""
