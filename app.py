@@ -4785,6 +4785,21 @@ def build_refine_suggestions(question):
     # 返り値の meta に probe も載せる（後方互換）
     return msg, {"areas": areas, "tags": top_tags, "filters": filters, "probe": probe_lines}
 
+def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+    """
+    UI/旧データの 'fully' / 'city' / '' を正規化して
+    'none' / 'fullygoto' / 'gotocity' に統一する。
+    """
+    c = (choice or "").strip().lower()
+    if c in ("none", "fullygoto", "gotocity"):
+        return c
+    if c == "fully":
+        return "fullygoto"
+    if c == "city":
+        return "gotocity"
+    return "fullygoto" if wm_on_default else "none"
+
+
 # =========================
 #  管理画面: 観光データ登録・編集
 # =========================
@@ -4794,6 +4809,22 @@ def admin_entry():
     import os  # ローカルimportで安全に
     import re as _re
     from werkzeug.exceptions import RequestEntityTooLarge  # ★ 追加：except用に確実に定義
+
+    # --- 透かし選択の正規化ヘルパ（この関数内専用・既存に影響なし） ---
+    def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+        """
+        UI/旧データの 'fully' / 'city' / '' を正規化して
+        'none' / 'fullygoto' / 'gotocity' に統一する。
+        wm_on_default は未指定時の既定（True→fullygoto, False→none）
+        """
+        c = (choice or "").strip().lower()
+        if c in ("none", "fullygoto", "gotocity"):
+            return c
+        if c == "fully":
+            return "fullygoto"
+        if c == "city":
+            return "gotocity"
+        return "fullygoto" if wm_on_default else "none"
 
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
@@ -4859,7 +4890,7 @@ def admin_entry():
         if _re.search(r'[S南]', s, _re.I): hemi = 'S'
         if _re.search(r'[E東]', s, _re.I): hemi = 'E'
         if _re.search(r'[W西]', s, _re.I): hemi = 'W'
-        m = _re.search(r'(\d+(?:\.\d+)?)\s*[°度]\s*(\d+(?:\.\d+)?)?\s*[\'’′分]?\s*(\d+(?:\.\d+)?)?\s*["”″秒]?', s)
+        m = _re.search(r'(\d+(?:\.\d+)?)\\s*[°度]\\s*(\\d+(?:\\.\\d+)?)?\\s*[\\'’′分]?\\s*(\\d+(?:\\.\\d+)?)?\\s*[\"”″秒]?', s)
         if not m:
             return None, None
         deg = float(m.group(1))
@@ -4880,12 +4911,12 @@ def admin_entry():
         if not text:
             return (None, None)
         s = _zen2han(text).strip()
-        s = _re.sub(r'\s+', ' ', s)
+        s = _re.sub(r'\\s+', ' ', s)
 
         # 1) Google Maps URL: /@lat,lng または ?q= / ?query= / ?ll=
-        m = _re.search(r'/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)', s)
+        m = _re.search(r'/@(-?\\d+(?:\\.\\d+)?),\\s*(-?\\d+(?:\\.\\d+)?)', s)
         if not m:
-            m = _re.search(r'(?:[?&](?:q|query|ll)=)\s*(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)', s)
+            m = _re.search(r'(?:[?&](?:q|query|ll)=)\\s*(-?\\d+(?:\\.\\d+)?)[,\\s]+(-?\\d+(?:\\.\\d+)?)', s)
         if m:
             try:
                 return float(m.group(1)), float(m.group(2))
@@ -4893,7 +4924,7 @@ def admin_entry():
                 pass
 
         # 2) 純粋な「lat,lng」（カンマ/空白区切り）
-        m = _re.search(r'(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)', s)
+        m = _re.search(r'(-?\\d+(?:\\.\\d+)?)\\s*[, ]\\s*(-?\\d+(?:\\.\\d+)?)', s)
         if m:
             a, b = float(m.group(1)), float(m.group(2))
             # 万一順序が逆っぽい場合の救済（>90 は経度とみなす）
@@ -4903,7 +4934,7 @@ def admin_entry():
 
         # 3) DMS ブロック×2
         dms_blocks = _re.findall(
-            r'(\d+(?:\.\d+)?\s*[°度]\s*\d*(?:\.\d+)?\s*[\'’′分]?\s*\d*(?:\.\d+)?\s*["”″秒]?\s*[NSEW北南東西]?)',
+            r'(\\d+(?:\\.\\d+)?\\s*[°度]\\s*\\d*(?:\\.\\d+)?\\s*[\\'’′分]?\\s*\\d*(?:\\.\\d+)?\\s*[\"”″秒]?\\s*[NSEW北南東西]?)',
             s, flags=_re.I
         )
         if len(dms_blocks) >= 2:
@@ -4918,8 +4949,8 @@ def admin_entry():
                 return lat, lng
 
         # 4) 「緯度: xx / 経度: yy」
-        mlat = _re.search(r'緯度[:：]\s*(-?\d+(?:\.\d+)?)', s)
-        mlng = _re.search(r'経度[:：]\s*(-?\d+(?:\.\d+)?)', s)
+        mlat = _re.search(r'緯度[:：]\\s*(-?\\d+(?:\\.\\d+)?)', s)
+        mlng = _re.search(r'経度[:：]\\s*(-?\\d+(?:\\.\\d+)?)', s)
         if mlat and mlng:
             return float(mlat.group(1)), float(mlng.group(1))
 
@@ -5027,17 +5058,16 @@ def admin_entry():
                 prev_img = None
                 idx_edit = None
 
-
-        # ★ 透かしモードを canonical に正規化して保存
-        wm_choice = _wm_normalize(request.form.get("wm_external_choice"))
-
-        # 旧UIのチェックボックス 'wm_on' だけが来た場合の救済：
-        # （テンプレにラジオが無いときの既定値を 'city' にする／運用で 'fully' にしてもOK）
-        if wm_choice is None and ('wm_on' in request.form):
-            wm_choice = "city"
-
-        new_entry["wm_external_choice"] = wm_choice  # 'none' / 'fully' / 'city' / None
-        new_entry["wm_on"] = ('wm_on' in request.form)  # 後方互換のためブールも保持
+        # ★ 透かし：ラジオ優先、未送信なら旧UIチェックボックスをフォールバック
+        wm_raw = (request.form.get("wm_external_choice") or
+                  request.form.get("wm_external") or
+                  "").strip().lower()
+        if not wm_raw and ('wm_on' in request.form):
+            wm_raw = "city"   # 旧UIでONのみのときの既定
+        wm_choice = _normalize_wm_choice(
+            wm_raw,
+            wm_on_default=bool(prev_entry.get("wm_on", True)) if prev_entry else True
+        )
 
         if not areas:
             flash("エリアは1つ以上選択してください")
@@ -5066,7 +5096,8 @@ def admin_entry():
             "extras": extras,
             "source": source,           # ← 出典フィールド（任意）
             "source_url": source_url,   # ← 出典URL（任意）
-            "wm_external_choice": wm_choice,  # ★ 後方互換のためここで確定
+            "wm_external_choice": wm_choice,     # 正規化済み: none / fullygoto / gotocity
+            "wm_on": (wm_choice != "none"),      # 互換ブール（テンプレ側が参照）
         }
         new_entry = _norm_entry(new_entry)
 
@@ -5114,8 +5145,8 @@ def admin_entry():
         if lat is not None: new_entry["lat"] = lat
         if lng is not None: new_entry["lng"] = lng
 
-        # 透かし（旧UI互換のON/OFFは保持しておく：テンプレ側で使用中のため）
-        new_entry["wm_on"] = ('wm_on' in request.form)
+        # （※ 旧UI互換 'wm_on' の**再代入はしない**。上の wm_choice を真にする）
+        # new_entry["wm_on"] = ('wm_on' in request.form)  # ← 上書きしない
 
         # === 保存 ===
         if (idx_edit is not None) and (0 <= idx_edit < len(entries)):
