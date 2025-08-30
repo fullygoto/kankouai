@@ -1508,6 +1508,34 @@ app.jinja_env.globals["safe_url_for"] = safe_url_for
 # 明示的に署名URLを作りたいときはこれも使えます（任意）
 app.jinja_env.globals["signed_image_url"] = lambda fn, wm=False: build_signed_image_url(fn, wm=wm, external=False)
 
+@app.route("/admin/_sign_image", methods=["GET"])
+@login_required
+def admin_sign_image():
+    """
+    filename と wm を受け取り、その条件で署名済みの画像URLを返す。
+    wm: 'none' | 'fullygoto' | 'gotocity' （旧 'fully' / 'city' も受ける）
+    """
+    fn = (request.args.get("filename") or "").strip()
+    wm = (request.args.get("wm") or "").strip().lower()
+    if not fn:
+        return jsonify({"ok": False, "error": "filename required"}), 400
+
+    # 旧トークン互換
+    if wm in {"fully", "fullygoto"}:
+        wm = "fullygoto"
+    elif wm in {"city", "gotocity"}:
+        wm = "gotocity"
+    elif wm not in {"none", "fullygoto", "gotocity"}:
+        wm = "none"
+
+    try:
+        # 署名URL作成（safe_url_for -> build_signed_image_url を経由）
+        url = safe_url_for("serve_image", filename=fn, _external=True, _sign=True,
+                           **({ "wm": wm } if wm and wm != "none" else {}))
+        return jsonify({"ok": True, "url": url})
+    except Exception as e:
+        app.logger.exception("admin_sign_image failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # =========================
 #  環境変数 / モデル
@@ -1979,12 +2007,76 @@ def handle_message(event):
             # 旧実装：引数を受け取れない場合は従来通り
             ans, hit, img_url = _answer_from_entries_min(text)
 
+        # --- ⑥ DB回答（画像→テキストを1回の reply にまとめる） ---
+        # 直前で uid3 / wm_mode は取得済み
         msgs = []
+
+        # LINE 画像の original / preview を同じ透かしモードで作るヘルパ
+        def _line_img_pair_from_url(img_url_in: str, wm_mode_in: str | None):
+            """
+            戻り値: (original_url, preview_url)
+            仕様:
+            - エントリ側の URL に ?wm=... があれば **それを最優先**（ラジオ選択を尊重）
+            - 無ければ引数 wm_mode_in（'none'|'fullygoto'|'gotocity'）を採用
+            - mode=None/'none' → 透かし無し。'fullygoto'/'gotocity' → 指定透かし。
+            - 自サイト配信以外の画像URLはそのまま返す。
+            """
+            try:
+                if not img_url_in:
+                    return None, None
+
+                from urllib.parse import urlparse, unquote, parse_qs
+                import re as _re
+
+                pu = urlparse(img_url_in)
+                m = _re.search(r"/media/img/([^/?#]+)$", pu.path)
+                if not m:
+                    # 外部URL等は触らない
+                    return img_url_in, img_url_in
+
+                filename = unquote(m.group(1))
+
+                # 1) URL の wm を最優先
+                qs = parse_qs(pu.query or "")
+                wm_in_url = (qs.get("wm", [None])[0] or "").strip().lower()
+
+                mode = None
+                if wm_in_url in ("fullygoto", "fully"):
+                    mode = "fullygoto"
+                elif wm_in_url in ("gotocity", "city"):
+                    mode = "gotocity"
+                elif wm_in_url in ("none", "0", "false"):
+                    mode = None
+                elif wm_in_url in ("1", "true"):
+                    # 旧真偽値 → 既定先（必要なら "fullygoto" に変更）
+                    mode = "gotocity"
+
+                # 2) URLに無ければ呼び出し元モード
+                if mode is None:
+                    if wm_mode_in in ("fullygoto", "gotocity"):
+                        mode = wm_mode_in
+                    elif (wm_mode_in or "").lower() in ("none", "0", "false"):
+                        mode = None
+
+                # 3) 署名URLを生成（original / preview 同一モード）
+                if mode in ("fullygoto", "gotocity"):
+                    url = build_signed_image_url(filename, wm=mode, external=True)
+                    return url, url
+                else:
+                    url = build_signed_image_url(filename, wm=False, external=True)
+                    return url, url
+
+            except Exception:
+                # 失敗時は元URLをそのまま
+                return img_url_in, img_url_in
+
         if img_url:
+            orig_url, prev_url = _line_img_pair_from_url(img_url, wm_mode)
             msgs.append(ImageSendMessage(
-                original_content_url=img_url,
-                preview_image_url=img_url
+                original_content_url = orig_url or img_url,
+                preview_image_url    = prev_url  or img_url
             ))
+
         for p in _split_for_line(ans, LINE_SAFE_CHARS):
             msgs.append(TextSendMessage(text=p))
 
