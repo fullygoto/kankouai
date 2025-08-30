@@ -277,9 +277,54 @@
       filterCards(false);
     }
 
+    // ==== 透かしプレビュー再署名（編集フォーム用） ====
+    async function _signPreview(filename, wm){
+      if(!filename) return null;
+      try{
+        const qs = new URLSearchParams({ filename, wm });
+        const res = await fetch(`/admin/_sign_image?${qs.toString()}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        if(data && data.ok && data.url) return data.url;
+      }catch(e){ console.warn('sign error', e); }
+      return null;
+    }
+
+    function _bindWmRadios(section){
+      // section: 't' | 's'
+      const rootId = section==='t' ? 'form_tourism' : 'form_shop';
+      const blockId = section==='t' ? 'wm-block-t' : 'wm-block-s';
+      const imgId   = section==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s';
+
+      const root = document.getElementById(rootId);
+      const block = document.getElementById(blockId);
+      const img = document.getElementById(imgId);
+      if(!root || !block || !img) return;
+
+      const filename = block.dataset.filename || '';
+      const radios = root.querySelectorAll('input[name="wm_external_choice"]');
+      radios.forEach(r => {
+        r.addEventListener('change', async (ev)=>{
+          const choice = ev.target.value || 'none';
+          if(!filename) return;
+          const url = await _signPreview(filename, choice);
+          if(url) img.src = url;
+        });
+      });
+
+      // 初期表示も再署名（キャッシュずれ対策）
+      const init = root.querySelector('input[name="wm_external_choice"]:checked');
+      if(init && filename){
+        _signPreview(filename, init.value || 'none').then(url => { if(url) img.src = url; });
+      }
+    }
+
     window.onload = function(){
       onCategoryChange();
       filterCards();
+
+      // 観光/店舗のどちらが表示でも、両方バインドしておけばOK（存在チェックあり）
+      _bindWmRadios('t');
+      _bindWmRadios('s');
     };
     </script>
 </head>
@@ -379,11 +424,21 @@
             <div class="mb-3">
               <label for="image_file_t" class="form-label">画像アップロード</label>
               <input type="file" class="form-control" id="image_file_t" name="image_file" accept="image/*">
-              {% if entry_edit and (entry_edit.image_file or entry_edit.image) %}
-                <div class="mt-2">
+              {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+              {% if _imgname_t %}
+                <div class="mt-2" id="wm-block-t" data-filename="{{ _imgname_t }}">
                   <div>現在の画像:</div>
+                  {# 既定モードを正規化 #}
+                  {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+                  {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+                  {% set _wm_choice_t = (
+                    _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
+                    else ('fullygoto' if _wm_raw_t == 'fully'
+                          else ('gotocity' if _wm_raw_t == 'city' else ('fullygoto' if _wm_on_t else 'none')))
+                  ) %}
                   <img
-                    src="{{ signed_image_url(entry_edit.image_file or entry_edit.image, wm=False) }}"
+                    id="admin-image-preview-t"
+                    src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
                     alt="現在の画像"
                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
                     referrerpolicy="no-referrer"
@@ -508,11 +563,20 @@ https://instagram.com/xxx">
             <div class="mb-3">
               <label for="image_file_s" class="form-label">画像アップロード</label>
               <input type="file" class="form-control" id="image_file_s" name="image_file" accept="image/*">
-              {% if entry_edit and (entry_edit.image_file or entry_edit.image) %}
-                <div class="mt-2">
+              {% set _imgname_s = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+              {% if _imgname_s %}
+                <div class="mt-2" id="wm-block-s" data-filename="{{ _imgname_s }}">
                   <div>現在の画像:</div>
+                  {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+                  {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+                  {% set _wm_choice_s = (
+                    _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
+                    else ('fullygoto' if _wm_raw_s == 'fully'
+                          else ('gotocity' if _wm_raw_s == 'city' else ('fullygoto' if _wm_on_s else 'none')))
+                  ) %}
                   <img
-                    src="{{ signed_image_url(entry_edit.image_file or entry_edit.image, wm=False) }}"
+                    id="admin-image-preview-s"
+                    src="{{ safe_url_for('serve_image', filename=_imgname_s, _sign=True, wm=_wm_choice_s) }}"
                     alt="現在の画像"
                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
                     referrerpolicy="no-referrer"
@@ -679,7 +743,7 @@ https://instagram.com/xxx">
         <option value="title_desc">並び替え：タイトル↓</option>
         <option value="cat_asc">並び替え：カテゴリ↑</option>
         <option value="cat_desc">並び替え：カテゴリ↓</option>
-        <option value="dist_asc">並び替え：距離↑（現在地）</option> <!-- 追加 -->
+        <option value="dist_asc">並び替え：距離↑（現在地）</option>
       </select>
 
       <span class="badge">表示：<span id="f_count">0</span> / <span id="f_total">0</span></span>
