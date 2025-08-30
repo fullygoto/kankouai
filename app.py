@@ -6698,26 +6698,6 @@ def notices():
     return render_template("notices.html", notices=notices)
 
 
-# ---- 管理: ログイン/ログアウト（超簡易） ----
-@app.route("/login", methods=["GET","POST"])
-def login():
-    if request.method == "POST":
-        uid = request.form.get("user_id","").strip()
-        pw  = request.form.get("password","")
-        for u in load_users():
-            if u.get("user_id")==uid and check_password_hash(u.get("password_hash",""), pw):
-                session["user_id"] = uid
-                flash("ログインしました")
-                return redirect(url_for("admin_entry"))
-        flash("ユーザーIDまたはパスワードが違います")
-    return render_template_string("""
-    <h1>ログイン</h1>
-    <form method="post">
-      <div>ID <input name="user_id"></div>
-      <div>PW <input name="password" type="password"></div>
-      <button type="submit">ログイン</button>
-    </form>""")
-
 @app.route("/logout")
 def logout():
     session.pop("user_id", None)
