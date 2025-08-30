@@ -6697,13 +6697,6 @@ def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
 
-
-@app.route("/logout")
-def logout():
-    session.pop("user_id", None)
-    flash("ログアウトしました")
-    return redirect(url_for("login"))
-
 # ---- 管理: 登録/編集（HTML テンプレは admin_entry.html を想定） ----
 @app.route("/admin/entry", methods=["GET","POST"])
 @login_required
