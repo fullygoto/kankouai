@@ -398,11 +398,13 @@
               <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            {# ▼▼▼ 透かし（外部公開URL）選択：none / fully / city ▼▼▼ #}
+            {# ▼▼▼ 透かし（外部公開URL）選択：none / fullygoto / gotocity ▼▼▼ #}
+            {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+            {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
             {% set _wm_choice_t = (
-                entry_edit.wm_external_choice
-                if entry_edit and entry_edit.wm_external_choice
-                else ('fully' if (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) else 'none')
+              _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
+              else ('fullygoto' if _wm_raw_t == 'fully'
+                    else ('gotocity' if _wm_raw_t == 'city' else ('fullygoto' if _wm_on_t else 'none')))
             ) %}
             <div class="mt-2">
               <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
@@ -410,10 +412,10 @@
                 <input type="radio" name="wm_external_choice" value="none"  {% if _wm_choice_t=='none' %}checked{% endif %}> なし
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_external_choice" value="fully" {% if _wm_choice_t=='fully' %}checked{% endif %}> @Goto City（fully）
+                <input type="radio" name="wm_external_choice" value="fullygoto" {% if _wm_choice_t=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="radio" name="wm_external_choice" value="city"  {% if _wm_choice_t=='city' %}checked{% endif %}> @Goto City（city）
+                <input type="radio" name="wm_external_choice" value="gotocity"  {% if _wm_choice_t=='gotocity' %}checked{% endif %}> ＠Goto City
               </label>
             </div>
             {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
@@ -525,11 +527,13 @@ https://instagram.com/xxx">
               <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            {# ▼▼▼ 透かし（外部公開URL）選択：none / fully / city ▼▼▼ #}
+            {# ▼▼▼ 透かし（外部公開URL）選択：none / fullygoto / gotocity ▼▼▼ #}
+            {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+            {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
             {% set _wm_choice_s = (
-                entry_edit.wm_external_choice
-                if entry_edit and entry_edit.wm_external_choice
-                else ('fully' if (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) else 'none')
+              _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
+              else ('fullygoto' if _wm_raw_s == 'fully'
+                    else ('gotocity' if _wm_raw_s == 'city' else ('fullygoto' if _wm_on_s else 'none')))
             ) %}
             <div class="mt-2">
               <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
@@ -537,10 +541,10 @@ https://instagram.com/xxx">
                 <input type="radio" name="wm_external_choice" value="none"  {% if _wm_choice_s=='none' %}checked{% endif %}> なし
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_external_choice" value="fully" {% if _wm_choice_s=='fully' %}checked{% endif %}> @Goto City（fully）
+                <input type="radio" name="wm_external_choice" value="fullygoto" {% if _wm_choice_s=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
               </label>
               <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="radio" name="wm_external_choice" value="city"  {% if _wm_choice_s=='city' %}checked{% endif %}> @Goto City（city）
+                <input type="radio" name="wm_external_choice" value="gotocity"  {% if _wm_choice_s=='gotocity' %}checked{% endif %}> ＠Goto City
               </label>
             </div>
             {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
@@ -732,7 +736,12 @@ https://instagram.com/xxx">
 
           {% set _img = e.image_file or e.image %}
           {% set _wm = (e.wm_on if e.wm_on is defined else True) %}
-          {% set _wm_choice_view = (e.wm_external_choice if e.wm_external_choice else ('fully' if _wm else 'none')) %}
+          {% set _wm_raw_view = (e.wm_external_choice if e.wm_external_choice else '') %}
+          {% set _wm_choice_view = (
+            _wm_raw_view if _wm_raw_view in ['none','fullygoto','gotocity']
+            else ('fullygoto' if _wm_raw_view == 'fully'
+                  else ('gotocity' if _wm_raw_view == 'city' else ('fullygoto' if _wm else 'none')))
+          ) %}
           <div style="display:flex; gap:12px; align-items:flex-start;">
             {% if _img %}
               <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=_wm_choice_view) }}"
