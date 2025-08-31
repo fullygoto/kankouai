@@ -76,6 +76,88 @@
         return true;
     }
 
+    // ===== 画像メタ（サイズ & 容量表示） =====
+    function _formatBytes(bytes){
+      if(!isFinite(bytes) || bytes <= 0) return '';
+      const units = ['B','KB','MB','GB','TB'];
+      let i = 0, n = bytes;
+      while(n >= 1024 && i < units.length - 1){ n /= 1024; i++; }
+      return (n >= 100 ? Math.round(n) : (n >= 10 ? n.toFixed(1) : n.toFixed(2))) + ' ' + units[i];
+    }
+
+    async function _fetchContentLength(url){
+      try{
+        const res = await fetch(url, {method:'HEAD', credentials:'same-origin'});
+        const len = res.headers.get('Content-Length') || res.headers.get('content-length');
+        if(len) return parseInt(len, 10);
+      }catch(_e){}
+      return null;
+    }
+
+    function _ensureMetaHost(img){
+      // 画像直後の .imgmeta を見つけるか作成
+      let host = img.nextElementSibling;
+      if(!(host && host.classList.contains('imgmeta'))){
+        host = document.createElement('div');
+        host.className = 'imgmeta';
+        img.parentNode.insertBefore(host, img.nextSibling);
+      }
+      return host;
+    }
+
+    async function annotateImageMeta(img){
+      if(!img) return;
+      const host = _ensureMetaHost(img);
+      host.textContent = '画像情報を取得中…';
+
+      // フォームプレビューは full を直接表示している想定。カードは data-fullsrc を使う。
+      const fullUrl = img.getAttribute('data-fullsrc') || img.currentSrc || img.src;
+
+      // 1) 容量（HEAD）
+      const contentLength = await _fetchContentLength(fullUrl);
+      const sizeText = contentLength ? _formatBytes(contentLength) : '';
+
+      // 2) ピクセルサイズ（naturalWidth/Height）: 表示がサムネの場合はオフスクリーンで full を読む
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if((!w || !h) || img.getAttribute('data-use-full') === '1'){
+        try{
+          await new Promise((resolve, reject)=>{
+            const probe = new Image();
+            probe.decoding = 'async';
+            probe.referrerPolicy = 'no-referrer';
+            probe.onload = ()=>{ w = probe.naturalWidth; h = probe.naturalHeight; resolve(); };
+            probe.onerror = reject;
+            probe.src = fullUrl + (fullUrl.includes('?') ? '&' : '?') + '_ts=' + Date.now();
+          });
+        }catch(_e){}
+      }
+      const dimsText = (w && h) ? (w + '×' + h + ' px') : '';
+
+      // 3) 表示
+      let out = [dimsText, sizeText].filter(Boolean).join(' ・ ');
+      host.textContent = out || '画像情報なし';
+    }
+
+    function annotateAllImages(){
+      // フォームのプレビュー（admin-image-preview-*）
+      document.querySelectorAll('#admin-image-preview-t, #admin-image-preview-s').forEach(img=>{
+        // プレビューは原寸URLを表示しているので data-fullsrc は不要だが、明示しておく
+        if(!img.getAttribute('data-fullsrc')) img.setAttribute('data-fullsrc', img.currentSrc || img.src);
+        annotateImageMeta(img);
+      });
+
+      // 一覧カードのサムネ（原寸URLは a[href] にあるので img に data-fullsrc を付与して読み取る）
+      document.querySelectorAll('.entry-card a[target="_blank"] > img.thumb, .entry-card a[target="_blank"] > img').forEach(img=>{
+        const anchor = img.parentElement && img.parentElement.tagName === 'A' ? img.parentElement : null;
+        if(anchor){
+          img.classList.add('thumb');
+          img.setAttribute('data-fullsrc', anchor.getAttribute('href') || '');
+          img.setAttribute('data-use-full', '1'); // naturalWidth/Height は full で取得
+          annotateImageMeta(img);
+        }
+      });
+    }
+
     // ====== フィルタ & ソート & ページネーション ======
     let PAGING = {page:1, size:20, totalFiltered:0, totalAll:0};
     let GEO = {active:false, lat:null, lng:null, radiusKm:3};
@@ -215,6 +297,14 @@
       if(resetPage) PAGING.page = 1;
       applyPagination(filtered);
       updateDistanceBadges();
+
+      // ページ更新後に見えているカードのサムネを再注釈（非表示カードは不要）
+      document.querySelectorAll('.entry-card').forEach(card=>{
+        if(card.style.display !== 'none'){
+          const img = card.querySelector('a[target="_blank"] > img.thumb, a[target="_blank"] > img');
+          if(img) annotateImageMeta(img);
+        }
+      });
     }
 
     function applyPagination(filtered){
@@ -306,7 +396,13 @@
             master.value = choice;            // hidden に同期
             if(filename && img){              // プレビューも更新
               const url = await _signPreview(filename, choice);
-              if(url) img.src = url;
+              if(url){
+                img.src = url;
+                img.setAttribute('data-fullsrc', url);
+                // 画像が切り替わったら再注釈
+                if(img.complete) annotateImageMeta(img);
+                else img.onload = ()=> annotateImageMeta(img);
+              }
             }
           }
         });
@@ -317,7 +413,19 @@
       if(init){
         master.value = init.value || master.value;
         if(filename && img){
-          _signPreview(filename, init.value || 'none').then(url => { if(url) img.src = url; });
+          _signPreview(filename, init.value || 'none').then(url => {
+            if(url){
+              img.src = url;
+              img.setAttribute('data-fullsrc', url);
+              if(img.complete) annotateImageMeta(img);
+              else img.onload = ()=> annotateImageMeta(img);
+            }
+          });
+        }else if(img){
+          // 念のため
+          img.setAttribute('data-fullsrc', img.currentSrc || img.src);
+          if(img.complete) annotateImageMeta(img);
+          else img.onload = ()=> annotateImageMeta(img);
         }
       }
     }
@@ -348,6 +456,7 @@
       _bindWmRadios('t');
       _bindWmRadios('s');
       _syncWmFromVisible();
+      annotateAllImages(); // 画像メタの初期表示
     };
     </script>
 </head>
@@ -473,6 +582,7 @@
                   ) %}
                   <img
                     id="admin-image-preview-t"
+                    class="thumb"
                     src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
                     alt="現在の画像"
                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
@@ -611,6 +721,7 @@ https://instagram.com/xxx">
                   ) %}
                   <img
                     id="admin-image-preview-s"
+                    class="thumb"
                     src="{{ safe_url_for('serve_image', filename=_imgname_s, _sign=True, wm=_wm_choice_s) }}"
                     alt="現在の画像"
                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
@@ -660,7 +771,7 @@ https://instagram.com/xxx">
             <label>営業時間</label><br>
             <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
 
-            <label>駐車場</label>
+            <label>駐車場：</label>
             <select name="parking">
                 <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
                 <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
@@ -846,6 +957,7 @@ https://instagram.com/xxx">
               <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=_wm_choice_view) }}"
                 target="_blank" rel="noopener noreferrer" style="flex:0 0 auto;">
                 <img
+                  class="thumb"
                   src="{{ safe_url_for('serve_image', filename=_img, wm=1) }}"
                   alt="{{ e.title }} の画像"
                   style="width:120px; height:90px; object-fit:cover; border-radius:6px;
