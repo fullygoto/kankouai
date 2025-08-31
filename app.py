@@ -71,6 +71,9 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+from watermark_ext import init_watermark_ext
+init_watermark_ext(app)
+
 # 10MB上限（Flaskがリクエストボディで制御）
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB
 
@@ -7836,85 +7839,6 @@ def admin_watermark():
         q=q      # ← 検索語初期値（テンプレの <input value="{{ q|e }}"> に反映可能）
     )
 
-def _media_root():
-    # 既存設定から推測して決定（どれも無ければ ./media）
-    return (
-        getattr(current_app, "MEDIA_DIR", None)
-        or current_app.config.get("MEDIA_DIR")
-        or current_app.config.get("UPLOAD_FOLDER")
-        or os.path.join(current_app.root_path, "media")
-    )
-
-def _safe_join_media(*parts):
-    root = os.path.abspath(_media_root())
-    path = os.path.abspath(os.path.join(root, *parts))
-    if not path.startswith(root + os.sep) and path != root:
-        abort(400)
-    return path
-
-def _list_top_folders():
-    root = _media_root()
-    if not os.path.isdir(root):
-        return []
-    items = []
-    for name in sorted(os.listdir(root)):
-        full = os.path.join(root, name)
-        if os.path.isdir(full):
-            # 中の画像数（軽く数える）
-            cnt = 0
-            for fn in os.listdir(full):
-                if os.path.splitext(fn.lower())[1] in {".jpg",".jpeg",".png",".webp"}:
-                    cnt += 1
-            items.append({"name": name, "count": cnt})
-    return items
-
-def _list_images_in_folder(folder):
-    base = _safe_join_media(folder)
-    if not os.path.isdir(base):
-        return []
-    rows = []
-    for fn in os.listdir(base):
-        ext = os.path.splitext(fn.lower())[1]
-        if ext not in {".jpg",".jpeg",".png",".webp"}:  # 必要なら拡張
-            continue
-        full = os.path.join(base, fn)
-        try:
-            mtime = os.path.getmtime(full)
-        except Exception:
-            mtime = 0
-        rows.append({
-            "rel": f"{folder}/{fn}",   # url_for('admin_media_img', filename=rel) で参照
-            "name": fn,
-            "mtime": mtime,
-        })
-    # 新しい順
-    rows.sort(key=lambda r: r["mtime"], reverse=True)
-    return rows
-
-@app.get("/admin/media/picker")
-@admin_required
-def admin_media_picker():
-    return_to = request.args.get("return_to") or url_for("admin_entry")
-    folder = request.args.get("folder", "").strip()
-    folders = _list_top_folders()
-    files = _list_images_in_folder(folder) if folder else []
-    return render_template(
-        "admin_media_picker.html",
-        folders=folders,
-        folder=folder,
-        files=files,
-        return_to=return_to,
-    )
-# --- 追記ここまで ---
-
-@app.get("/admin/watermark/one")
-@admin_required
-def admin_watermark_one():
-    src = request.args.get("src", "")
-    if not src:
-        abort(404)
-    # そのままテンプレへ渡す（Jinjaで3派生名を作って表示＆操作）
-    return render_template("admin_watermark_one.html", src=src)
 
 @app.route("/_debug/where")
 def _debug_where():
