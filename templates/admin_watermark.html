@@ -5,9 +5,7 @@
   <title>透かし一括生成</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    :root{
-      --bg:#f6faf9; --card:#fff; --muted:#567; --line:#e7eef5; --brand:#2a8ed8;
-    }
+    :root{ --bg:#f6faf9; --card:#fff; --muted:#567; --line:#e7eef5; --brand:#2a8ed8; }
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
     .container{background:var(--card);max-width:1100px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
     h1{margin:0 0 14px}
@@ -16,6 +14,7 @@
     .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer;text-decoration:none}
     .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
     .btn.small{padding:6px 10px;font-size:.92em}
+    .btn.danger{background:#fff;color:#c33;border:1px solid #e8bcbc}
     .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:12px}
     .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
     .name{display:block;margin-top:6px;font-size:.92em;color:#345;word-break:break-all}
@@ -23,7 +22,6 @@
     label.sel{display:flex;gap:8px;align-items:center}
     .small{font-size:.9em;color:#567;margin-top:4px}
     hr{border:1px solid var(--line);margin:18px 0}
-
     fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
     legend{padding:0 6px;color:#234}
     .radios{display:flex;flex-wrap:wrap;gap:10px}
@@ -33,9 +31,8 @@
     .input{width:100%;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
     .counts{font-size:.9em;color:var(--muted)}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-
-    /* 右上の戻るボタン用 */
     .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .row.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
   </style>
 </head>
 <body>
@@ -46,7 +43,6 @@
     </div>
 
     <form method="post" enctype="multipart/form-data">
-      <!-- 透かし種別の選択 -->
       {% set wm_current = (wm or 'all') if wm is defined else 'all' %}
       <fieldset class="row">
         <legend>出力する透かし</legend>
@@ -61,7 +57,8 @@
 
       <div class="row">
         <label>新規アップロード（複数可）：</label><br>
-        <input type="file" name="files" accept="image/*" multiple>
+        <input type="file" name="files" accept="image/jpeg,image/png,image/webp" multiple>
+        <div class="small muted">JPEG / PNG / WebP（最大10MB）。アップロード時に自動リサイズされます。</div>
       </div>
 
       <div class="row">
@@ -80,7 +77,6 @@
 
       <h2 style="margin:0 0 8px">既存ファイルから選ぶ</h2>
 
-      <!-- 検索＆一括操作ツールバー -->
       <div class="row tools">
         <div class="grow">
           <input id="q" class="input" type="search" name="q" value="{{ q|e }}" placeholder="ファイル名で検索（例: beach, 2024_, DSC_ など）" autocomplete="off">
@@ -90,7 +86,6 @@
         <span class="counts"><span id="shownCount">0</span> / <span id="totalCount">0</span> 表示・<span id="selectedCount">0</span> 件選択中</span>
       </div>
 
-      <!-- 既存ファイルグリッド -->
       <div id="grid" class="grid" data-total="{{ existing|length if existing else 0 }}">
         {% if existing and existing|length %}
           {% for fn in existing %}
@@ -101,6 +96,13 @@
               </label>
               <div class="small muted">プレビュー</div>
               <img src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
+              <div class="row actions">
+                <a class="btn small" href="{{ url_for('admin_watermark_one', src=fn) }}">編集</a>
+                <form method="post" action="{{ url_for('admin_media_delete') }}" onsubmit="return confirm('本当に削除しますか？');" style="display:inline">
+                  <input type="hidden" name="filename" value="{{ fn }}">
+                  <button type="submit" class="btn small danger">削除</button>
+                </form>
+              </div>
             </div>
           {% endfor %}
         {% else %}
@@ -133,6 +135,14 @@
               <div class="small muted" style="margin-top:10px">透かし：＠fullyGOTO（__fullygoto）</div>
               <a href="{{ r.url_fully }}" target="_blank" rel="noopener"><img src="{{ r.url_fully }}" loading="lazy" alt="fully"></a>
             {% endif %}
+
+            <div class="row actions">
+              <a class="btn small" href="{{ url_for('admin_watermark_one', src=r.src) }}">編集</a>
+              <form method="post" action="{{ url_for('admin_media_delete') }}" onsubmit="return confirm('本当に削除しますか？');" style="display:inline">
+                <input type="hidden" name="filename" value="{{ r.src }}">
+                <button type="submit" class="btn small danger">削除</button>
+              </form>
+            </div>
           </div>
         {% endfor %}
       </div>

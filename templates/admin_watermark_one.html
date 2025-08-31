@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>透かし編集（1枚）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{--bg:#f6faf9;--card:#fff;--line:#e7eef5;--brand:#2a8ed8;--muted:#567}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
+  .container{background:var(--card);max-width:900px;margin:0 auto;padding:18px 20px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .row{margin:10px 0}
+  .muted{color:var(--muted);font-size:.95em}
+  .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer;text-decoration:none}
+  .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-top:12px}
+  .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
+  .name{display:block;margin:6px 0;font-size:.9em;color:#345;word-break:break-all}
+  img{width:100%;height:200px;object-fit:cover;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+  .radios{display:flex;gap:10px;flex-wrap:wrap}
+  .radios label{display:flex;gap:6px;align-items:center;background:#f3f8fc;border:1px solid #dbe8f3;border-radius:10px;padding:6px 10px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="topbar">
+    <h1>透かし編集（1枚）</h1>
+    <div>
+      <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一括生成に戻る</a>
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+    </div>
+  </div>
+
+  {% set src = (request.args.get('src') if request is defined else (src if src is defined else '')) %}
+  {% if not src %}
+    <div class="muted">画像が指定されていません。</div>
+  {% else %}
+    <div class="card">
+      <div class="muted">元画像</div>
+      <img src="{{ url_for('admin_media_img', filename=src) }}" alt="{{ src }}" loading="lazy">
+      <div class="name">{{ src }}</div>
+      <form method="post" action="{{ url_for('admin_watermark_one') }}">
+        <input type="hidden" name="src" value="{{ src }}">
+        <div class="row">
+          <div class="radios">
+            <label><input type="radio" name="wm" value="none"  checked> なし（__none）</label>
+            <label><input type="radio" name="wm" value="fully"> @fullyGOTO（__fullygoto）</label>
+            <label><input type="radio" name="wm" value="goto">  @Goto City（__goto）</label>
+          </div>
+          <div class="muted">※ 選んだ透かし版を再生成します。</div>
+        </div>
+        <div class="row">
+          <button type="submit" class="btn">この透かしで再生成</button>
+        </div>
+      </form>
+    </div>
+  {% endif %}
+</div>
+</body>
+</html>
