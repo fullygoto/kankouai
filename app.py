@@ -7729,64 +7729,103 @@ def _list_source_images():
 @app.route("/admin/watermark", methods=["GET", "POST"])
 @login_required
 def admin_watermark():
-    # 権限は admin / shop のどちらでも使えるように
-    if session.get("role") not in {"admin","shop"}:
+    # 権限: admin / shop のどちらでも利用可
+    if session.get("role") not in {"admin", "shop"}:
         abort(403)
 
+    # --- 1) ラジオ値・検索語を関数冒頭で取得（GET/POST共通） ---
+    wm = (request.values.get("wm") or "all").strip()
+    if wm not in {"all", "none", "goto", "fully"}:
+        wm = "all"
+    make_none  = (wm in ("all", "none"))
+    make_goto  = (wm in ("all", "goto"))
+    make_fully = (wm in ("all", "fully"))
+
+    q = (request.values.get("q") or "").strip().lower()
+
+    # --- 2) 既存ソース画像の一覧を取得してから検索で絞り込み ---
+    existing = _list_source_images()  # 例: 透かし未適用の元画像ファイル名リスト
+    if q:
+        existing = [fn for fn in existing if q in fn.lower()]
+
     results = []
-    errors = []
+    errors  = []
 
     if request.method == "POST":
         force = (request.form.get("force") == "1")
-        # ① 既存ファイルから作る
-        sel = request.form.getlist("selected_existing")
-        for name in sel:
-            path = os.path.join(IMAGES_DIR, os.path.basename(name))
-            try:
-                out = _wm_variants_for_path(path, force=force)
-                results.append({"src": name, "out": out})
-            except Exception as e:
-                errors.append(f"{name}: {e}")
 
-        # ② 新規アップロードして作る（複数）
-        ups = request.files.getlist("files")
-        for f in ups:
+        # (a) 既存ファイルの選択分
+        selected = request.form.getlist("selected_existing")
+
+        # (b) 新規アップロード分を保存
+        uploads = request.files.getlist("files") or []
+
+        # 生成対象の (表示名, 絶対パス) を集約
+        targets = []
+        for name in selected:
+            name = os.path.basename(name)
+            targets.append((name, os.path.join(IMAGES_DIR, name)))
+
+        for f in uploads:
             if not f or not f.filename:
                 continue
-            # 既存のアップロード関数があるならそれで保存
             try:
                 saved = _save_jpeg_1080_350kb(f, previous=None, delete=False)
                 if not saved:
                     errors.append(f"{f.filename}: 保存に失敗")
                     continue
-                path = os.path.join(IMAGES_DIR, saved)
-                out = _wm_variants_for_path(path, force=force)
-                results.append({"src": saved, "out": out})
+                targets.append((saved, os.path.join(IMAGES_DIR, saved)))
             except Exception as e:
                 errors.append(f"{f.filename}: {e}")
+
+        # 選択種別のリスト（none/goto/fully）
+        kinds = []
+        if make_none:  kinds.append("none")
+        if make_goto:  kinds.append("goto")
+        if make_fully: kinds.append("fully")
+
+        # 互換ラッパー: 選択生成対応関数があればそちらを使う
+        def _generate_variants(path: str, *, force: bool, kinds: list[str]):
+            fn = globals().get("_wm_variants_for_path_selected")
+            if callable(fn):
+                try:
+                    return fn(path, force=force, kinds=kinds)  # 期待: {"none":fn, "goto":fn, "fully":fn} のうち選択分のみ
+                except TypeError:
+                    # 引数不一致などは従来関数にフォールバック
+                    pass
+            # 従来: 常に3種返す想定（{"none":..., "goto":..., "fully":...}）
+            return _wm_variants_for_path(path, force=force)
+
+        # 生成＆URL作成（選択された種類だけ r に載せる）
+        for display_name, abs_path in targets:
+            try:
+                out = _generate_variants(abs_path, force=force, kinds=kinds)
+                r = {"src": display_name, "url_src": url_for("admin_media_img", filename=display_name)}
+
+                if make_none and out.get("none"):
+                    r["url_none"] = url_for("admin_media_img", filename=out["none"])
+                if make_goto and out.get("goto"):
+                    r["url_goto"] = url_for("admin_media_img", filename=out["goto"])
+                if make_fully and out.get("fully"):
+                    r["url_fully"] = url_for("admin_media_img", filename=out["fully"])
+
+                results.append(r)
+            except Exception as e:
+                errors.append(f"{display_name}: {e}")
 
         flash(f"{len(results)} 件を処理しました" + ("（上書き）" if force else ""))
         if errors:
             flash("一部エラー: " + " / ".join(errors))
 
-    existing = _list_source_images()
-    # サムネイルURLは serve_image を利用（wm=none で二重透かし回避）
-    def img_url(fn):
-        return url_for("admin_media_img", filename=fn, _external=False)
-
-    # 結果のURL化
-    for r in results:
-        o = r["out"]
-        r["url_none"]  = img_url(o["none"])
-        r["url_goto"]  = img_url(o["goto"])
-        r["url_fully"] = img_url(o["fully"])
-        r["url_src"]   = img_url(r["src"])
-
-    return render_template("admin_watermark.html",
-                           existing=existing,
-                           results=results,
-                           role=session.get("role",""))
-# === / 透かし一括生成ツール ====================================
+    # --- 3) テンプレへ現在の選択状態も渡す（ラジオ初期化・検索語保持用） ---
+    return render_template(
+        "admin_watermark.html",
+        existing=existing,
+        results=results,
+        role=session.get("role", ""),
+        wm=wm,   # ← ラジオ初期値
+        q=q      # ← 検索語初期値（テンプレの <input value="{{ q|e }}"> に反映可能）
+    )
 
 
 @app.route("/_debug/where")
