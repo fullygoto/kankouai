@@ -5362,6 +5362,7 @@ def build_refine_suggestions(question):
 def _image_meta(img_name: str | None):
     """
     画像ファイルの存在/サイズ/解像度とURLを返す（どこからでも利用可）。
+    ※ 後方互換の別名キー(size_kb/size_bytes)と、人間向けラベル(label)を追加。
     """
     if not img_name:
         return None
@@ -5374,14 +5375,16 @@ def _image_meta(img_name: str | None):
 
         path = os.path.join(IMAGES_DIR, img_name)
         if not os.path.isfile(path):
+            # 存在しない場合も、UIが扱いやすい形で返す
             return {
                 "name": img_name, "exists": False, "url": url,
-                "bytes": None, "kb": None, "width": None, "height": None
+                "bytes": None, "kb": None, "width": None, "height": None,
+                # 互換・表示向け
+                "size_bytes": None, "size_kb": None, "kb_str": None, "label": None
             }
 
         size_b = os.path.getsize(path)
-        kb = (size_b + 1023) // 1024  # 切り上げKB
-
+        kb = max(1, (size_b + 1023) // 1024)  # 切り上げKB（最低1KB）
         w = h = None
         try:
             from PIL import Image
@@ -5390,15 +5393,26 @@ def _image_meta(img_name: str | None):
         except Exception:
             pass
 
+        # 人間向けの表示ラベル（例: "243 KB / 1920×1080px"）
+        kb_str = f"{kb:,}"
+        label = f"{kb_str} KB"
+        if w and h:
+            label += f" / {w}×{h}px"
+
         return {
             "name": img_name, "exists": True, "url": url,
-            "bytes": size_b, "kb": kb, "width": w, "height": h
+            "bytes": size_b, "kb": kb, "width": w, "height": h,
+            # ★後方互換の別名
+            "size_bytes": size_b, "size_kb": kb,
+            # ★表示用
+            "kb_str": kb_str, "label": label,
         }
     except Exception:
         # 何かあっても呼び出し側を壊さない
         return {
             "name": img_name or "", "exists": False, "url": "",
-            "bytes": None, "kb": None, "width": None, "height": None
+            "bytes": None, "kb": None, "width": None, "height": None,
+            "size_bytes": None, "size_kb": None, "kb_str": None, "label": None
         }
 
 # =========================
