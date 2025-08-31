@@ -7603,6 +7603,64 @@ def _wm_prep_image(path: str, max_size: int | None = 1080) -> Image.Image:
             im = im.resize((int(w/sc), int(h/sc)), Image.LANCZOS)
     return im
 
+
+# --- 透かしテキストを右下に描画 ---
+def _wm_draw(im, text, scale=0.05, opacity=180, margin_ratio=0.02):
+    from PIL import Image, ImageDraw, ImageFont
+    if not text:
+        return im
+
+    base = im.convert("RGBA")
+    W, H = base.size
+
+    size = max(18, int(W * float(scale)))
+    margin = max(6, int(W * float(margin_ratio)))
+    stroke_w = max(1, size // 12)
+
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except Exception:
+        font = ImageFont.load_default()
+
+    draw = ImageDraw.Draw(base)
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_w)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        tw, th = draw.textsize(text, font=font)
+
+    x = max(0, W - tw - margin * 2)
+    y = max(0, H - th - margin * 2)
+
+    # 半透明の下地
+    bg = Image.new("RGBA", (tw + margin * 2, th + margin * 2), (0, 0, 0, int(opacity * 0.45)))
+    base.alpha_composite(bg, (x, y))
+
+    # 本体文字（白＋黒縁）
+    try:
+        draw.text(
+            (x + margin, y + margin),
+            text,
+            fill=(255, 255, 255, int(opacity)),
+            font=font,
+            stroke_width=stroke_w,
+            stroke_fill=(0, 0, 0, min(255, int(opacity) + 50)),
+        )
+    except TypeError:
+        draw.text((x + margin, y + margin), text, fill=(255, 255, 255, int(opacity)), font=font)
+
+    return base.convert("RGB")
+
+
+# --- JPEG 保存ヘルパー（品質指定・最適化） ---
+def _wm_save_jpeg(im, out_path, quality=85):
+    from pathlib import Path
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    im = im.convert("RGB")
+    im.save(out_path, format="JPEG", quality=int(quality), optimize=True, subsampling=0)
+
+
+
 def _wm_save(im: Image.Image, dest: str, quality=85):
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     ext = os.path.splitext(dest)[1].lower()
@@ -7628,22 +7686,28 @@ def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, m
     """
     if not os.path.isfile(src_path):
         raise FileNotFoundError(src_path)
+
+    # 事前にEXIF回転補正＋リサイズ
     im = _wm_prep_image(src_path, max_size=1080)
-    stem, ext = os.path.splitext(os.path.basename(src_path))
-    out_none = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_NONE}{ext.lower()}")
-    out_goto = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_GOTO}{ext.lower()}")
-    out_full = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_FULLY}{ext.lower()}")
+
+    stem, _ext = os.path.splitext(os.path.basename(src_path))
+    out_ext = ".jpg"  # ここを固定しないと PNG 等で quality 指定が例外になる
+    out_none = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_NONE}{out_ext}")
+    out_goto = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_GOTO}{out_ext}")
+    out_full = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_FULLY}{out_ext}")
 
     if force or not os.path.exists(out_none):
-        _wm_save(im, out_none, quality=quality)
+        _wm_save_jpeg(im, out_none, quality=quality)
     if force or not os.path.exists(out_goto):
-        _wm_save(_wm_draw(im, WM_TEXT_GOTO, scale=scale, opacity=opacity, margin_ratio=margin), out_goto, quality=quality)
+        _wm_save_jpeg(_wm_draw(im, WM_TEXT_GOTO,  scale=scale, opacity=opacity, margin_ratio=margin), out_goto, quality=quality)
     if force or not os.path.exists(out_full):
-        _wm_save(_wm_draw(im, WM_TEXT_FULLY, scale=scale, opacity=opacity, margin_ratio=margin), out_full, quality=quality)
+        _wm_save_jpeg(_wm_draw(im, WM_TEXT_FULLY, scale=scale, opacity=opacity, margin_ratio=margin), out_full, quality=quality)
 
-    return {"none": os.path.basename(out_none),
-            "goto": os.path.basename(out_goto),
-            "fully": os.path.basename(out_full)}
+    return {
+        "none":  os.path.basename(out_none),
+        "goto":  os.path.basename(out_goto),
+        "fully": os.path.basename(out_full),
+    }
 
 def _list_source_images():
     """IMAGES_DIR から『元画像っぽいもの（__none/__goto/__fullygotoが付いてない）』だけ列挙"""
@@ -7707,11 +7771,8 @@ def admin_watermark():
 
     existing = _list_source_images()
     # サムネイルURLは serve_image を利用（wm=none で二重透かし回避）
-    def img_url(fn): 
-        try:
-            return safe_url_for("serve_image", filename=fn, wm="none", _external=True)
-        except Exception:
-            return url_for("serve_image", filename=fn, wm="none", _external=True)
+    def img_url(fn):
+        return url_for("admin_media_img", filename=fn, _external=False)
 
     # 結果のURL化
     for r in results:
