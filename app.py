@@ -1346,39 +1346,96 @@ def _split_lines_commas(val: str) -> List[str]:
     parts = re.split(r'[\n,]+', str(val))
     return [p.strip() for p in parts if p and p.strip()]
 
-# === これを1つだけ残す（重複は削除） ===
-# 既存をこの定義で置き換え
-# これで既存の max_len=... 呼び出しも通ります
-def _split_for_line(text: str, limit: int = None, max_len: int = None, **_ignored):
+# 置き換え版（1本に統一・limit省略OK・絵文字安全）
+def _split_for_line(text: str,
+                    limit: int | None = None,
+                    max_len: int | None = None,
+                    **_ignored) -> List[str]:
     """
-    LINEの1通上限を超える長文を安全に分割する。
-    - 改行優先で詰め、収まらない行はハードスプリット
-    - limit 未指定時は LINE_SAFE_CHARS を採用
-    - max_len は互換用エイリアス（limit と同義）
+    LINEの1通上限を超える長文を“安全に”分割するユーティリティ。
+    - limit 未指定なら env/グローバルの LINE_SAFE_CHARS（既定4800）を採用
+    - 段落→文の順に自然に切る。超過時はハードスプリット
     - どんな入力でも最低1要素返す（空配列にしない）
+    - len()ではなくUTF-16コードユニット数でカウント（絵文字混在に強い）
     """
+    import os, re
+
+    def u16len(s: str) -> int:
+        # UTF-16 LE のコードユニット数（LINEの仕様に近い）
+        return len(s.encode("utf-16-le")) // 2
+
+    # 実効上限を決定
+    if limit is None:
+        limit = max_len
+    if limit is None:
+        # env > グローバル > 既定 の順で採用
+        try:
+            limit = int(os.getenv("LINE_SAFE_CHARS", str(globals().get("LINE_SAFE_CHARS", 4800))))
+        except Exception:
+            limit = 4800
+    if limit <= 0:
+        return ["" if text is None else str(text)]
+
     s = "" if text is None else str(text)
-    eff = limit if limit is not None else max_len
-    lim = int(eff if eff is not None else globals().get("LINE_SAFE_CHARS", 3800))
-    if lim <= 0:
+    if u16len(s) <= limit:
         return [s]
 
-    out, buf = [], ""
-    for line in s.splitlines(keepends=True):
-        if len(buf) + len(line) <= lim:
-            buf += line
-            continue
-        if buf:
-            out.append(buf.rstrip("\n"))
-            buf = ""
-        while len(line) > lim:
-            out.append(line[:lim].rstrip("\n"))
-            line = line[lim:]
-        buf = line
-    if buf or not out:
-        out.append((buf or s).rstrip("\n"))
-    return out
+    # 段落単位（空行で分割）
+    paragraphs = [p for p in re.split(r"\n\s*\n", s) if p != ""]
+    chunks: List[str] = []
 
+    def flush_buf(buf: str) -> None:
+        if buf:
+            chunks.append(buf)
+
+    def hard_split(token: str) -> None:
+        """1トークン自体が長過ぎる場合、UTF-16長を見ながら強制分割"""
+        buf = ""
+        for ch in token:
+            if u16len(buf + ch) > limit:
+                flush_buf(buf)
+                buf = ch
+            else:
+                buf += ch
+        flush_buf(buf)
+
+    # 1) 段落→2) 文→3) ハードスプリット の順で収める
+    buf = ""
+    SENT_SPLIT = re.compile(r"(?<=[。．！？!?])")  # 句点等の直後で区切る
+    for para in paragraphs:
+        para = para.strip("\n")
+        # 段落丸ごと入るなら入れる
+        if u16len(para) <= limit:
+            if u16len(buf + (("\n\n" + para) if buf else para)) <= limit:
+                buf = (buf + ("\n\n" if buf else "") + para)
+            else:
+                flush_buf(buf); buf = para
+            continue
+
+        # 文単位で詰める
+        sentences = [x for x in SENT_SPLIT.split(para) if x]
+        for sent in sentences:
+            if u16len(sent) > limit:
+                # 文がそもそも長い → いったん今のbufを吐き出してハード分割
+                flush_buf(buf); buf = ""
+                hard_split(sent)
+                continue
+            # 既存bufに足せるなら足す
+            sep = ("\n" if (buf and not buf.endswith("\n")) else "")
+            candidate = buf + (sep + sent if buf else sent)
+            if u16len(candidate) <= limit:
+                buf = candidate
+            else:
+                flush_buf(buf); buf = sent
+
+        # 段落の終わりで改行を入れたい場合はここで調整してもOK
+    flush_buf(buf)
+
+    # 念のため空にならない保証
+    if not chunks:
+        chunks = [s[:limit]]
+
+    return chunks
 
 # === 緯度経度：コピペ用のパーサ ===
 import re as _re2
@@ -8194,33 +8251,6 @@ def admin_unhit_report():
     return render_template("admin_unhit_report.html", unhit_report=report)
 
 
-def _split_for_line(text: str, limit: int) -> List[str]:
-    """
-    LINEに送る本文を limit 以下に“だけ”分割する。
-    改行/句点/スペース優先で自然に切る。必要な時だけ複数通。
-    """
-    t = text or ""
-    if len(t) <= limit:
-        return [t]
-
-    chunks = []
-    rest = t
-    seps = ["\n\n", "\n", "。", "！", "？", ".", " "]
-
-    while len(rest) > limit:
-        cut = -1
-        for sep in seps:
-            pos = rest.rfind(sep, 0, limit)
-            cut = max(cut, pos)
-        if cut <= 0:
-            cut = limit  # きれいに切れない場合は強制カット
-        chunks.append(rest[:cut].rstrip())
-        rest = rest[cut:].lstrip()
-
-    if rest:
-        chunks.append(rest)
-    return chunks
-
 # =========================
 #  LINE Webhook
 # =========================
@@ -8230,23 +8260,6 @@ from linebot.exceptions import LineBotApiError
 
 _LINE_THROTTLE = {}  # ループ暴走の最終安全弁（会話ごとの最短インターバル）
 
-def _split_for_line(text: str, limit: int) -> List[str]:
-    if len(text or "") <= limit:
-        return [text or ""]
-    seps = ["\n\n", "\n", "。", "！", "？", ".", " "]
-    out, rest = [], text
-    while len(rest) > limit:
-        cut = -1
-        for s in seps:
-            pos = rest.rfind(s, 0, limit)
-            cut = max(cut, pos)
-        if cut <= 0:
-            cut = limit
-        out.append(rest[:cut].rstrip())
-        rest = rest[cut:].lstrip()
-    if rest:
-        out.append(rest)
-    return out
 
 # === 返信ユーティリティ（重複抑止＋世代ガード版） ===========================
 def _reply_or_push(event, text: str, *, reqgen: int | None = None):
