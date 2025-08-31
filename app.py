@@ -3621,6 +3621,43 @@ def _apply_text_watermark(im, text: str):
 
     return base.convert("RGB")
 
+# ===== 透かしバリアント生成（none / gotocity / fullygoto） =====
+WM_VARIANTS = {
+    "none":      {"suffix": "",           "text": None},
+    "gotocity":  {"suffix": "__wm-city",  "text": "＠Goto City"},
+    "fullygoto": {"suffix": "__wm-fully", "text": "@fullyGOTO"},
+}
+
+def _ensure_wm_variants(basename: str) -> dict:
+    """
+    IMAGES_DIR/<basename> を元に、3種の静的ファイルを作る。
+    戻り値: {"none": "xxx.jpg", "gotocity": "...", "fullygoto": "..."}
+    """
+    import os
+    from PIL import Image
+
+    root, ext = os.path.splitext(basename)
+    src = os.path.join(IMAGES_DIR, basename)
+    out = {}
+
+    if not os.path.isfile(src):
+        return out
+
+    im = Image.open(src).convert("RGB")
+    for key, spec in WM_VARIANTS.items():
+        fn  = root + spec["suffix"] + ext
+        dst = os.path.join(IMAGES_DIR, fn)
+        try:
+            if spec["text"]:
+                im2 = _apply_text_watermark(im, spec["text"])
+            else:
+                im2 = im
+            # JPEG前提で保存（既存のアップロード関数がJPEG化している想定）
+            im2.save(dst, "JPEG", quality=85, optimize=True, progressive=True)
+            out[key] = fn
+        except Exception:
+            app.logger.exception("[wm] failed to save %s", fn)
+    return out
 
 def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool=False) -> str|None:
     """
@@ -5681,15 +5718,27 @@ def admin_entry():
             if prev_img and not delete_flag:
                 new_entry["image_file"] = prev_img
                 new_entry["image"] = prev_img
+                # ▼ ここを追加（既存画像に派生ファイルが無ければ作る）
+                try:
+                    _ensure_wm_variants(prev_img)
+                except Exception:
+                    app.logger.exception("[wm] backfill variants failed for %s", prev_img)
+
         elif result == "":
             # 明示削除
             new_entry.pop("image_file", None)
             new_entry.pop("image", None)
+
         else:
             # 置換/新規保存
             new_entry["image_file"] = result
             new_entry["image"] = result
-
+            # ▼ ここを追加（新しい画像の3種を事前生成）
+            try:
+                _ensure_wm_variants(result)
+            except Exception:
+                app.logger.exception("[wm] variants generation failed for %s", result)
+                
         # === 緯度・経度（raw/lat/lng/map を総合して決定、片側空は前回値を継承） ===
         lat, lng = _normalize_latlng(
             coords_raw,
@@ -5972,12 +6021,16 @@ def shop_entry():
             prev_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
             prev_img = entries[prev_idx].get("image_file") if prev_idx is not None else None
 
-            res = _save_jpeg_1080_350kb(up, previous=prev_img, delete=False)
-            if res is None:
-                flash("画像アップロードに失敗しました")
-            else:
-                entry_data["image_file"] = res
-
+        res = _save_jpeg_1080_350kb(up, previous=prev_img, delete=False)
+        if res is None:
+            flash("画像アップロードに失敗しました")
+        else:
+            entry_data["image_file"] = res
+            # ▼【追記】3種を事前生成
+            try:
+                _ensure_wm_variants(res)
+            except Exception:
+                app.logger.exception("[wm] variants generation failed (shop) for %s", res)
 
         entries = load_entries()
         entry_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
@@ -7396,6 +7449,12 @@ def admin_upload_image():
         return jsonify({"ok": False, "error": "画像の保存に失敗しました"}), 400
     if res == "":
         return jsonify({"ok": False, "error": "削除指定は許可されていません"}), 400
+
+    # ▼【追記】3種を事前生成
+    try:
+        _ensure_wm_variants(res)
+    except Exception:
+        app.logger.exception("[wm] variants generation failed in admin_upload_image for %s", res)
 
     url = url_for("serve_image", filename=res, _external=True)
     return jsonify({"ok": True, "file": res, "url": url})
