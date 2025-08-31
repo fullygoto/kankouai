@@ -190,7 +190,34 @@ def send_viewpoints_map(event):
     url = viewpoints_map_url() or "(展望所マップURLが未設定です)"
     _reply_or_push(event, f"展望所マップはこちら：\n{url}")
 
+# === 透かしON/OFF（Render環境変数をまとめて判定） ===
+def _env_truthy(val: str | None) -> bool:
+    if val is None:
+        return False
+    v = val.strip().lower()
+    return v not in ("", "0", "false", "off", "no")
 
+def _watermark_enabled() -> bool:
+    # どれか1つでも真なら有効（Renderで WATERMARK_ENABLE=1 ならOK）
+    return (
+        _env_truthy(os.getenv("WATERMARK_ENABLE")) or
+        _env_truthy(os.getenv("WATERMARK_ENABLED")) or
+        _env_truthy(os.getenv("WM_ENABLE"))
+    )
+
+# === 透かし種別の解釈ヘルパー ===
+def _resolve_wm_kind(arg: str | None):
+    v = (arg or "").strip().lower()
+    if v in ("", "0", "false", "off", "none", "no"):
+        return None
+    if v in ("1", "true", "on", "yes"):
+        return "fullygoto"   # 既定
+    if v in ("fullygoto", "fully", "fg"):
+        return "fullygoto"
+    if v in ("gotocity", "city", "gc"):
+        return "gotocity"
+    return None
+    
 # ==== 画像配信（署名 + 透かし対応）=============================
 # 依存: Pillow, safe_join, send_file, load_entries(), app など
 # 既存の設定が無い場合のデフォルト
@@ -401,20 +428,27 @@ def serve_image(filename):
     - 観測ヘッダ: X-WM-Requested / X-WM-Applied / X-Img-Signed / X-Img-Exp / X-Img-Fmt / X-Img-Path
     """
 
-    # ====== 互換ヘルパ（外部が無くても動くようフォールバック） ====================
-    def _verify_sig_if_available_local(fn: str, qargs) -> bool:
-        # 外部ヘルパがあれば使う
-        if "_verify_sig_if_available" in globals():
-            try:
-                return bool(globals()["_verify_sig_if_available"](fn, qargs))
-            except Exception:
-                pass
-        # _sign が付いていれば最低限の検査だけ行う（fail open/closeは方針で選択）
-        # ここでは fail-open（署名が無くても表示させたい場合があるため）
-        return True
+    # ====== 内部ヘルパ ======
+    import os
+    from flask import request, abort, send_file
 
+    # Render等の環境変数でON/OFF（WATERMARK_ENABLE=1 等）を判定
+    def _env_truthy(val: str | None) -> bool:
+        if val is None:
+            return False
+        v = val.strip().lower()
+        return v not in ("", "0", "false", "off", "no")
+
+    def _watermark_enabled_local() -> bool:
+        # どれか1つでも真なら有効（Renderで WATERMARK_ENABLE=1 ならOK）
+        return (
+            _env_truthy(os.getenv("WATERMARK_ENABLE")) or
+            _env_truthy(os.getenv("WATERMARK_ENABLED")) or
+            _env_truthy(os.getenv("WM_ENABLE"))
+        )
+
+    # 既存の真偽/別名/種類文字列をまとめて正規化
     def _normalize_wm_choice_local(choice: str | None, wm_on_default: bool = True) -> str:
-        # 既存の正規化ヘルパがあれば尊重
         if "_normalize_wm_choice" in globals():
             try:
                 return globals()["_normalize_wm_choice"](choice, wm_on_default=wm_on_default)
@@ -424,8 +458,7 @@ def serve_image(filename):
         if c in ("none", "fullygoto", "gotocity"):
             return c
         if c in ("1", "true", "on", "yes", "thumb", "preview"):
-            # サムネ表記や真値は既定で gotocity に寄せる
-            return "gotocity"
+            return "gotocity"  # サムネ指定や真値は既定で gotocity
         if c in ("0", "false", "off", "no", ""):
             return "none"
         if c == "fully":
@@ -434,14 +467,22 @@ def serve_image(filename):
             return "gotocity"
         return "fullygoto" if wm_on_default else "none"
 
+    # 署名検証（外部があれば使用、無ければfail-open）
+    def _verify_sig_if_available_local(fn: str, qargs) -> bool:
+        if "_verify_sig_if_available" in globals():
+            try:
+                return bool(globals()["_verify_sig_if_available"](fn, qargs))
+            except Exception:
+                pass
+        return True
+
+    # entriesから画像名で既定のwmを引く（外部があれば使用）
     def _wm_choice_from_entries_local(basename: str) -> str | None:
-        # 外部ヘルパがあれば使用
         if "_wm_choice_from_entries" in globals():
             try:
                 return globals()["_wm_choice_from_entries"](basename)
             except Exception:
                 pass
-        # エントリから filename に一致する行を探し、wm_external_choice / wm_on を読む
         try:
             entries = load_entries()
             for e in entries:
@@ -455,12 +496,62 @@ def serve_image(filename):
             pass
         return None
 
+    # 透かしを実際に合成する（外部 _compose_watermark があればそれを使い、無ければこのローカル実装）
     def _compose_watermark_local(pil_image, mode: str):
-        # 外部の実体があれば使う
         if "_compose_watermark" in globals():
-            return globals()["_compose_watermark"](pil_image, mode)
-        # 透かし合成が未実装でも壊さない（素通し）
-        return pil_image
+            try:
+                return globals()["_compose_watermark"](pil_image, mode)
+            except Exception:
+                pass
+
+        # --- 内蔵合成実装 ---
+        from PIL import Image
+        # 透かし画像の探索候補
+        base_candidates = []
+        try:
+            base_candidates.append(os.path.join(app.root_path, "static", "watermarks"))
+        except Exception:
+            pass
+        try:
+            if "BASE_DIR" in globals():
+                base_candidates.append(os.path.join(globals()["BASE_DIR"], "static", "watermarks"))
+        except Exception:
+            pass
+        base_candidates += ["static/watermarks", "./static/watermarks"]
+
+        wm_map = {
+            "fullygoto": "wm_fullygoto.png",
+            "gotocity":  "wm_gotocity.png",
+        }
+        wm_file = wm_map.get(mode)
+        if not wm_file:
+            return pil_image  # noneなど
+
+        wm_path = None
+        for b in base_candidates:
+            p = os.path.join(b, wm_file)
+            if os.path.isfile(p):
+                wm_path = p
+                break
+        if not wm_path:
+            # 見つからなければ素通し
+            app.logger.error("Watermark file missing: %s (searched in %s)", wm_file, base_candidates)
+            return pil_image
+
+        mark = Image.open(wm_path).convert("RGBA")
+        im = pil_image.convert("RGBA")
+
+        # 画像幅の ~16% に合わせて透かしを縮小し、右下に余白つきで配置
+        target_w = max(1, int(im.width * 0.16))
+        ratio = target_w / mark.width
+        mark = mark.resize((target_w, int(mark.height * ratio)), Image.LANCZOS)
+
+        margin = max(8, int(im.width * 0.01))
+        x = im.width - mark.width - margin
+        y = im.height - mark.height - margin
+
+        im.alpha_composite(mark, (x, y))
+        return im  # RGBA
 
     # 画像パス解決（MEDIA_ROOT / IMAGES_DIR / 互換パス）
     from werkzeug.utils import safe_join
@@ -503,7 +594,6 @@ def serve_image(filename):
             if m2 is not None:
                 mode = m2
             else:
-                # 見つからなければ既定（on）
                 mode = _normalize_wm_choice_local(None, wm_on_default=True)
         except Exception:
             mode = _normalize_wm_choice_local(None, wm_on_default=True)
@@ -516,37 +606,37 @@ def serve_image(filename):
         applied_mode = mode
         is_thumb = False
 
-    # ====== 4) 出力フォーマット判定（拡張子基準） ================================
+    # ====== 4) 出力フォーマット判定（拡張子基準） ==============================
     ext = os.path.splitext(abs_path)[1].lower()
     if ext in (".jpg", ".jpeg"):
         out_fmt, mime = "JPEG", "image/jpeg"
     elif ext == ".png":
         out_fmt, mime = "PNG", "image/png"
     elif ext == ".webp":
-        # LINE 等の互換性重視で JPEG にフォールバック
-        out_fmt, mime = "JPEG", "image/jpeg"
+        out_fmt, mime = "JPEG", "image/jpeg"  # LINE互換でJPEGへ
     else:
         out_fmt, mime = "JPEG", "image/jpeg"
 
     # ====== 5) 合成有無の判定 ==================================================
-    watermark_enabled = globals().get("WATERMARK_ENABLE", True)
+    watermark_enabled = _watermark_enabled_local()
     must_compose = watermark_enabled and (applied_mode in ("fullygoto", "gotocity"))
 
     # ====== 6) レスポンス生成（合成 or 生） ====================================
-    # 観測：メトリクス初期化（無ければ）
     WM_METRICS = globals().setdefault("WM_METRICS", {
         "requests": 0, "signed": 0, "unsigned": 0, "errors": 0,
         "applied": {"none": 0, "fullygoto": 0, "gotocity": 0, "thumb": 0},
     })
     WM_METRICS["requests"] += 1
     WM_METRICS["signed" if signed_req else "unsigned"] += 1
+
     try:
+        from PIL import Image, ImageOps
+        import io as _io
+
         if must_compose:
-            from PIL import Image, ImageOps
-            import io as _io
             with Image.open(abs_path) as im:
                 im = ImageOps.exif_transpose(im)
-                out = _compose_watermark_local(im, applied_mode)  # 外部が無ければ素通し
+                out = _compose_watermark_local(im, applied_mode)  # 内蔵で確実に合成
                 buf = _io.BytesIO()
                 if out_fmt == "JPEG":
                     out = out.convert("RGB")
@@ -564,41 +654,39 @@ def serve_image(filename):
                     out.save(buf, format="JPEG", quality=88, optimize=True, progressive=True, subsampling=2)
                 buf.seek(0)
                 resp = send_file(buf, mimetype=mime, download_name=os.path.basename(abs_path))
+
+            # 透かし版はクエリ依存 → 強キャッシュしない
+            resp.headers["Cache-Control"] = "private, no-cache, no-store, max-age=0"
+            resp.headers["Vary"] = "Accept, Cookie"
+
         else:
-            # そのまま返す
+            # そのまま返す（長めにキャッシュしてOK）
             resp = send_file(abs_path, mimetype=mime)
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
 
         # ====== 7) 観測ヘッダ（原因見える化） ==================================
-        # リクエスト値（指定が無ければ空文字）、最終適用（thumbは識別のため別名）
         resp.headers["X-WM-Requested"] = str(requested_mode or "")
         resp.headers["X-WM-Applied"]   = ("thumb" if is_thumb else applied_mode)
         if signed_req:
             resp.headers["X-Img-Signed"] = "1"
-            # 簡易: exp クエリがあればそのまま露出（署名実装側で付けている想定）
             if request.args.get("exp"):
                 resp.headers["X-Img-Exp"] = str(request.args.get("exp"))
         resp.headers["X-Img-Fmt"]  = out_fmt
         resp.headers["X-Img-Path"] = abs_path
 
-        # キャッシュ（署名付きは短めにしたいならここで調整）
-        resp.headers["Cache-Control"] = "public, max-age=86400"
-
-        # メトリクス
         WM_METRICS["applied"][resp.headers["X-WM-Applied"]] = WM_METRICS["applied"].get(resp.headers["X-WM-Applied"], 0) + 1
-
-        # ログ（INFO）：最小限の構造化
         app.logger.info("serve_image ok", extra={
             "wm_req": requested_mode, "wm_applied": resp.headers["X-WM-Applied"],
             "signed": signed_req, "fmt": out_fmt, "path": abs_path
         })
         return resp
 
-    except Exception as e:
+    except Exception:
         WM_METRICS["errors"] += 1
         app.logger.exception("serve_image watermark compose failed; fallback to raw")
-        # 透かし合成に失敗しても“画像は返す”
         resp = send_file(abs_path, mimetype=mime)
-        resp.headers["Cache-Control"] = "public, max-age=86400"
+        # 失敗時は短期キャッシュ
+        resp.headers["Cache-Control"] = "private, no-cache, no-store, max-age=0"
         resp.headers["X-WM-Requested"] = str(requested_mode or "")
         resp.headers["X-WM-Applied"]   = "error-fallback"
         if signed_req:
@@ -5698,6 +5786,20 @@ def admin_entry():
         role=session.get("role", ""),
         global_paused=_is_global_paused(),
     )
+
+
+# ==== 管理画面用：画像メタAPI（要ログイン） ====
+@app.get("/admin/_img_meta")
+@login_required
+def admin_img_meta():
+    fn = (request.args.get("filename") or "").strip()
+    if not fn:
+        return jsonify(ok=False, error="missing filename"), 400
+
+    meta = _image_meta(fn)
+    # ok/exists のフラグも一緒に返す
+    return jsonify(ok=True, **meta)
+# ==== / 管理画面用API ====
 
 @app.route("/admin/_wm_diag", methods=["GET"])
 @login_required
