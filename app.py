@@ -25,7 +25,7 @@ load_dotenv()
 
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session,
-    jsonify, send_file, abort, send_from_directory, render_template_string
+    jsonify, send_file, abort, send_from_directory, render_template_string, Response
 )
 
 from werkzeug.exceptions import RequestEntityTooLarge, NotFound
@@ -440,274 +440,257 @@ def _wm_normalize(v) -> str | None:
 
 # ============================================================================
 
+
+
 @app.route("/media/img/<path:filename>")
 def serve_image(filename):
     """
-    署名検証 → 実ファイル解決 → 透かしモード決定（URL優先→エントリ既定） → 返却。
-    - wm 未指定 or WATERMARK_ENABLE=False のときは原画像をそのまま返す
-    - wm=gotocity / fullygoto のときは動的に合成して返す
-    - 一覧サムネ用途（wm=1 / thumb / preview）は常に透かし（既定は gotocity）※透かしを大きめ表示
-    - 返却は元拡張子に合わせて JPEG/PNG を選択（LINE互換のため webp は JPEG）
-    - 観測ヘッダ: X-WM-Requested / X-WM-Applied / X-WM-Ratio / X-Img-Signed / X-Img-Exp / X-Img-Fmt / X-Img-Path
+    署名検証 → 実ファイル解決 → 透かし（クレジット）モード決定 → 返却。
+    - 文字透かし: 右下に「＠Goto City」または「＠fullyGOTO」。none のときは透かし無し
+    - URLで ?wm=gotocity / fullygoto / none / 1(thumb) を指定可能（URL優先）
+    - HEAD は合成を完全スキップ（超軽量）
+    - 出力は元拡張子に合わせて JPEG/PNG（webpはJPEG）
+    - 観測ヘッダ: X-WM-Requested / X-WM-Applied / X-WM-Text / X-Img-Fmt / X-Img-Path / X-Img-Signed / X-Img-Exp
+    - サムネ (?wm=1 / thumb / preview) はキャッシュ強化（public, immutable）
     """
-    import os
-    from flask import request, abort, send_file
+    import os, io
+    from flask import request, abort, send_file, Response
+    from werkzeug.utils import safe_join
 
-    # --- 環境変数ON/OFF ---
-    def _env_truthy(val: str | None) -> bool:
-        if val is None: return False
-        v = val.strip().lower()
-        return v not in ("", "0", "false", "off", "no")
-    def _watermark_enabled_local() -> bool:
-        return (
-            _env_truthy(os.getenv("WATERMARK_ENABLE")) or
-            _env_truthy(os.getenv("WATERMARK_ENABLED")) or
-            _env_truthy(os.getenv("WM_ENABLE"))
-        )
-
-    # --- wm 正規化 ---
-    def _normalize_wm_choice_local(choice: str | None, wm_on_default: bool = True) -> str:
-        if "_normalize_wm_choice" in globals():
-            try:
-                return globals()["_normalize_wm_choice"](choice, wm_on_default=wm_on_default)
-            except Exception:
-                pass
-        c = (str(choice or "")).strip().lower()
-        if c in ("none", "fullygoto", "gotocity"):
-            return c
-        if c in ("1", "true", "on", "yes", "thumb", "preview"):
-            return "gotocity"  # サムネ指定や真値は既定で gotocity
-        if c in ("0", "false", "off", "no", ""):
-            return "none"
-        if c == "fully":
-            return "fullygoto"
-        if c == "city":
-            return "gotocity"
-        return "fullygoto" if wm_on_default else "none"
-
-    # --- 署名検証（外部があれば利用／無ければfail-open） ---
+    # ---------- 署名検証（外部定義があれば使う／無ければ通す） ----------
     def _verify_sig_if_available_local(fn: str, qargs) -> bool:
-        if "_verify_sig_if_available" in globals():
+        v = globals().get("_verify_sig_if_available")
+        if callable(v):
             try:
-                return bool(globals()["_verify_sig_if_available"](fn, qargs))
+                return bool(v(fn, qargs))
             except Exception:
-                pass
-        return True
+                return False
+        return True  # fail-open
 
-    # --- entriesから既定wmを引く（外部があれば利用） ---
-    def _wm_choice_from_entries_local(basename: str) -> str | None:
-        if "_wm_choice_from_entries" in globals():
+    # ---------- entries 由来の既定クレジット（外部があれば使う） ----------
+    # 期待値: 'gotocity' / 'fullygoto' / 'none'
+    def _credit_from_entries_local(basename: str) -> str | None:
+        f = globals().get("_wm_choice_from_entries")
+        if callable(f):
             try:
-                return globals()["_wm_choice_from_entries"](basename)
+                return f(basename)
             except Exception:
                 pass
+        # 予備: load_entries() があれば image_file/ image と照合して e['wm_credit'] を使う
         try:
-            entries = load_entries()
-            for e in entries:
-                img = (e.get("image_file") or e.get("image") or "").strip()
-                if img and os.path.basename(img) == basename:
-                    raw = e.get("wm_external_choice")
-                    if raw is None:
-                        raw = "fullygoto" if e.get("wm_on", True) else "none"
-                    return _normalize_wm_choice_local(raw, wm_on_default=True)
+            if "load_entries" in globals():
+                for e in load_entries():
+                    img = (e.get("image_file") or e.get("image") or "").strip()
+                    if img and os.path.basename(img) == basename:
+                        raw = (e.get("wm_credit") or "").strip().lower()
+                        if raw in ("gotocity", "fullygoto", "none"):
+                            return raw
         except Exception:
             pass
         return None
 
-    # --- 透かし合成（内蔵。サムネ時は大きめ比率） ---
-    def _compose_watermark_local(pil_image, mode: str):
-        # 外部実装があれば優先
-        if "_compose_watermark" in globals():
-            try:
-                return globals()["_compose_watermark"](pil_image, mode)
-            except Exception:
-                pass
-
-        from PIL import Image
-        # mode 文字列にサフィックス「|thumb」を付けて呼ぶ（後述）
-        kind, _, flag = (mode or "").partition("|")
-        is_thumb = (flag == "thumb")
-
-        # 探索パス
-        base_candidates = []
-        try: base_candidates.append(os.path.join(app.root_path, "static", "watermarks"))
-        except Exception: pass
-        if "BASE_DIR" in globals():
-            try: base_candidates.append(os.path.join(globals()["BASE_DIR"], "static", "watermarks"))
-            except Exception: pass
-        base_candidates += ["static/watermarks", "./static/watermarks"]
-
-        wm_map = {"fullygoto": "wm_fullygoto.png", "gotocity": "wm_gotocity.png"}
-        wm_file = wm_map.get(kind)
-        if not wm_file:
-            return pil_image
-        wm_path = None
-        for b in base_candidates:
-            p = os.path.join(b, wm_file)
-            if os.path.isfile(p):
-                wm_path = p
-                break
-        if not wm_path:
-            app.logger.error("Watermark file missing: %s (searched in %s)", wm_file, base_candidates)
-            return pil_image
-
-        mark = Image.open(wm_path).convert("RGBA")
-        im = pil_image.convert("RGBA")
-
-        # ここがポイント：サムネは大きめ（0.45）、通常は 0.16
-        ratio = 0.45 if is_thumb else 0.16
-        target_w = max(1, int(im.width * ratio))
-        scale = target_w / mark.width
-        mark = mark.resize((target_w, int(mark.height * scale)), Image.LANCZOS)
-
-        margin = max(8, int(im.width * 0.01))
-        x = im.width - mark.width - margin
-        y = im.height - mark.height - margin
-
-        im.alpha_composite(mark, (x, y))
-        # デバッグ用に比率を保持（呼び出し側でヘッダに出す）
-        im._wm_ratio_used = ratio  # 型: float
-        return im
-
-    # --- 画像パス解決 ---
-    from werkzeug.utils import safe_join
+    # ---------- パス解決 ----------
     def _find_image_path(fn: str) -> str | None:
-        candidates = []
-        if "MEDIA_ROOT" in globals() and globals().get("MEDIA_ROOT"):
-            candidates.append(globals()["MEDIA_ROOT"])
-        for d in {globals().get("IMAGES_DIR"), os.getenv("MEDIA_ROOT", "media/img"), "media/img", "media"}:
-            if d and d not in candidates:
-                candidates.append(d)
-        for base in candidates:
-            try: p = safe_join(base, fn)
-            except Exception: continue
+        bases = []
+        # 優先: MEDIA_ROOT (env or global)
+        if globals().get("MEDIA_ROOT"):
+            bases.append(globals()["MEDIA_ROOT"])
+        env_media = os.getenv("MEDIA_ROOT")
+        if env_media and env_media not in bases:
+            bases.append(env_media)
+        # 既定候補
+        for d in ("data/images", "data/img", "media/img", "media"):
+            if d not in bases:
+                bases.append(d)
+        for base in bases:
+            try:
+                p = safe_join(base, fn)
+            except Exception:
+                continue
             if p and os.path.isfile(p):
                 return p
         return None
 
-    # ===== 1) 署名検証 =====
+    # ---------- クレジット文言 ----------
+    def _label_for(mode: str) -> str:
+        if mode == "gotocity":   return "＠Goto City"
+        if mode == "fullygoto":  return "＠fullyGOTO"
+        return ""
+
+    # ---------- 文字透かし合成（フォントは DejaVu/Noto を優先・無ければ拡大合成） ----------
+    def _compose_text_credit(im, mode: str, is_thumb: bool = False):
+        from PIL import Image, ImageDraw, ImageFont, ImageOps
+        if mode not in ("gotocity", "fullygoto"):
+            return im, None  # 透かし無し
+
+        im = ImageOps.exif_transpose(im.convert("RGBA"))
+        W, H = im.width, im.height
+        label = _label_for(mode)
+
+        # サイズ: 通常 ~3.5% 高さ、thumb ~5.5% 高さ
+        target_h = max(18, int(H * (0.055 if is_thumb else 0.035)))
+
+        # フォント探索
+        font_candidates = [
+            os.path.join(app.root_path, "static", "fonts", "NotoSansJP-Bold.ttf"),
+            os.path.join(app.root_path, "static", "fonts", "NotoSansJP-Regular.ttf"),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        font = None
+        for fp in font_candidates:
+            try:
+                if os.path.isfile(fp):
+                    font = ImageFont.truetype(fp, size=target_h)
+                    break
+            except Exception:
+                pass
+        # Truetype が見つからなければ、bitmap フォント→拡大で代用
+        if font is None:
+            base = ImageFont.load_default()
+            # 一旦小さめキャンバスに描いてターゲット高さに拡大
+            tmp = Image.new("L", (2000, 500), 0)
+            d2 = ImageDraw.Draw(tmp)
+            bbox = d2.textbbox((0, 0), label, font=base)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            scale = max(1, target_h / max(1, th))
+            pad = 4
+            txt = Image.new("L", (tw + pad * 2, th + pad * 2), 0)
+            ImageDraw.Draw(txt).text((pad, pad), label, fill=255, font=base)
+            # 拡大
+            txt = txt.resize((int(txt.width * scale), int(txt.height * scale)), Image.LANCZOS)
+            # 影＋本体として RGBA に
+            glyph = Image.new("RGBA", txt.size, (0, 0, 0, 0))
+            glyph.putalpha(txt)
+            # 配置
+            margin = max(10, int(W * 0.012))
+            x = W - glyph.width - margin
+            y = H - glyph.height - margin
+            # 影
+            shadow = Image.new("RGBA", glyph.size, (0, 0, 0, 140))
+            im.alpha_composite(shadow, (x + 2, y + 2))
+            # 本体
+            white = Image.new("RGBA", glyph.size, (255, 255, 255, 255))
+            white.putalpha(txt)
+            im.alpha_composite(white, (x, y))
+            return im, target_h
+
+        # Truetype あり: 影付きで描画
+        draw = ImageDraw.Draw(im)
+        bbox = draw.textbbox((0, 0), label, font=font, stroke_width=0)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        margin = max(10, int(W * 0.012))
+        x = W - tw - margin
+        y = H - th - margin
+        # 影
+        draw.text((x + 2, y + 2), label, font=font, fill=(0, 0, 0, 180))
+        # 本体
+        draw.text((x, y), label, font=font, fill=(255, 255, 255, 255))
+        return im, th
+
+    # ---------- 1) 署名 ----------
     signed_req = bool(request.args.get("_sign"))
     if not _verify_sig_if_available_local(filename, request.args):
         abort(403)
 
-    # ===== 2) 実ファイル =====
+    # ---------- 2) 実ファイル ----------
     abs_path = _find_image_path(filename)
-    if not abs_path: abort(404)
+    if not abs_path:
+        abort(404)
 
-    # ===== 3) モード決定 =====
-    raw_wm = request.args.get("wm")
-    requested_mode = (str(raw_wm) if raw_wm is not None else "")
-    mode = _normalize_wm_choice_local(requested_mode, wm_on_default=True)
-
-    # URLに妥当な指定が無ければ、エントリ既定を採用
-    if requested_mode in (None, "",) or mode not in ("none", "fullygoto", "gotocity"):
-        try:
-            from os.path import basename as _bn
-            m2 = _wm_choice_from_entries_local(_bn(filename))
-            mode = m2 if m2 is not None else _normalize_wm_choice_local(None, wm_on_default=True)
-        except Exception:
-            mode = _normalize_wm_choice_local(None, wm_on_default=True)
-
-    # サムネ用途は gotocity ＋ “thumb フラグ”
-    if str(requested_mode).lower() in {"1", "thumb", "preview"}:
-        applied_mode = "gotocity"
-        is_thumb = True
+    # ---------- 3) モード決定 ----------
+    raw = request.args.get("wm")
+    req = (str(raw or "").strip().lower())
+    # サムネ判定
+    is_thumb = req in {"1", "thumb", "preview"}
+    # URL優先、無ければ entries 既定、さらに無ければ none→fullygoto（安全側）に寄せる
+    if is_thumb:
+        applied = "gotocity"  # サムネは gotocity 固定（要望）
+    elif req in {"gotocity", "fullygoto", "none"}:
+        applied = req
     else:
-        applied_mode = mode
-        is_thumb = False
+        from os.path import basename
+        applied = (_credit_from_entries_local(basename(filename)) or "none")
 
-    # ===== 4) 出力フォーマット =====
+    # ---------- 4) 出力フォーマット ----------
     ext = os.path.splitext(abs_path)[1].lower()
     if ext in (".jpg", ".jpeg"):
         out_fmt, mime = "JPEG", "image/jpeg"
     elif ext == ".png":
         out_fmt, mime = "PNG", "image/png"
     elif ext == ".webp":
-        out_fmt, mime = "JPEG", "image/jpeg"  # LINE互換
+        out_fmt, mime = "JPEG", "image/jpeg"
     else:
         out_fmt, mime = "JPEG", "image/jpeg"
 
-    # ===== 5) 合成要否 =====
-    watermark_enabled = _watermark_enabled_local()
-    must_compose = watermark_enabled and (applied_mode in ("fullygoto", "gotocity"))
-
-    # ===== 6) レスポンス =====
-    WM_METRICS = globals().setdefault("WM_METRICS", {
-        "requests": 0, "signed": 0, "unsigned": 0, "errors": 0,
-        "applied": {"none": 0, "fullygoto": 0, "gotocity": 0, "thumb": 0},
-    })
-    WM_METRICS["requests"] += 1
-    WM_METRICS["signed" if signed_req else "unsigned"] += 1
-
-    try:
-        from PIL import Image, ImageOps
-        import io as _io
-
-        wm_ratio_used = None  # デバッグ
-
-        if must_compose:
-            with Image.open(abs_path) as im:
-                im = ImageOps.exif_transpose(im)
-                # ★ サムネ時は mode に「|thumb」を付けて通知（比率を大きくする）
-                comp_mode = applied_mode + ("|thumb" if is_thumb else "")
-                out = _compose_watermark_local(im, comp_mode)
-                wm_ratio_used = getattr(out, "_wm_ratio_used", None)
-
-                buf = _io.BytesIO()
-                if out_fmt == "JPEG":
-                    out = out.convert("RGB")
-                    out.save(
-                        buf, format="JPEG",
-                        quality=int(os.getenv("WM_JPEG_QUALITY", "88")),
-                        optimize=True, progressive=True, subsampling=2
-                    )
-                elif out_fmt == "PNG":
-                    if out.mode != "RGBA":
-                        out = out.convert("RGBA")
-                    out.save(buf, format="PNG", optimize=True)
-                else:
-                    out = out.convert("RGB")
-                    out.save(buf, format="JPEG", quality=88, optimize=True, progressive=True, subsampling=2)
-                buf.seek(0)
-                resp = send_file(buf, mimetype=mime, download_name=os.path.basename(abs_path))
-            # 透かし版は強キャッシュしない
-            resp.headers["Cache-Control"] = "private, no-cache, no-store, max-age=0"
-            resp.headers["Vary"] = "Accept, Cookie"
-        else:
-            resp = send_file(abs_path, mimetype=mime)
-            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-
+    # ---------- 5) HEAD は超軽量 ----------
+    if request.method == "HEAD":
+        resp = Response(status=200, mimetype=mime)
+        # HEAD は常に強キャッシュしない（存在確認用途）
+        resp.headers["Cache-Control"] = "private, no-cache, no-store, max-age=0"
         # 観測ヘッダ
-        resp.headers["X-WM-Requested"] = str(requested_mode or "")
-        resp.headers["X-WM-Applied"]   = ("thumb" if is_thumb else applied_mode)
-        if wm_ratio_used is not None:
-            resp.headers["X-WM-Ratio"] = f"{wm_ratio_used:.2f}"
+        resp.headers["X-WM-Requested"] = req
+        resp.headers["X-WM-Applied"]   = ("thumb" if is_thumb else applied)
+        resp.headers["X-Img-Fmt"]      = out_fmt
+        resp.headers["X-Img-Path"]     = abs_path
         if signed_req:
             resp.headers["X-Img-Signed"] = "1"
             if request.args.get("exp"):
                 resp.headers["X-Img-Exp"] = str(request.args.get("exp"))
-        resp.headers["X-Img-Fmt"]  = out_fmt
-        resp.headers["X-Img-Path"] = abs_path
-
-        WM_METRICS["applied"][resp.headers["X-WM-Applied"]] = WM_METRICS["applied"].get(resp.headers["X-WM-Applied"], 0) + 1
-        app.logger.info("serve_image ok", extra={
-            "wm_req": requested_mode, "wm_applied": resp.headers["X-WM-Applied"],
-            "ratio": resp.headers.get("X-WM-Ratio"),
-            "signed": signed_req, "fmt": out_fmt, "path": abs_path
-        })
         return resp
 
-    except Exception:
-        WM_METRICS["errors"] += 1
-        app.logger.exception("serve_image watermark compose failed; fallback to raw")
-        resp = send_file(abs_path, mimetype=mime)
-        resp.headers["Cache-Control"] = "private, no-cache, no-store, max-age=0"
-        resp.headers["X-WM-Requested"] = str(requested_mode or "")
-        resp.headers["X-WM-Applied"]   = "error-fallback"
-        resp.headers["X-Img-Fmt"]      = out_fmt
-        resp.headers["X-Img-Path"]     = abs_path
-        return resp
+    # ---------- 6) 本体（必要なら合成） ----------
+    from PIL import Image
+    with Image.open(abs_path) as src:
+        need_compose = is_thumb or applied in ("gotocity", "fullygoto")
+        if not need_compose or applied == "none":
+            # 原画像そのまま
+            resp = send_file(abs_path, mimetype=mime)
+            # 原画像は長期キャッシュ
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            wm_text = ""
+        else:
+            im, th = _compose_text_credit(src, applied, is_thumb=is_thumb)
+            buf = io.BytesIO()
+            if out_fmt == "JPEG":
+                im = im.convert("RGB")
+                im.save(buf, format="JPEG",
+                        quality=int(os.getenv("WM_JPEG_QUALITY", "88")),
+                        optimize=True, progressive=True, subsampling=2)
+            elif out_fmt == "PNG":
+                if im.mode != "RGBA":
+                    im = im.convert("RGBA")
+                im.save(buf, format="PNG", optimize=True)
+            else:
+                im = im.convert("RGB")
+                im.save(buf, format="JPEG", quality=88, optimize=True, progressive=True, subsampling=2)
+            buf.seek(0)
+            resp = send_file(buf, mimetype=mime, download_name=os.path.basename(abs_path))
+            # 透かし画像のキャッシュ方針
+            if is_thumb:
+                # ★要望: サムネだけはキャッシュを有効化
+                resp.headers["Cache-Control"] = "public, max-age=2592000, immutable"  # 30日
+            else:
+                resp.headers["Cache-Control"] = "private, no-cache, no-store, max-age=0"
+            wm_text = _label_for(applied)
 
+    # ---------- 7) 観測ヘッダ ----------
+    resp.headers["Vary"] = "Accept, Cookie"
+    resp.headers["X-WM-Requested"] = req
+    resp.headers["X-WM-Applied"]   = ("thumb" if is_thumb else applied)
+    resp.headers["X-WM-Text"]      = wm_text
+    resp.headers["X-Img-Fmt"]      = out_fmt
+    resp.headers["X-Img-Path"]     = abs_path
+    if signed_req:
+        resp.headers["X-Img-Signed"] = "1"
+        if request.args.get("exp"):
+            resp.headers["X-Img-Exp"] = str(request.args.get("exp"))
+
+    app.logger.info("serve_image text-wm ok",
+                    extra={"wm_req": req, "applied": resp.headers["X-WM-Applied"],
+                           "text": wm_text, "fmt": out_fmt, "path": abs_path})
+    return resp
+    
 # ==== /画像配信 =================================================
 
 # 別名プレフィックス（環境変数で差し替え可）
@@ -3168,24 +3151,6 @@ WM_TEXTS = {
 # Watermark 正規化ヘルパ（どこからでも呼べる場所に配置）
 # ============================================================
 
-def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
-    """
-    入力のゆらぎ（'fully' / 'city' / '1' / True / None など）を
-    保存・配信で使う正規形 'none' / 'fullygoto' / 'gotocity' に統一する。
-    """
-    c = (str(choice or "")).strip().lower()
-    if c in ("none", "fullygoto", "gotocity"):
-        return c
-    if c in ("1", "true", "on", "yes"):
-        return "fullygoto"
-    if c in ("0", "false", "off", "no", ""):
-        return "none"
-    if c == "fully":
-        return "fullygoto"
-    if c == "city":
-        return "gotocity"
-    return "fullygoto" if wm_on_default else "none"
-
 
 def _wm_choice_for_entry(entry: dict | None) -> str:
     """
@@ -3422,39 +3387,6 @@ def _force_https_abs(u: str) -> str:
         return u
 
 
-def safe_url_for(endpoint: str, **values) -> str:
-    """
-    url_for のラッパ。
-    - 常に _external=True で絶対URLを作成
-    - 必ず HTTPS に補正
-    - リクエストコンテキストが無い場面では EXTERNAL_BASE_URL を利用（任意）
-    """
-    from flask import url_for, request
-    import os
-    from urllib.parse import urlencode
-
-    # url_for で作れるならそれを使う
-    try:
-        values["_external"] = True
-        u = url_for(endpoint, **values)
-        return _force_https_abs(u)
-    except Exception:
-        # 例：リクエスト外などで url_for が使えない場合のフォールバック
-        filename = values.get("filename")
-        qs = values.copy()
-        qs.pop("filename", None)
-        qs.pop("_external", None)
-        query = ("?" + urlencode(qs)) if qs else ""
-        base = (os.getenv("EXTERNAL_BASE_URL") or "").rstrip("/")
-        if not base:
-            try:
-                base = (request.url_root or "").rstrip("/")
-            except Exception:
-                base = ""
-        u = f"{base}{MEDIA_URL_PREFIX}/{filename}{query}" if base else f"{MEDIA_URL_PREFIX}/{filename}{query}"
-        return _force_https_abs(u)
-
-
 # ========== helper: 相対/HTTP を HTTPS の絶対URLに補正 ==========
 def _force_https_abs(u: str) -> str:
     """
@@ -3514,96 +3446,65 @@ def build_signed_image_url(
     ttl_sec: int | None = None,
 ) -> str:
     """
-    署名付きURLを生成（従来互換＋拡張版）。
-    - まず safe_url_for(_sign=True) を試す（署名・絶対URL・HTTPS補正まで一気に）
-    - 使えない場合は従来の IMAGE_PROTECT + _img_sig にフォールバック
-    - どの経路でも最終的に HTTPS の絶対URLへ補正して返す
+    署名付きURLを生成（safe_url_for は呼ばない：相互再帰防止）。
     - wm:
-        * "fullygoto" / "gotocity" はそのまま
+        * "fullygoto" / "gotocity" → そのまま
         * "fully"→"fullygoto", "city"→"gotocity"
-        * True → "1"（旧来のON互換）
-        * False/None → 付けない
+        * True / "1"/"true"/"on" → "1"（旧ON互換）
+        * False/None/"none"/"0"/"off"/"false"/"" → 付けない
     """
     if not filename:
         return ""
 
     # --- wm 正規化 ---
-    wm_q: str | None
+    wm_q: str | None = None
     try:
         if isinstance(wm, str):
             v = wm.strip().lower()
             if   v in ("fullygoto", "gotocity"): wm_q = v
             elif v == "fully":                   wm_q = "fullygoto"
             elif v == "city":                    wm_q = "gotocity"
-            elif v in ("none", "0", "off", "false", ""): wm_q = None
-            else:                                wm_q = v  # 後方互換でそのまま
+            elif v in ("1","true","on","yes"):   wm_q = "1"
+            else:                                 # none/0/off/false/"" はここで None に
+                wm_q = None if v in ("none","0","off","false","") else v
         elif wm is True:
             wm_q = "1"
-        else:
-            wm_q = None
     except Exception:
         wm_q = None
 
-    # --- 1) 新方式: safe_url_for(_sign=True) があればそれを使う ---
-    try:
-        kwargs = {"filename": filename, "_external": external, "_sign": True}
-        if wm_q:
-            kwargs["wm"] = wm_q
-        u = safe_url_for("serve_image", **kwargs)  # 存在しない環境は except へ
-        return _force_https_abs(u)
-    except Exception:
-        pass
+    from flask import url_for
+    from urllib.parse import urlencode
+    import time as _t
 
-    # --- 2) 従来方式（IMAGE_PROTECT / _img_sig） ---
-    try:
-        from flask import url_for
-        import time as _t
-        from urllib.parse import urlencode
+    IMAGE_PROTECT_ON = bool(globals().get("IMAGE_PROTECT", True))
 
-        if not IMAGE_PROTECT:
-            # 署名不要環境
-            q = {}
-            if wm_q:
-                q["wm"] = wm_q
-            try:
-                u = url_for("serve_image", filename=filename, _external=external, **q)
-                return _force_https_abs(u)
-            except Exception:
-                base = f"{MEDIA_URL_PREFIX}/{filename}"
-                if q:
-                    base = f"{base}?{urlencode(q)}"
-                return _force_https_abs(base)
-
-        # 署名あり
-        ttl = int(ttl_sec or SIGNED_IMAGE_TTL_SEC)
-        exp = int(_t.time()) + max(60, ttl)
-        sig = _img_sig(filename, exp)
-        q = {"sig": sig, "exp": exp}
-        if wm_q:
-            q["wm"] = wm_q
-
+    if not IMAGE_PROTECT_ON:
+        # 署名なし
+        q = {}
+        if wm_q: q["wm"] = wm_q
         try:
             u = url_for("serve_image", filename=filename, _external=external, **q)
-            return _force_https_abs(u)
-        except Exception:
-            base = f"{MEDIA_URL_PREFIX}/{filename}?{urlencode(q)}"
-            return _force_https_abs(base)
-
-    except Exception:
-        app.logger.exception("build_signed_image_url failed (fallback)")
-        # 最後の保険（署名無し）
-        try:
-            from flask import url_for
-            q = {}
-            if wm_q:
-                q["wm"] = wm_q
-            u = url_for("serve_image", filename=filename, _external=external, **q)
-            return _force_https_abs(u)
         except Exception:
             base = f"{MEDIA_URL_PREFIX}/{filename}"
-            if wm_q:
-                base = f"{base}?wm={wm_q}"
-            return _force_https_abs(base)
+            if q: base = f"{base}?{urlencode(q)}"
+            u = base
+        return _force_https_abs(u)
+
+    # 署名あり
+    ttl = int(ttl_sec or SIGNED_IMAGE_TTL_SEC)
+    exp = int(_t.time()) + max(60, ttl)
+    sig = _img_sig(filename, exp)
+    q = {"sig": sig, "exp": exp}
+    if wm_q: q["wm"] = wm_q
+
+    try:
+        u = url_for("serve_image", filename=filename, _external=external, **q)
+    except Exception:
+        base = f"{MEDIA_URL_PREFIX}/{filename}"
+        sep  = "&" if "?" in base else "?"
+        u    = f"{base}{sep}{urlencode(q)}"
+
+    return _force_https_abs(u)
 
 
 def _apply_text_watermark(im, text: str):
@@ -4842,6 +4743,36 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
         return entries, stats, preview
     return new_list, stats, preview
 
+# ============================================================
+# Watermark 正規化（グローバル唯一の定義）
+# ============================================================
+def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+    """
+    入力のゆらぎ（'fully' / 'city' / '1' / True / None など）を
+    保存・配信で使う正規形 'none' / 'fullygoto' / 'gotocity' に統一する。
+
+    受理する主な入力:
+      - 'none' / 'fullygoto' / 'gotocity' → そのまま返す
+      - 'fully' → 'fullygoto'（全面透かし）
+      - 'city'  → 'gotocity'（市ロゴのみ）
+      - 真偽っぽい値:
+          '1', 'true', 'on', 'yes'  → 'fullygoto'
+          '0', 'false', 'off', 'no', '' → 'none'
+      - それ以外/未指定 → wm_on_default が True なら 'fullygoto'、False なら 'none'
+    """
+    c = (str(choice or "")).strip().lower()
+    if c in ("none", "fullygoto", "gotocity"):
+        return c
+    if c in ("1", "true", "on", "yes"):
+        return "fullygoto"
+    if c in ("0", "false", "off", "no", ""):
+        return "none"
+    if c == "fully":
+        return "fullygoto"
+    if c == "city":
+        return "gotocity"
+    return "fullygoto" if wm_on_default else "none"
+
 # =========================
 #  基本I/O
 # =========================
@@ -5358,19 +5289,6 @@ def build_refine_suggestions(question):
     # 返り値の meta に probe も載せる（後方互換）
     return msg, {"areas": areas, "tags": top_tags, "filters": filters, "probe": probe_lines}
 
-def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
-    """
-    UI/旧データの 'fully' / 'city' / '' を正規化して
-    'none' / 'fullygoto' / 'gotocity' に統一する。
-    """
-    c = (choice or "").strip().lower()
-    if c in ("none", "fullygoto", "gotocity"):
-        return c
-    if c == "fully":
-        return "fullygoto"
-    if c == "city":
-        return "gotocity"
-    return "fullygoto" if wm_on_default else "none"
 
 # ---- 画像メタ情報（共通化） ----
 def _image_meta(img_name: str | None):
@@ -5424,22 +5342,6 @@ def admin_entry():
     import os  # ローカルimportで安全に
     import re as _re
     from werkzeug.exceptions import RequestEntityTooLarge  # ★ 追加：except用に確実に定義
-
-    # --- 透かし選択の正規化ヘルパ（この関数内専用・既存に影響なし） ---
-    def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
-        """
-        UI/旧データの 'fully' / 'city' / '' を正規化して
-        'none' / 'fullygoto' / 'gotocity' に統一する。
-        wm_on_default は未指定時の既定（True→fullygoto, False→none）
-        """
-        c = (choice or "").strip().lower()
-        if c in ("none", "fullygoto", "gotocity"):
-            return c
-        if c == "fully":
-            return "fullygoto"
-        if c == "city":
-            return "gotocity"
-        return "fullygoto" if wm_on_default else "none"
 
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
@@ -7492,28 +7394,14 @@ def _format_entry_messages(e: dict):
     # 画像（image_file 優先 / 後方互換で image も見る）
     img_name = (e.get("image_file") or e.get("image") or "").strip()
     if img_name:
-        img_url = ""
         try:
-            # 可能なら絶対URLを生成（LINEは絶対URL推奨）
-            img_url = build_signed_image_url(img_name, wm=True, external=True)
+            # 透かし/署名/プレビューはヘルパーで統一処理
+            img_msg = make_line_image_message(e)  # ← 修正: entry ではなく e を渡す
+            if img_msg:
+                msgs.append(img_msg)
         except Exception:
-            # リクエストコンテキスト外などで失敗した場合のフォールバック
-            try:
-                base = (request.url_root or "").rstrip("/")
-                img_url = f"{base}{MEDIA_URL_PREFIX}/{img_name}" if base else f"{MEDIA_URL_PREFIX}/{img_name}"
-            except Exception:
-                img_url = ""
-
-        if img_url:
-            try:
-                # img_url に wm= が付いていれば最優先、無ければ透かし無し扱いで署名URL化
-                orig_url, prev_url = _line_img_pair_from_url(img_url, None)
-                img_msg = make_line_image_message(entry)  # ← これだけで wm/署名/プレビュー統一
-                if img_msg:
-                    msgs.append(img_msg)
-            except Exception:
-                # LINE SDKの型エラー等は握りつぶしてテキストのみ送る
-                app.logger.exception("failed to build ImageSendMessage")
+            # LINE SDKの型エラー等は握りつぶしてテキストのみ送る
+            app.logger.exception("failed to build ImageSendMessage")
 
     # 本文テキスト（長文は安全分割）
     text = _format_entry_text(e)
