@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}透かし一括生成{% endblock %}
+
+{% block content %}
+<h1>透かし一括生成（none / @Goto City / @fullyGOTO）</h1>
+
+<p>オリジナルから3種の画像を作ります。既存画像を選ぶか、新規にアップロードしてください。</p>
+
+<form method="post" enctype="multipart/form-data" style="margin:14px 0; padding:12px; border:1px solid #eee; border-radius:8px;">
+  <h3>① 既存の画像から作る</h3>
+  <p style="margin:6px 0;">IMAGES_DIR 内の「元画像（__none/__goto/__fullygotoが付いていない）」が並びます。複数選択OK。</p>
+  <div style="max-height:220px; overflow:auto; border:1px solid #eee; padding:8px; border-radius:6px;">
+    {% if existing %}
+      {% for fn in existing %}
+        <label style="display:flex; align-items:center; gap:8px; margin:6px 0;">
+          <input type="checkbox" name="selected_existing" value="{{ fn }}">
+          <img src="{{ url_for('serve_image', filename=fn, wm='none') }}" style="height:46px; width:auto; object-fit:cover; border:1px solid #ddd;">
+          <span style="font-family:monospace;">{{ fn }}</span>
+        </label>
+      {% endfor %}
+    {% else %}
+      <em>対象となる既存画像が見つかりませんでした。</em>
+    {% endif %}
+  </div>
+
+  <h3 style="margin-top:16px;">② 新規アップロードして作る</h3>
+  <input type="file" name="files" multiple accept="image/*">
+
+  <div style="margin-top:10px;">
+    <label><input type="checkbox" name="force" value="1"> 既存の生成物があっても上書きする</label>
+  </div>
+
+  <button type="submit" class="btn btn-primary" style="margin-top:12px;">3種を作成</button>
+</form>
+
+{% if results %}
+  <h2>生成結果</h2>
+  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:14px;">
+    {% for r in results %}
+      <div style="border:1px solid #eee; border-radius:10px; padding:10px;">
+        <div style="font-weight:600; margin-bottom:6px;">{{ r.src }}</div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <div style="flex:1 1 120px;">
+            <div style="font-size:12px;">オリジナル</div>
+            <img src="{{ r.url_src }}" style="width:100%; height:auto; border:1px solid #ddd;">
+            <div><a href="{{ r.url_src }}" target="_blank" rel="noopener">開く</a></div>
+          </div>
+          <div style="flex:1 1 120px;">
+            <div style="font-size:12px;">__none</div>
+            <img src="{{ r.url_none }}" style="width:100%; height:auto; border:1px solid #ddd;">
+            <div><a href="{{ r.url_none }}" target="_blank" rel="noopener">URL</a></div>
+          </div>
+          <div style="flex:1 1 120px;">
+            <div style="font-size:12px;">@Goto City</div>
+            <img src="{{ r.url_goto }}" style="width:100%; height:auto; border:1px solid #ddd;">
+            <div><a href="{{ r.url_goto }}" target="_blank" rel="noopener">URL</a></div>
+          </div>
+          <div style="flex:1 1 120px;">
+            <div style="font-size:12px;">@fullyGOTO</div>
+            <img src="{{ r.url_fully }}" style="width:100%; height:auto; border:1px solid #ddd;">
+            <div><a href="{{ r.url_fully }}" target="_blank" rel="noopener">URL</a></div>
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}
+{% endblock %}
