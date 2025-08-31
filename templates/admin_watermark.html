@@ -33,11 +33,17 @@
     .input{width:100%;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
     .counts{font-size:.9em;color:var(--muted)}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+    /* 右上の戻るボタン用 */
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>透かし一括生成</h1>
+    <div class="topbar">
+      <h1>透かし一括生成</h1>
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+    </div>
 
     <form method="post" enctype="multipart/form-data">
       <!-- 透かし種別の選択 -->
@@ -77,7 +83,7 @@
       <!-- 検索＆一括操作ツールバー -->
       <div class="row tools">
         <div class="grow">
-          <input id="q" class="input" type="search" name="q" placeholder="ファイル名で検索（例: beach, 2024_, DSC_ など）" autocomplete="off">
+          <input id="q" class="input" type="search" name="q" value="{{ q|e }}" placeholder="ファイル名で検索（例: beach, 2024_, DSC_ など）" autocomplete="off">
         </div>
         <button class="btn ghost small" type="button" id="selectVisible">表示中を全選択</button>
         <button class="btn ghost small" type="button" id="clearAll">全選択解除</button>
