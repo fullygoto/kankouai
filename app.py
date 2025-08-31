@@ -71,6 +71,15 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+# 10MB上限（Flaskがリクエストボディで制御）
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB
+
+# 413: サイズ超過時のメッセージ
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(e):
+    flash("ファイルサイズが大きすぎます（最大10MB）。")
+    # 直前のページへ戻す（必要なら '/admin/watermark' に固定でもOK）
+    return redirect(request.referrer or url_for("admin_watermark"))
 
 # 既に前の回答で入れていれば流用されます
 MYMAP_MID = os.getenv("MYMAP_MID", "")
