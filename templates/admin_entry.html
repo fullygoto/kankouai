@@ -492,6 +492,8 @@
         <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
         <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
+        <!-- ▼ 追加：透かし一括生成ページ -->
+        <a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}">[透かし一括生成]</a>
         <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
         <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
