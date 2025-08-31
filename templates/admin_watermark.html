@@ -31,7 +31,6 @@
     .counts{font-size:.9em;color:var(--muted)}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
-    /* 追加：カード内のアクション行 */
     .card-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px}
   </style>
 </head>
@@ -42,8 +41,20 @@
       <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
     </div>
 
+    {% set _order = (order or 'new') if order is defined else 'new' %}
+    {% set picker = (picker or 0) if picker is defined else 0 %}
+
+    {% if picker %}
+      <div class="row flex" style="justify-content:space-between">
+        <div class="muted">ピッカー表示中：チェックした画像を呼び出し元へ返せます。</div>
+        <div class="flex">
+          <button id="applyPick" class="btn">選択を反映して閉じる</button>
+          <button type="button" class="btn ghost" onclick="window.close()">閉じる</button>
+        </div>
+      </div>
+    {% endif %}
+
     <form method="post" enctype="multipart/form-data">
-      <!-- 透かし種別の選択 -->
       {% set wm_current = (wm or 'all') if wm is defined else 'all' %}
       <fieldset class="row">
         <legend>出力する透かし</legend>
@@ -56,7 +67,6 @@
         <div class="small muted">※ 選んだ種類のみ生成します。「全部」を選ぶと3種類すべて生成します。</div>
       </fieldset>
 
-      <!-- 新規アップロード -->
       <div class="row">
         <label>新規アップロード（複数可）：</label><br>
         <input type="file" name="files" accept="image/jpeg,image/png,image/webp" multiple>
@@ -79,23 +89,26 @@
 
       <h2 style="margin:0 0 8px">既存ファイルから選ぶ</h2>
 
-      <!-- 検索＆一括操作ツールバー -->
       <div class="row tools">
         <div class="grow">
           <input id="q" class="input" type="search" name="q" value="{{ q|e }}" placeholder="ファイル名で検索（例: beach, 2024_, DSC_ など）" autocomplete="off">
         </div>
+        <label class="flex">
+          並び順：
+          <select id="order" class="input" style="width:auto">
+            <option value="new"  {{ 'selected' if _order=='new'  else '' }}>新しい順</option>
+            <option value="name" {{ 'selected' if _order=='name' else '' }}>名前順</option>
+          </select>
+        </label>
         <button class="btn ghost small" type="button" id="selectVisible">表示中を全選択</button>
         <button class="btn ghost small" type="button" id="clearAll">全選択解除</button>
         <span class="counts"><span id="shownCount">0</span> / <span id="totalCount">0</span> 表示・<span id="selectedCount">0</span> 件選択中</span>
       </div>
 
-      <!-- 既存ファイルグリッド -->
       <div id="grid" class="grid" data-total="{{ existing|length if existing else 0 }}">
         {% if existing and existing|length %}
           {% for fn in existing %}
-            {# 編集先の安全リンク：admin_watermark_one が無ければ /admin/watermark?q=.. にフォールバック #}
-            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or (url_for('admin_watermark') ~ '?q=' ~ (fn|urlencode))) %}
-            {# 削除の安全リンク：admin_media_delete が無ければ固定パスへ #}
+            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or (url_for('admin_watermark') ~ '?src=' ~ (fn|urlencode))) %}
             {% set _del_action = (safe_url_for('admin_media_delete') or '/admin/media/delete') %}
 
             <div class="card" data-name="{{ fn|lower }}">
@@ -104,15 +117,11 @@
                 <span class="name">{{ fn }}</span>
               </label>
               <div class="small muted">プレビュー</div>
-              <img src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
+              <img class="thumb" src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
 
-              <!-- 追加：編集／削除アクション -->
               <div class="card-actions">
                 <a class="btn small" href="{{ _edit_href }}">編集</a>
-                <form method="post"
-                      action="{{ _del_action }}"
-                      onsubmit="return confirm('この画像を削除します。よろしいですか？');"
-                      style="display:inline;">
+                <form method="post" action="{{ _del_action }}" onsubmit="return confirm('この画像を削除します。よろしいですか？');" style="display:inline;">
                   <input type="hidden" name="filename" value="{{ fn }}">
                   <button class="btn ghost small" type="submit">削除</button>
                 </form>
@@ -162,6 +171,7 @@
   <script>
     (function(){
       const q = document.getElementById('q');
+      const orderSel = document.getElementById('order');
       const grid = document.getElementById('grid');
       const cards = Array.from(grid.querySelectorAll('.card'));
       const totalCount = document.getElementById('totalCount');
@@ -169,6 +179,7 @@
       const selectedCount = document.getElementById('selectedCount');
       const btnSelectVisible = document.getElementById('selectVisible');
       const btnClearAll = document.getElementById('clearAll');
+      const picker = {{ 1 if picker else 0 }};
 
       function updateCounts(){
         totalCount.textContent = cards.length;
@@ -206,12 +217,41 @@
         updateCounts();
       }
 
+      grid.addEventListener('click', (e)=>{
+        const img = e.target.closest('img.thumb');
+        if(!img) return;
+        const card = e.target.closest('.card');
+        const cb = card && card.querySelector('input[name="selected_existing"]');
+        if(cb){ cb.checked = !cb.checked; updateCounts(); }
+      });
+
       btnSelectVisible.addEventListener('click', ()=>selectVisible(true));
       btnClearAll.addEventListener('click',   ()=>selectVisible(false));
       q.addEventListener('input', filter);
 
+      orderSel && orderSel.addEventListener('change', ()=>{
+        const params = new URLSearchParams(window.location.search);
+        params.set('order', orderSel.value);
+        const qv = (q.value||'').trim();
+        if(qv) params.set('q', qv); else params.delete('q');
+        if(picker) params.set('picker', '1'); else params.delete('picker');
+        window.location.search = params.toString();
+      });
+
+      const applyPick = document.getElementById('applyPick');
+      if(applyPick){
+        applyPick.addEventListener('click', (e)=>{
+          e.preventDefault();
+          const files = Array.from(document.querySelectorAll('input[name="selected_existing"]:checked')).map(cb=>cb.value);
+          const base = '{{ url_for('admin_media_img', filename='') }}';
+          const urls = files.map(fn => base + encodeURIComponent(fn));
+          try{ window.opener && window.opener.postMessage({ type:'media-pick', files, urls }, '*'); }catch(_){/* ignore */}
+          window.close();
+        });
+      }
+
       bindCheckCount();
-      filter(); // initialize
+      filter();
     })();
   </script>
 </body>
