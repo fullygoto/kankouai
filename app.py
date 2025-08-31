@@ -36,6 +36,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from openai import OpenAI
 
 # --- Pillow / PIL ---
+import warnings  # ← 追加！
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
@@ -49,6 +50,12 @@ except AttributeError:
 
 # 破損気味な画像でも読み込むための安全策（任意）
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# DecompressionBomb を警告→例外に（任意）
+try:
+    warnings.simplefilter("error", Image.DecompressionBombWarning)
+except Exception:
+    pass
 
 # === LINE Bot ===
 from linebot import LineBotApi, WebhookHandler
