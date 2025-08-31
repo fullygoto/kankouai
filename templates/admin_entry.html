@@ -700,9 +700,19 @@
 
         <!-- ▼ 画像ピッカー連携バー（フォルダ→画像一覧→選択） -->
         <div class="pickbar">
-            <button type="button" class="btn" id="btn_open_folder_picker">フォルダから選ぶ</button>
-            <a class="btn ghost" href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">透かし一括作成を開く</a>
-            <span class="mini-note">※「フォルダから選ぶ」＝ 既存フォルダを選択 → 中の画像（登録日の新しい順）からワンクリックで選択できます。</span>
+        <!-- フォルダ一覧 → ピッカーへ（新規タブ） -->
+        <a class="btn" href="{{ url_for('admin_media_folders') }}" target="_blank" rel="noopener">
+            フォルダから選ぶ
+        </a>
+
+        <!-- 透かし一括生成（ピッカー直行：新しい順） -->
+        <a class="btn ghost"
+            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            target="_blank" rel="noopener">
+            透かし一括作成を開く
+        </a>
+
+        <span class="mini-note">※「フォルダから選ぶ」＝ 既存フォルダを選択 → 中の画像（登録日の新しい順）からワンクリックで選択できます。</span>
         </div>
 
         <script>
@@ -905,9 +915,17 @@
 
         <!-- 画像ピッカーへ -->
         <div class="pickbar">
-            <button type="button" class="btn" id="btn_open_folder_picker_s">フォルダから選ぶ</button>
-            <a class="btn ghost" href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">透かし一括作成を開く</a>
-            <span class="mini-note">※ 既存フォルダ → 画像（新しい順）から選べます。</span>
+        <a class="btn" href="{{ url_for('admin_media_folders') }}" target="_blank" rel="noopener">
+            フォルダから選ぶ
+        </a>
+
+        <a class="btn ghost"
+            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            target="_blank" rel="noopener">
+            透かし一括作成を開く
+        </a>
+
+        <span class="mini-note">※ 既存フォルダ → 画像（新しい順）から選べます。</span>
         </div>
 
         <script>
