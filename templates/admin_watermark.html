@@ -32,6 +32,7 @@
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
     .card-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px}
+    .crumb{font-size:.9em;color:#567}
   </style>
 </head>
 <body>
@@ -43,6 +44,8 @@
 
     {% set _order = (order or 'new') if order is defined else 'new' %}
     {% set picker = (picker or 0) if picker is defined else 0 %}
+    {% set _subdir = (subdir or '') if subdir is defined else '' %}
+    {% if _subdir %}<div class="crumb">フォルダ: <strong>{{ _subdir }}</strong></div>{% endif %}
 
     {% if picker %}
       <div class="row flex" style="justify-content:space-between">
@@ -54,7 +57,7 @@
       </div>
     {% endif %}
 
-    <form method="post" enctype="multipart/form-data">
+    <form id="mainForm" method="post" enctype="multipart/form-data">
       {% set wm_current = (wm or 'all') if wm is defined else 'all' %}
       <fieldset class="row">
         <legend>出力する透かし</legend>
@@ -108,9 +111,7 @@
       <div id="grid" class="grid" data-total="{{ existing|length if existing else 0 }}">
         {% if existing and existing|length %}
           {% for fn in existing %}
-            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or (url_for('admin_watermark') ~ '?src=' ~ (fn|urlencode))) %}
-            {% set _del_action = (safe_url_for('admin_media_delete') or '/admin/media/delete') %}
-
+            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or url_for('admin_watermark_one', src=fn)) %}
             <div class="card" data-name="{{ fn|lower }}">
               <label class="sel">
                 <input type="checkbox" name="selected_existing" value="{{ fn }}">
@@ -118,13 +119,10 @@
               </label>
               <div class="small muted">プレビュー</div>
               <img class="thumb" src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
-
               <div class="card-actions">
                 <a class="btn small" href="{{ _edit_href }}">編集</a>
-                <form method="post" action="{{ _del_action }}" onsubmit="return confirm('この画像を削除します。よろしいですか？');" style="display:inline;">
-                  <input type="hidden" name="filename" value="{{ fn }}">
-                  <button class="btn ghost small" type="submit">削除</button>
-                </form>
+                <!-- ★ 削除はネストフォームをやめて外部フォームを使う -->
+                <button class="btn ghost small" type="button" data-del="{{ fn }}">削除</button>
               </div>
             </div>
           {% endfor %}
@@ -132,6 +130,11 @@
           <div class="muted">対象画像が見つかりません。</div>
         {% endif %}
       </div>
+    </form>
+
+    <!-- ★ 削除専用フォーム：ページ末尾に1つだけ置く -->
+    <form id="delForm" method="post" action="{{ safe_url_for('admin_media_delete') or url_for('admin_media_delete') }}" style="display:none">
+      <input type="hidden" name="filename" id="delName">
     </form>
 
     {% if results and results|length %}
@@ -143,17 +146,14 @@
             <div class="small muted">元画像</div>
             <a href="{{ r.url_src }}" target="_blank" rel="noopener"><img src="{{ r.url_src }}" loading="lazy" alt="src"></a>
             <div class="name">{{ r.src }}</div>
-
             {% if r.url_none %}
               <div class="small muted" style="margin-top:10px">透かし：なし（__none）</div>
               <a href="{{ r.url_none }}" target="_blank" rel="noopener"><img src="{{ r.url_none }}" loading="lazy" alt="none"></a>
             {% endif %}
-
             {% if r.url_goto %}
               <div class="small muted" style="margin-top:10px">透かし：＠Goto City（__goto）</div>
               <a href="{{ r.url_goto }}" target="_blank" rel="noopener"><img src="{{ r.url_goto }}" loading="lazy" alt="goto"></a>
             {% endif %}
-
             {% if r.url_fully %}
               <div class="small muted" style="margin-top:10px">透かし：＠fullyGOTO（__fullygoto）</div>
               <a href="{{ r.url_fully }}" target="_blank" rel="noopener"><img src="{{ r.url_fully }}" loading="lazy" alt="fully"></a>
@@ -180,31 +180,24 @@
       const btnSelectVisible = document.getElementById('selectVisible');
       const btnClearAll = document.getElementById('clearAll');
       const picker = {{ 1 if picker else 0 }};
+      const subdir = "{{ _subdir }}";
 
       function updateCounts(){
-        totalCount.textContent = cards.length;
+        if(totalCount) totalCount.textContent = cards.length;
         let shown = 0;
         for(const c of cards){ if(c.style.display !== 'none'){ shown++; } }
-        shownCount.textContent = shown;
-        selectedCount.textContent = grid.querySelectorAll('input[name="selected_existing"]:checked').length;
+        if(shownCount) shownCount.textContent = shown;
+        if(selectedCount) selectedCount.textContent = grid.querySelectorAll('input[name="selected_existing"]:checked').length;
       }
 
       function filter(){
-        const term = (q.value || '').trim().toLowerCase();
+        const term = (q && q.value || '').trim().toLowerCase();
         for(const c of cards){
           const name = c.dataset.name || '';
           const match = !term || name.includes(term);
           c.style.display = match ? '' : 'none';
         }
         updateCounts();
-      }
-
-      function bindCheckCount(){
-        grid.addEventListener('change', (e)=>{
-          if(e.target && e.target.name === 'selected_existing'){
-            selectedCount.textContent = grid.querySelectorAll('input[name="selected_existing"]:checked').length;
-          }
-        });
       }
 
       function selectVisible(v=true){
@@ -225,18 +218,21 @@
         if(cb){ cb.checked = !cb.checked; updateCounts(); }
       });
 
-      btnSelectVisible.addEventListener('click', ()=>selectVisible(true));
-      btnClearAll.addEventListener('click',   ()=>selectVisible(false));
-      q.addEventListener('input', filter);
+      if(btnSelectVisible) btnSelectVisible.addEventListener('click', ()=>selectVisible(true));
+      if(btnClearAll) btnClearAll.addEventListener('click',   ()=>selectVisible(false));
+      if(q) q.addEventListener('input', filter);
 
-      orderSel && orderSel.addEventListener('change', ()=>{
-        const params = new URLSearchParams(window.location.search);
-        params.set('order', orderSel.value);
-        const qv = (q.value||'').trim();
-        if(qv) params.set('q', qv); else params.delete('q');
-        if(picker) params.set('picker', '1'); else params.delete('picker');
-        window.location.search = params.toString();
-      });
+      if(orderSel){
+        orderSel.addEventListener('change', ()=>{
+          const params = new URLSearchParams(window.location.search);
+          params.set('order', orderSel.value);
+          const qv = (q && q.value||'').trim();
+          if(qv) params.set('q', qv); else params.delete('q');
+          if(picker) params.set('picker', '1'); else params.delete('picker');
+          if(subdir) params.set('subdir', subdir); else params.delete('subdir');
+          window.location.search = params.toString();
+        });
+      }
 
       const applyPick = document.getElementById('applyPick');
       if(applyPick){
@@ -250,7 +246,19 @@
         });
       }
 
-      bindCheckCount();
+      // ★ 削除：隠しフォームを使ってPOST
+      const delForm = document.getElementById('delForm');
+      const delName = document.getElementById('delName');
+      grid.addEventListener('click', (e)=>{
+        const btn = e.target.closest('[data-del]');
+        if(!btn) return;
+        const name = btn.getAttribute('data-del');
+        if(!name) return;
+        if(!confirm('この画像を削除します。よろしいですか？')) return;
+        delName.value = name;
+        delForm.submit();
+      });
+
       filter();
     })();
   </script>

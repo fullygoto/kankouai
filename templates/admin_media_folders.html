@@ -24,12 +24,14 @@
 <div class="container">
   <div class="topbar">
     <h1>画像フォルダを選択</h1>
-    <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+      <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new') }}" target="_blank" rel="noopener">全体から選ぶ（ピッカー）</a>
+    </div>
   </div>
 
-  {% set picker = (request.args.get('picker') if request is defined else (picker if picker is defined else 0)) %}
   <div class="tools">
-    <input id="q" class="input" type="search" placeholder="フォルダ名で絞り込み（例: 2024, summer, beach）">
+    <input id="q" class="input" type="search" placeholder="フォルダ名で絞り込み（例: 2024, summer, beach）" autocomplete="off">
     <span class="muted"><span id="shown">0</span> / <span id="total">{{ folders|length if folders else 0 }}</span> 表示</span>
   </div>
 
@@ -40,7 +42,10 @@
           <div class="name">{{ f }}</div>
           <div class="muted">{{ (folder_counts[f] ~ ' 枚') if folder_counts is defined and f in folder_counts else '' }}</div>
           <div style="margin-top:8px">
-            <a class="btn" href="{{ url_for('admin_media_browse', folder=f, picker=picker or 0) }}">このフォルダを開く</a>
+            <!-- ★ ここをピッカーに直行させる -->
+            <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new', subdir=f) }}" target="_blank" rel="noopener">
+              このフォルダから選ぶ（ピッカー）
+            </a>
           </div>
         </div>
       {% endfor %}
