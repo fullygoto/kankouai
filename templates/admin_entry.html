@@ -46,26 +46,30 @@
             .filterbar input[type=text], .filterbar select {min-width:130px}
         }
     </style>
+
     <script>
     // ===== 共通UI =====
     function toggleSection(id, enable){
-      const sec = document.getElementById(id);
-      if(!sec) return;
-      sec.style.display = enable ? 'block' : 'none';
-      sec.querySelectorAll('input,select,textarea').forEach(el => { el.disabled = !enable; });
+        const sec = document.getElementById(id);
+        if(!sec) return;
+        sec.style.display = enable ? 'block' : 'none';
+        sec.querySelectorAll('input,select,textarea').forEach(el => {
+            el.disabled = !enable;
+        });
     }
+
     function addExtraRow(targetId) {
         const wrap = document.getElementById(targetId);
         const div = document.createElement('div');
         div.className = 'extra-row';
         div.innerHTML = `
-          <input name="extras_key[]" placeholder="項目">
-          ＝
-          <input name="extras_val[]" placeholder="内容">
-          <button type="button" onclick="this.parentNode.remove()">－</button>
+            <input name="extras_key[]" placeholder="項目"> ＝
+            <input name="extras_val[]" placeholder="内容">
+            <button type="button" onclick="this.parentNode.remove()">－</button>
         `;
         wrap.appendChild(div);
     }
+
     function validateAreas(formId) {
         const form = document.getElementById(formId);
         const checks = form.querySelectorAll('input[name="areas"]:checked');
@@ -76,6 +80,89 @@
         return true;
     }
 
+    // ===== 画像メタ（サイズ & 容量表示） =====
+    function _formatBytes(bytes){
+        if(!isFinite(bytes) || bytes <= 0) return '';
+        const units = ['B','KB','MB','GB','TB'];
+        let i = 0, n = bytes;
+        while(n >= 1024 && i < units.length - 1){
+            n /= 1024; i++;
+        }
+        return (n >= 100 ? Math.round(n) : (n >= 10 ? n.toFixed(1) : n.toFixed(2))) + ' ' + units[i];
+    }
+
+    async function _fetchContentLength(url){
+        try{
+            const res = await fetch(url, {method:'HEAD', credentials:'same-origin'});
+            const len = res.headers.get('Content-Length') || res.headers.get('content-length');
+            if(len) return parseInt(len, 10);
+        }catch(_e){}
+        return null;
+    }
+
+    function _ensureMetaHost(img){
+        let host = img.nextElementSibling;
+        if(!(host && host.classList.contains('imgmeta'))){
+            host = document.createElement('div');
+            host.className = 'imgmeta';
+            img.parentNode.insertBefore(host, img.nextSibling);
+        }
+        return host;
+    }
+
+    async function annotateImageMeta(img){
+        if(!img) return;
+        const host = _ensureMetaHost(img);
+        host.textContent = '画像情報を取得中…';
+
+        const fullUrl = img.getAttribute('data-fullsrc') || img.currentSrc || img.src;
+
+        // 1) 容量（HEAD）
+        const contentLength = await _fetchContentLength(fullUrl);
+        const sizeText = contentLength ? _formatBytes(contentLength) : '';
+
+        // 2) ピクセルサイズ
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if((!w || !h) || img.getAttribute('data-use-full') === '1'){
+            try{
+                await new Promise((resolve, reject)=>{
+                    const probe = new Image();
+                    probe.decoding = 'async';
+                    probe.referrerPolicy = 'no-referrer';
+                    probe.onload = ()=>{
+                        w = probe.naturalWidth; h = probe.naturalHeight;
+                        resolve();
+                    };
+                    probe.onerror = reject;
+                    probe.src = fullUrl + (fullUrl.includes('?') ? '&' : '?') + '_ts=' + Date.now();
+                });
+            }catch(_e){}
+        }
+        const dimsText = (w && h) ? (w + '×' + h + ' px') : '';
+
+        // 3) 表示
+        const out = [dimsText, sizeText].filter(Boolean).join(' ・ ');
+        host.textContent = out || '画像情報なし';
+    }
+
+    function annotateAllImages(){
+        // フォームプレビュー
+        document.querySelectorAll('#admin-image-preview-t, #admin-image-preview-s').forEach(img=>{
+            if(!img.getAttribute('data-fullsrc')) img.setAttribute('data-fullsrc', img.currentSrc || img.src);
+            annotateImageMeta(img);
+        });
+        // 一覧カードのサムネ
+        document.querySelectorAll('.entry-card a[target="_blank"] > img.thumb, .entry-card a[target="_blank"] > img').forEach(img=>{
+            const anchor = (img.parentElement && img.parentElement.tagName === 'A') ? img.parentElement : null;
+            if(anchor){
+                img.classList.add('thumb');
+                img.setAttribute('data-fullsrc', anchor.getAttribute('href') || '');
+                img.setAttribute('data-use-full', '1');
+                annotateImageMeta(img);
+            }
+        });
+    }
+
     // ====== フィルタ & ソート & ページネーション ======
     let PAGING = {page:1, size:20, totalFiltered:0, totalAll:0};
     let GEO = {active:false, lat:null, lng:null, radiusKm:3};
@@ -83,283 +170,304 @@
     function _norm(s){ return (s||'').toString().toLowerCase(); }
 
     function haversine(lat1, lon1, lat2, lon2){
-      const R = 6371; // km
-      const toRad = d => d * Math.PI / 180;
-      const dLat = toRad(lat2 - lat1);
-      const dLon = toRad(lon2 - lon1);
-      const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      return R * c;
+        const R = 6371;
+        const toRad = d => d * Math.PI / 180;
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
     }
 
     function formatDistance(km){
-      if(!isFinite(km)) return '';
-      if(km < 1) return `${Math.round(km*1000)} m`;
-      if(km < 10) return `${km.toFixed(2)} km`;
-      return `${km.toFixed(1)} km`;
+        if(!isFinite(km)) return '';
+        if(km < 1) return `${Math.round(km*1000)} m`;
+        if(km < 10) return `${km.toFixed(2)} km`;
+        return `${km.toFixed(1)} km`;
     }
 
     function startNearby(){
-      if(!navigator.geolocation){
-        alert('この端末は位置情報に対応していません。');
-        return;
-      }
-      const r = parseFloat(document.getElementById('near_radius').value || '3');
-      navigator.geolocation.getCurrentPosition(pos=>{
-        GEO.active = true;
-        GEO.lat = pos.coords.latitude;
-        GEO.lng = pos.coords.longitude;
-        GEO.radiusKm = r;
-        filterCards(); // 現在地で即絞り込み
-      }, err=>{
-        alert('現在地を取得できませんでした: ' + err.message);
-      }, {enableHighAccuracy:true, timeout:10000, maximumAge:30000});
+        if(!navigator.geolocation){
+            alert('この端末は位置情報に対応していません。');
+            return;
+        }
+        const r = parseFloat(document.getElementById('near_radius').value || '3');
+        navigator.geolocation.getCurrentPosition(pos=>{
+            GEO.active = true;
+            GEO.lat = pos.coords.latitude;
+            GEO.lng = pos.coords.longitude;
+            GEO.radiusKm = r;
+            filterCards(); // 現在地で即絞り込み
+        }, err=>{
+            alert('現在地を取得できませんでした: ' + err.message);
+        }, {enableHighAccuracy:true, timeout:10000, maximumAge:30000});
     }
 
     function clearNearby(){
-      GEO = {active:false, lat:null, lng:null, radiusKm:3};
-      document.querySelectorAll('.dist-badge').forEach(n=>n.remove());
-      filterCards(false);
+        GEO = {active:false, lat:null, lng:null, radiusKm:3};
+        document.querySelectorAll('.dist-badge').forEach(n=>n.remove());
+        filterCards(false);
     }
 
     function updateDistanceBadges(){
-      const cards = Array.from(document.querySelectorAll('.entry-card'));
-      cards.forEach(card=>{
-        const old = card.querySelector('.dist-badge');
-        if(old) old.remove();
-        if(!(GEO.active && card.style.display !== 'none')) return;
-        const d = parseFloat(card.dataset.distance || 'NaN');
-        if(!isFinite(d)) return;
-        const host = card.querySelector('.entry-actions')?.parentNode || card;
-        const badge = document.createElement('div');
-        badge.className = 'muted dist-badge';
-        badge.style.margin = '6px 0';
-        badge.textContent = '現在地から約 ' + formatDistance(d);
-        const actions = card.querySelector('.entry-actions');
-        if(actions) host.insertBefore(badge, actions);
-        else host.appendChild(badge);
-      });
+        const cards = Array.from(document.querySelectorAll('.entry-card'));
+        cards.forEach(card=>{
+            const old = card.querySelector('.dist-badge');
+            if(old) old.remove();
+            if(!(GEO.active && card.style.display !== 'none')) return;
+            const d = parseFloat(card.dataset.distance || 'NaN');
+            if(!isFinite(d)) return;
+            const host = card.querySelector('.entry-actions')?.parentNode || card;
+            const badge = document.createElement('div');
+            badge.className = 'muted dist-badge';
+            badge.style.margin = '6px 0';
+            badge.textContent = '現在地から約 ' + formatDistance(d);
+            const actions = card.querySelector('.entry-actions');
+            if(actions) host.insertBefore(badge, actions);
+            else host.appendChild(badge);
+        });
     }
 
     function filterCards(resetPage=true){
-      const q = _norm(document.getElementById('f_q').value);
-      const cat = document.getElementById('f_cat').value;
-      const area = document.getElementById('f_area').value;
-      const tagsRaw = document.getElementById('f_tag').value.trim();
-      const sort = document.getElementById('f_sort').value;
-      const requireTags = tagsRaw ? tagsRaw.split(',').map(s=>s.trim()).filter(Boolean).map(_norm) : [];
+        const q = _norm(document.getElementById('f_q').value);
+        const cat = document.getElementById('f_cat').value;
+        const area = document.getElementById('f_area').value;
+        const tagsRaw = document.getElementById('f_tag').value.trim();
+        const sort = document.getElementById('f_sort').value;
+        const requireTags = tagsRaw ? tagsRaw.split(',').map(s=>s.trim()).filter(Boolean).map(_norm) : [];
+        const list = Array.from(document.querySelectorAll('.entry-card'));
+        let filtered = [];
 
-      const list = Array.from(document.querySelectorAll('.entry-card'));
-      let filtered = [];
-
-      // 絞り込み
-      list.forEach(card=>{
-        const txt = card.dataset.text;
-        const dcat = card.dataset.category;
-        const dtags = (card.dataset.tags||'').split(',').map(_norm);
-        const dareas = (card.dataset.areas||'').split(',').map(s=>s.trim());
-        let ok = true;
-        if(q && !txt.includes(q)) ok = false;
-        if(cat && dcat !== cat) ok = false;
-        if(area && !dareas.includes(area)) ok = false;
-        if(requireTags.length){
-          for(const t of requireTags){
-            if(!dtags.includes(t)){ ok = false; break; }
-          }
-        }
-        card.style.display = 'none';
-        if(ok) filtered.push(card);
-      });
-
-      // 現在地フィルタ
-      if(GEO.active && GEO.lat!=null && GEO.lng!=null){
-        const picked = [];
-        filtered.forEach(card=>{
-          const la = parseFloat(card.dataset.lat || 'NaN');
-          const lo = parseFloat(card.dataset.lng || 'NaN');
-          if(!isFinite(la) || !isFinite(lo)) return;
-          const d = haversine(GEO.lat, GEO.lng, la, lo);
-          card.dataset.distance = d.toFixed(6);
-          if(d <= GEO.radiusKm) picked.push(card);
+        // 絞り込み
+        list.forEach(card=>{
+            const txt = card.dataset.text;
+            const dcat = card.dataset.category;
+            const dtags = (card.dataset.tags||'').split(',').map(_norm);
+            const dareas = (card.dataset.areas||'').split(',').map(s=>s.trim());
+            let ok = true;
+            if(q && !txt.includes(q)) ok = false;
+            if(cat && dcat !== cat) ok = false;
+            if(area && !dareas.includes(area)) ok = false;
+            if(requireTags.length){
+                for(const t of requireTags){
+                    if(!dtags.includes(t)){ ok = false; break; }
+                }
+            }
+            card.style.display = 'none';
+            if(ok) filtered.push(card);
         });
-        filtered = picked;
-      }else{
-        filtered.forEach(card=>{ delete card.dataset.distance; });
-      }
 
-      // 並び替え
-      filtered.sort((a,b)=>{
-        if(sort==='title_asc')  return a.dataset.title.localeCompare(b.dataset.title, 'ja');
-        if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
-        if(sort==='cat_asc'){
-          const c = a.dataset.category.localeCompare(b.dataset.category, 'ja');
-          if(c!==0) return c;
-          return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+        // 現在地フィルタ
+        if(GEO.active && GEO.lat!=null && GEO.lng!=null){
+            const picked = [];
+            filtered.forEach(card=>{
+                const la = parseFloat(card.dataset.lat || 'NaN');
+                const lo = parseFloat(card.dataset.lng || 'NaN');
+                if(!isFinite(la) || !isFinite(lo)) return;
+                const d = haversine(GEO.lat, GEO.lng, la, lo);
+                card.dataset.distance = d.toFixed(6);
+                if(d <= GEO.radiusKm) picked.push(card);
+            });
+            filtered = picked;
+        }else{
+            filtered.forEach(card=>{ delete card.dataset.distance; });
         }
-        if(sort==='cat_desc'){
-          const c = b.dataset.category.localeCompare(a.dataset.category, 'ja');
-          if(c!==0) return c;
-          return a.dataset.title.localeCompare(b.dataset.title, 'ja');
-        }
-        if(sort==='dist_asc'){
-          const da = parseFloat(a.dataset.distance || '1e9');
-          const db = parseFloat(b.dataset.distance || '1e9');
-          return da - db;
-        }
-        return 0;
-      });
 
-      // 件数更新
-      PAGING.totalFiltered = filtered.length;
-      PAGING.totalAll = list.length;
-      if(resetPage) PAGING.page = 1;
-      applyPagination(filtered);
-      updateDistanceBadges();
+        // 並び替え
+        filtered.sort((a,b)=>{
+            if(sort==='title_asc') return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+            if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
+            if(sort==='cat_asc'){
+                const c = a.dataset.category.localeCompare(b.dataset.category, 'ja');
+                if(c!==0) return c;
+                return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+            }
+            if(sort==='cat_desc'){
+                const c = b.dataset.category.localeCompare(a.dataset.category, 'ja');
+                if(c!==0) return c;
+                return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+            }
+            if(sort==='dist_asc'){
+                const da = parseFloat(a.dataset.distance || '1e9');
+                const db = parseFloat(b.dataset.distance || '1e9');
+                return da - db;
+            }
+            return 0;
+        });
+
+        // 件数更新
+        PAGING.totalFiltered = filtered.length;
+        PAGING.totalAll = list.length;
+        if(resetPage) PAGING.page = 1;
+
+        applyPagination(filtered);
+        updateDistanceBadges();
+
+        // 見えているカードのサムネを再注釈
+        document.querySelectorAll('.entry-card').forEach(card=>{
+            if(card.style.display !== 'none'){
+                const img = card.querySelector('a[target="_blank"] > img.thumb, a[target="_blank"] > img');
+                if(img) annotateImageMeta(img);
+            }
+        });
     }
 
     function applyPagination(filtered){
-      const size = PAGING.size;
-      const totalPages = Math.max(1, Math.ceil((filtered.length || 0) / size));
-      if(PAGING.page > totalPages) PAGING.page = totalPages;
-      if(PAGING.page < 1) PAGING.page = 1;
-      const start = (PAGING.page - 1) * size;
-      const end = Math.min(start + size, filtered.length);
-
-      for(let i=0;i<filtered.length;i++){
-        filtered[i].style.display = (i>=start && i<end) ? '' : 'none';
-      }
-
-      document.getElementById('f_count').textContent = PAGING.totalFiltered;
-      document.getElementById('f_total').textContent = PAGING.totalAll;
-      const info = `ページ ${PAGING.page} / ${totalPages}（1ページ ${size}件）`;
-      document.querySelectorAll('.pager .info').forEach(el=>el.textContent = info);
-
-      document.querySelectorAll('.pager').forEach(pg=>{
-        pg.querySelector('.prev').disabled = (PAGING.page<=1);
-        pg.querySelector('.next').disabled = (PAGING.page>=totalPages);
-        pg.querySelector('.first').disabled = (PAGING.page<=1);
-        pg.querySelector('.last').disabled = (PAGING.page>=totalPages);
-      });
+        const size = PAGING.size;
+        const totalPages = Math.max(1, Math.ceil((filtered.length || 0) / size));
+        if(PAGING.page > totalPages) PAGING.page = totalPages;
+        if(PAGING.page < 1) PAGING.page = 1;
+        const start = (PAGING.page - 1) * size;
+        const end = Math.min(start + size, filtered.length);
+        for(let i=0;i<filtered.length;i++){
+            filtered[i].style.display = (i>=start && i<end) ? '' : 'none';
+        }
+        document.getElementById('f_count').textContent = PAGING.totalFiltered;
+        document.getElementById('f_total').textContent = PAGING.totalAll;
+        const info = `ページ ${PAGING.page} / ${totalPages}（1ページ ${size}件）`;
+        document.querySelectorAll('.pager .info').forEach(el=>el.textContent = info);
+        document.querySelectorAll('.pager').forEach(pg=>{
+            pg.querySelector('.prev').disabled = (PAGING.page<=1);
+            pg.querySelector('.next').disabled = (PAGING.page>=totalPages);
+            pg.querySelector('.first').disabled = (PAGING.page<=1);
+            pg.querySelector('.last').disabled = (PAGING.page>=totalPages);
+        });
     }
 
     function resetFilters(){
-      document.getElementById('f_q').value='';
-      document.getElementById('f_cat').value='';
-      document.getElementById('f_area').value='';
-      document.getElementById('f_tag').value='';
-      document.getElementById('f_sort').value='title_asc';
-      clearNearby();
-      PAGING.page = 1;
-      filterCards(false);
+        document.getElementById('f_q').value='';
+        document.getElementById('f_cat').value='';
+        document.getElementById('f_area').value='';
+        document.getElementById('f_tag').value='';
+        document.getElementById('f_sort').value='title_asc';
+        clearNearby();
+        PAGING.page = 1;
+        filterCards(false);
     }
 
     function onChangePageSize(sel){
-      PAGING.size = parseInt(sel.value || '20', 10);
-      PAGING.page = 1;
-      filterCards(false);
+        PAGING.size = parseInt(sel.value || '20', 10);
+        PAGING.page = 1;
+        filterCards(false);
     }
 
     function gotoPage(which){
-      if(which==='first') PAGING.page = 1;
-      else if(which==='prev') PAGING.page -= 1;
-      else if(which==='next') PAGING.page += 1;
-      else if(which==='last'){
-        const size = PAGING.size;
-        const totalPages = Math.max(1, Math.ceil(PAGING.totalFiltered / size));
-        PAGING.page = totalPages;
-      }
-      filterCards(false);
+        if(which==='first') PAGING.page = 1;
+        else if(which==='prev') PAGING.page -= 1;
+        else if(which==='next') PAGING.page += 1;
+        else if(which==='last'){
+            const size = PAGING.size;
+            const totalPages = Math.max(1, Math.ceil(PAGING.totalFiltered / size));
+            PAGING.page = totalPages;
+        }
+        filterCards(false);
     }
 
     // ==== 透かしプレビュー再署名（編集フォーム用） ====
     async function _signPreview(filename, wm){
-      if(!filename) return null;
-      try{
-        const qs = new URLSearchParams({ filename, wm });
-        const res = await fetch(`/admin/_sign_image?${qs.toString()}`, { credentials: 'same-origin' });
-        const data = await res.json();
-        if(data && data.ok && data.url) return data.url;
-      }catch(e){ console.warn('sign error', e); }
-      return null;
+        if(!filename) return null;
+        try{
+            const qs = new URLSearchParams({ filename, wm });
+            const res = await fetch(`/admin/_sign_image?${qs.toString()}`, { credentials: 'same-origin' });
+            const data = await res.json();
+            if(data && data.ok && data.url) return data.url;
+        }catch(e){
+            console.warn('sign error', e);
+        }
+        return null;
     }
 
     // ラジオ名分離 + hidden 同期（観光=t, 店舗=s）
     function _bindWmRadios(section){
-      const rootId  = section==='t' ? 'form_tourism' : 'form_shop';
-      const blockId = section==='t' ? 'wm-block-t'   : 'wm-block-s';
-      const imgId   = section==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s';
-      const radioName = section==='t' ? 'wm_choice_t' : 'wm_choice_s';
+        const rootId = section==='t' ? 'form_tourism' : 'form_shop';
+        const blockId = section==='t' ? 'wm-block-t' : 'wm-block-s';
+        const imgId = section==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s';
+        const radioName = section==='t' ? 'wm_choice_t' : 'wm_choice_s';
 
-      const root = document.getElementById(rootId);
-      const block = document.getElementById(blockId);
-      const img = document.getElementById(imgId);
-      const master = document.getElementById('wm_choice_master');
-      if(!root || !master) return;
+        const root = document.getElementById(rootId);
+        const block = document.getElementById(blockId);
+        const img = document.getElementById(imgId);
+        const master = document.getElementById('wm_choice_master');
+        if(!root || !master) return;
 
-      const filename = block ? (block.dataset.filename || '') : '';
+        const filename = block ? (block.dataset.filename || '') : '';
 
-      const radios = root.querySelectorAll(`input[name="${radioName}"]`);
-      radios.forEach(r => {
-        r.addEventListener('change', async (ev)=>{
-          if(ev.target.checked){
-            const choice = ev.target.value || 'none';
-            master.value = choice;            // hidden に同期
-            if(filename && img){              // プレビューも更新
-              const url = await _signPreview(filename, choice);
-              if(url) img.src = url;
-            }
-          }
+        const radios = root.querySelectorAll(`input[name="${radioName}"]`);
+        radios.forEach(r => {
+            r.addEventListener('change', async (ev)=>{
+                if(ev.target.checked){
+                    const choice = ev.target.value || 'none';
+                    master.value = choice; // hidden に同期
+                    if(filename && img){
+                        const url = await _signPreview(filename, choice);
+                        if(url){
+                            img.src = url;
+                            img.setAttribute('data-fullsrc', url);
+                            if(img.complete) annotateImageMeta(img);
+                            else img.onload = ()=> annotateImageMeta(img);
+                        }
+                    }
+                }
+            });
         });
-      });
 
-      // 初期表示：checked を hidden に反映、プレビューも同期
-      const init = root.querySelector(`input[name="${radioName}"]:checked`);
-      if(init){
-        master.value = init.value || master.value;
-        if(filename && img){
-          _signPreview(filename, init.value || 'none').then(url => { if(url) img.src = url; });
+        // 初期表示：checked → hidden 反映 & プレビュー同期
+        const init = root.querySelector(`input[name="${radioName}"]:checked`);
+        if(init){
+            master.value = init.value || master.value;
+            if(filename && img){
+                _signPreview(filename, init.value || 'none').then(url => {
+                    if(url){
+                        img.src = url;
+                        img.setAttribute('data-fullsrc', url);
+                        if(img.complete) annotateImageMeta(img);
+                        else img.onload = ()=> annotateImageMeta(img);
+                    }
+                });
+            }else if(img){
+                img.setAttribute('data-fullsrc', img.currentSrc || img.src);
+                if(img.complete) annotateImageMeta(img);
+                else img.onload = ()=> annotateImageMeta(img);
+            }
         }
-      }
     }
 
     function _syncWmFromVisible(){
-      const cat = document.getElementById('category_select').value;
-      const master = document.getElementById('wm_choice_master');
-      if(!master) return;
-      if(cat === '観光'){
-        const p = document.querySelector('#form_tourism input[name="wm_choice_t"]:checked');
-        if(p) master.value = p.value;
-      }else{
-        const p = document.querySelector('#form_shop input[name="wm_choice_s"]:checked');
-        if(p) master.value = p.value;
-      }
+        const cat = document.getElementById('category_select').value;
+        const master = document.getElementById('wm_choice_master');
+        if(!master) return;
+        if(cat === '観光'){
+            const p = document.querySelector('#form_tourism input[name="wm_choice_t"]:checked');
+            if(p) master.value = p.value;
+        }else{
+            const p = document.querySelector('#form_shop input[name="wm_choice_s"]:checked');
+            if(p) master.value = p.value;
+        }
     }
 
     function onCategoryChange() {
-      const cat = document.getElementById('category_select').value;
-      toggleSection('form_tourism', cat === '観光');
-      toggleSection('form_shop',   cat !== '観光');
-      _syncWmFromVisible();
+        const cat = document.getElementById('category_select').value;
+        toggleSection('form_tourism', cat === '観光');
+        toggleSection('form_shop', cat !== '観光');
+        _syncWmFromVisible();
     }
 
     window.onload = function(){
-      onCategoryChange();
-      filterCards();
-      _bindWmRadios('t');
-      _bindWmRadios('s');
-      _syncWmFromVisible();
+        onCategoryChange();
+        filterCards();
+        _bindWmRadios('t');
+        _bindWmRadios('s');
+        _syncWmFromVisible();
+        annotateAllImages(); // 画像メタの初期表示
     };
     </script>
 </head>
+
 <body>
 <div class="container">
-
-    {# --- カテゴリの自動マージ（既存 + fullyGOTO、重複除去＆順序保持） --- #}
-    {% set _base_cats = (cat_list if cat_list is defined
-      else ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"]) %}
-    {% set _fg_cats = (fg_cat_list if fg_cat_list is defined
-      else ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"]) %}
-
+    {# --- カテゴリ自動マージ（既存 + fullyGOTO、重複除去＆順序保持） --- #}
+    {% set _base_cats = (cat_list if cat_list is defined else ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"]) %}
+    {% set _fg_cats = (fg_cat_list if fg_cat_list is defined else ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"]) %}
     {% set _ns = namespace(cats=_base_cats[:]) %}
     {% for c in _fg_cats %}
       {% if c not in _ns.cats %}
@@ -380,26 +488,24 @@
         <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
         <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
         <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-        <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
-        <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
         <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
         <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
         <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
         <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
-        <a href="{{ url_for('admin_watermark') }}">[透かし一括生成]</a>
+
         <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
             <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
             <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
         </form>
+
         <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
-          <button class="btn" type="submit" style="background:#e35;"
-                  onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">
-            [LINE応答 一時停止]
-          </button>
+            <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">
+                [LINE応答 一時停止]
+            </button>
         </form>
         <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
-          <button class="btn ghost" type="submit">[再開]</button>
+            <button class="btn ghost" type="submit">[再開]</button>
         </form>
         {% if global_paused %}
           <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">LINE停止中</span>
@@ -420,22 +526,22 @@
       {% endif %}
     {% endwith %}
 
-    {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is defined and entry_edit.areas is not string
-                          else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
+    {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is defined and entry_edit.areas is not string else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
 
     {# === 透かし 初期値（保存済みの値→正規化） === #}
     {% set _wm_on_init = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
     {% set _wm_raw_init = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
     {% set _wm_choice_init = (
-      _wm_raw_init if _wm_raw_init in ['none','fullygoto','gotocity']
-      else ('fullygoto' if _wm_raw_init == 'fully'
-            else ('gotocity' if _wm_raw_init == 'city' else ('fullygoto' if _wm_on_init else 'none')))
+        _wm_raw_init if _wm_raw_init in ['none','fullygoto','gotocity']
+        else ('fullygoto' if _wm_raw_init == 'fully'
+        else ('gotocity' if _wm_raw_init == 'city'
+        else ('fullygoto' if _wm_on_init else 'none')))
     ) %}
 
     <!-- ===== 登録フォーム ===== -->
     <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
         {% if edit_id %}
-        <input type="hidden" name="edit_id" value="{{ edit_id }}">
+          <input type="hidden" name="edit_id" value="{{ edit_id }}">
         {% endif %}
 
         <!-- 代表（サーバに送る唯一の値） -->
@@ -443,71 +549,71 @@
 
         <label>カテゴリー</label><br>
         <select name="category" id="category_select" onchange="onCategoryChange()">
-          {% for c in cat_list %}
-            <option value="{{ c }}" {% if entry_edit and entry_edit.category == c %}selected{% endif %}>{{ c }}</option>
-          {% endfor %}
+            {% for c in cat_list %}
+              <option value="{{ c }}" {% if entry_edit and entry_edit.category == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
         </select>
+
         <hr>
 
         <!-- 観光地用フォーム -->
         <div id="form_tourism" style="display:none;">
             <label>タイトル</label><br>
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
 
             <!-- 画像アップロード（観光地） -->
             <div class="mb-3">
-              <label for="image_file_t" class="form-label">画像アップロード</label>
-              <input type="file" class="form-control" id="image_file_t" name="image_file" accept="image/*">
-              {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
-              {% if _imgname_t %}
+                <label for="image_file_t" class="form-label">画像アップロード</label>
+                <input type="file" class="form-control" id="image_file_t" name="image_file" accept="image/*">
+                {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+                {% if _imgname_t %}
                 <div class="mt-2" id="wm-block-t" data-filename="{{ _imgname_t }}">
-                  <div>現在の画像:</div>
-                  {# 既定モードを正規化 #}
-                  {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
-                  {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
-                  {% set _wm_choice_t = (
-                    _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
-                    else ('fullygoto' if _wm_raw_t == 'fully'
-                          else ('gotocity' if _wm_raw_t == 'city' else ('fullygoto' if _wm_on_t else 'none')))
-                  ) %}
-                  <img
-                    id="admin-image-preview-t"
-                    src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
-                    alt="現在の画像"
-                    style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
-                    referrerpolicy="no-referrer"
-                    loading="lazy"
-                  />
-                  <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
-                    <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
-                  </div>
+                    <div>現在の画像:</div>
+                    {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+                    {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+                    {% set _wm_choice_t = (
+                        _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
+                        else ('fullygoto' if _wm_raw_t == 'fully'
+                        else ('gotocity' if _wm_raw_t == 'city'
+                        else ('fullygoto' if _wm_on_t else 'none')))
+                    ) %}
+                    <img id="admin-image-preview-t" class="thumb"
+                         src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
+                         alt="現在の画像"
+                         style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                         referrerpolicy="no-referrer" loading="lazy" />
+                    <div class="form-check mt-2">
+                        <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
+                        <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
+                    </div>
                 </div>
-              {% endif %}
-              <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
+                {% endif %}
+                <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            {# ▼▼▼ 透かし（外部公開URL）選択：none / fullygoto / gotocity ▼▼▼ #}
+            {# ▼▼▼ 透かし選択 ▼▼▼ #}
             {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
             {% set _wm_choice_t = (
-              _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
-              else ('fullygoto' if _wm_raw_t == 'fully'
-                    else ('gotocity' if _wm_raw_t == 'city' else ('fullygoto' if _wm_on_t else 'none')))
+                _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
+                else ('fullygoto' if _wm_raw_t == 'fully'
+                else ('gotocity' if _wm_raw_t == 'city'
+                else ('fullygoto' if _wm_on_t else 'none')))
             ) %}
             <div class="mt-2">
-              <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
-              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_choice_t" value="none"  {% if _wm_choice_t=='none' %}checked{% endif %}> なし
-              </label>
-              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_choice_t" value="fullygoto" {% if _wm_choice_t=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
-              </label>
-              <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="radio" name="wm_choice_t" value="gotocity"  {% if _wm_choice_t=='gotocity' %}checked{% endif %}> ＠Goto City
-              </label>
+                <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
+                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                    <input type="radio" name="wm_choice_t" value="none" {% if _wm_choice_t=='none' %}checked{% endif %}> なし
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                    <input type="radio" name="wm_choice_t" value="fullygoto" {% if _wm_choice_t=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:.4em;">
+                    <input type="radio" name="wm_choice_t" value="gotocity" {% if _wm_choice_t=='gotocity' %}checked{% endif %}> ＠Goto City
+                </label>
             </div>
             {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
 
@@ -517,9 +623,10 @@
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
 
-            <!-- ★ 出典（観光サイト・パンフ等） -->
+            <!-- ★ 出典 -->
             <label>出典</label><br>
             <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+
             <label>出典URL</label><br>
             <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
             <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
@@ -532,14 +639,8 @@
             <!-- 緯度・経度（小数、任意） -->
             <label>緯度・経度（任意）</label><br>
             <div class="row" style="display:flex; gap:10px; align-items:center;">
-              <input type="text" name="lat" inputmode="decimal"
-                     placeholder="緯度 例: 32.695123"
-                     value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
-                     style="width:48%;">
-              <input type="text" name="lng" inputmode="decimal"
-                     placeholder="経度 例: 128.845678"
-                     value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
-                     style="width:48%;">
+                <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
+                <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
             </div>
             <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
 
@@ -548,42 +649,40 @@
 
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
             <div class="row">
-            {% for area in area_opts %}
-              <label style="min-width:unset;">
-              <input type="checkbox" name="areas" value="{{ area }}"
-              {% if _areas_edit and area in _areas_edit %}checked{% endif %}>
-              {{ area }}
-              </label>
-            {% endfor %}
+                {% for area in area_opts %}
+                <label style="min-width:unset;">
+                    <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
+                </label>
+                {% endfor %}
             </div>
 
             <!-- ▼ リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
-            <textarea name="links" rows="3" placeholder="https://example.com
-https://instagram.com/xxx">
+            <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
 {% if entry_edit and entry_edit.links %}
 {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
-{% endif %}</textarea><br>
+{% endif %}
+            </textarea><br>
 
             <!-- ▼ 追加情報（項目＝内容） -->
             <label>追加情報（項目＝内容）</label>
             <div id="extras-list-tourism">
-              {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
-              {% if _extras.items is defined %}
-                {% for k, v in _extras.items() %}
-                  <div class="extra-row">
-                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
-                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                    <button type="button" onclick="this.parentNode.remove()">－</button>
-                  </div>
-                {% endfor %}
-              {% else %}
-                <div class="extra-row">
-                  <input name="extras_key[]" placeholder="項目"> ＝
-                  <input name="extras_val[]" placeholder="内容">
-                  <button type="button" onclick="this.parentNode.remove()">－</button>
-                </div>
-              {% endif %}
+                {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
+                {% if _extras.items is defined %}
+                    {% for k, v in _extras.items() %}
+                    <div class="extra-row">
+                        <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                        <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                        <button type="button" onclick="this.parentNode.remove()">－</button>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="extra-row">
+                        <input name="extras_key[]" placeholder="項目"> ＝
+                        <input name="extras_val[]" placeholder="内容">
+                        <button type="button" onclick="this.parentNode.remove()">－</button>
+                    </div>
+                {% endif %}
             </div>
             <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-tourism')">＋ 行を追加</button>
         </div>
@@ -592,60 +691,60 @@ https://instagram.com/xxx">
         <div id="form_shop" style="display:none;">
             <label>タイトル</label><br>
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
 
             <!-- 画像アップロード（店舗） -->
             <div class="mb-3">
-              <label for="image_file_s" class="form-label">画像アップロード</label>
-              <input type="file" class="form-control" id="image_file_s" name="image_file" accept="image/*">
-              {% set _imgname_s = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
-              {% if _imgname_s %}
+                <label for="image_file_s" class="form-label">画像アップロード</label>
+                <input type="file" class="form-control" id="image_file_s" name="image_file" accept="image/*">
+                {% set _imgname_s = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+                {% if _imgname_s %}
                 <div class="mt-2" id="wm-block-s" data-filename="{{ _imgname_s }}">
-                  <div>現在の画像:</div>
-                  {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
-                  {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
-                  {% set _wm_choice_s = (
-                    _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
-                    else ('fullygoto' if _wm_raw_s == 'fully'
-                          else ('gotocity' if _wm_raw_s == 'city' else ('fullygoto' if _wm_on_s else 'none')))
-                  ) %}
-                  <img
-                    id="admin-image-preview-s"
-                    src="{{ safe_url_for('serve_image', filename=_imgname_s, _sign=True, wm=_wm_choice_s) }}"
-                    alt="現在の画像"
-                    style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
-                    referrerpolicy="no-referrer"
-                    loading="lazy"
-                  />
-                  <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" id="image_delete_s" name="image_delete" value="1">
-                    <label class="form-check-label" for="image_delete_s">この画像を削除する</label>
-                  </div>
+                    <div>現在の画像:</div>
+                    {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+                    {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+                    {% set _wm_choice_s = (
+                        _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
+                        else ('fullygoto' if _wm_raw_s == 'fully'
+                        else ('gotocity' if _wm_raw_s == 'city'
+                        else ('fullygoto' if _wm_on_s else 'none')))
+                    ) %}
+                    <img id="admin-image-preview-s" class="thumb"
+                         src="{{ safe_url_for('serve_image', filename=_imgname_s, _sign=True, wm=_wm_choice_s) }}"
+                         alt="現在の画像"
+                         style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                         referrerpolicy="no-referrer" loading="lazy" />
+                    <div class="form-check mt-2">
+                        <input class="form-check-input" type="checkbox" id="image_delete_s" name="image_delete" value="1">
+                        <label class="form-check-label" for="image_delete_s">この画像を削除する</label>
+                    </div>
                 </div>
-              {% endif %}
-              <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
+                {% endif %}
+                <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            {# ▼▼▼ 透かし（外部公開URL）選択：none / fullygoto / gotocity ▼▼▼ #}
+            {# ▼▼▼ 透かし選択 ▼▼▼ #}
             {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
             {% set _wm_choice_s = (
-              _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
-              else ('fullygoto' if _wm_raw_s == 'fully'
-                    else ('gotocity' if _wm_raw_s == 'city' else ('fullygoto' if _wm_on_s else 'none')))
+                _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
+                else ('fullygoto' if _wm_raw_s == 'fully'
+                else ('gotocity' if _wm_raw_s == 'city'
+                else ('fullygoto' if _wm_on_s else 'none')))
             ) %}
             <div class="mt-2">
-              <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
-              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_choice_s" value="none"  {% if _wm_choice_s=='none' %}checked{% endif %}> なし
-              </label>
-              <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                <input type="radio" name="wm_choice_s" value="fullygoto" {% if _wm_choice_s=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
-              </label>
-              <label style="display:inline-flex;align-items:center;gap:.4em;">
-                <input type="radio" name="wm_choice_s" value="gotocity"  {% if _wm_choice_s=='gotocity' %}checked{% endif %}> ＠Goto City
-              </label>
+                <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
+                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                    <input type="radio" name="wm_choice_s" value="none" {% if _wm_choice_s=='none' %}checked{% endif %}> なし
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
+                    <input type="radio" name="wm_choice_s" value="fullygoto" {% if _wm_choice_s=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:.4em;">
+                    <input type="radio" name="wm_choice_s" value="gotocity" {% if _wm_choice_s=='gotocity' %}checked{% endif %}> ＠Goto City
+                </label>
             </div>
             {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
 
@@ -661,7 +760,7 @@ https://instagram.com/xxx">
             <label>営業時間</label><br>
             <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
 
-            <label>駐車場</label>
+            <label>駐車場：</label>
             <select name="parking">
                 <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
                 <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
@@ -669,8 +768,7 @@ https://instagram.com/xxx">
             台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
 
             <label>支払方法</label><br>
-            {% set _pay_edit = (entry_edit.payment if entry_edit and entry_edit.payment is defined and entry_edit.payment is not string
-                                 else (entry_edit.payment.split(',') if entry_edit and entry_edit.payment else [])) %}
+            {% set _pay_edit = (entry_edit.payment if entry_edit and entry_edit.payment is defined and entry_edit.payment is not string else (entry_edit.payment.split(',') if entry_edit and entry_edit.payment else [])) %}
             <input type="checkbox" name="payment" value="現金" {% if '現金' in _pay_edit %}checked{% endif %}>現金
             <input type="checkbox" name="payment" value="カード" {% if 'カード' in _pay_edit %}checked{% endif %}>カード
             <input type="checkbox" name="payment" value="その他" {% if 'その他' in _pay_edit %}checked{% endif %}>その他<br>
@@ -683,26 +781,25 @@ https://instagram.com/xxx">
 
             <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
             <div class="row">
-            {% for area in area_opts %}
-              <label style="min-width:unset;">
-                <input type="checkbox" name="areas" value="{{ area }}"
-                {% if _areas_edit and area in _areas_edit %}checked{% endif %}>
-                {{ area }}
-              </label>
-            {% endfor %}
+                {% for area in area_opts %}
+                <label style="min-width:unset;">
+                    <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
+                </label>
+                {% endfor %}
             </div>
 
             <label>地図URL</label><br>
             <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
 
-            <!-- ★ 出典（観光サイト・パンフ等） -->
+            <!-- ★ 出典 -->
             <label>出典</label><br>
             <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+
             <label>出典URL</label><br>
             <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
             <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
 
-            <!-- ★ 座標コピペ欄（なんでもOK） -->
+            <!-- ★ 座標コピペ欄 -->
             <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
             <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
             <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
@@ -710,44 +807,38 @@ https://instagram.com/xxx">
             <!-- 緯度・経度（小数、任意） -->
             <label>緯度・経度（任意）</label><br>
             <div class="row" style="display:flex; gap:10px; align-items:center;">
-              <input type="text" name="lat" inputmode="decimal"
-                     placeholder="緯度 例: 32.695123"
-                     value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}"
-                     style="width:48%;">
-              <input type="text" name="lng" inputmode="decimal"
-                     placeholder="経度 例: 128.845678"
-                     value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}"
-                     style="width:48%;">
+                <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
+                <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
             </div>
             <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
 
             <!-- ▼ リンク（複数） -->
             <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
-            <textarea name="links" rows="3" placeholder="https://example.com
-https://instagram.com/xxx">
+            <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
 {% if entry_edit and entry_edit.links %}
 {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
-{% endif %}</textarea><br>
+{% endif %}
+            </textarea><br>
 
             <!-- ▼ 追加情報（項目＝内容） -->
             <label>追加情報（項目＝内容）</label>
             <div id="extras-list-shop">
-              {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
-              {% if _extras2.items is defined %}
-                {% for k, v in _extras2.items() %}
-                  <div class="extra-row">
-                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
-                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                    <button type="button" onclick="this.parentNode.remove()">－</button>
-                  </div>
-                {% endfor %}
-              {% else %}
-                <div class="extra-row">
-                  <input name="extras_key[]" placeholder="項目"> ＝
-                  <input name="extras_val[]" placeholder="内容">
-                  <button type="button" onclick="this.parentNode.remove()">－</button>
-                </div>
-              {% endif %}
+                {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
+                {% if _extras2.items is defined %}
+                    {% for k, v in _extras2.items() %}
+                    <div class="extra-row">
+                        <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                        <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                        <button type="button" onclick="this.parentNode.remove()">－</button>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="extra-row">
+                        <input name="extras_key[]" placeholder="項目"> ＝
+                        <input name="extras_val[]" placeholder="内容">
+                        <button type="button" onclick="this.parentNode.remove()">－</button>
+                    </div>
+                {% endif %}
             </div>
             <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-shop')">＋ 行を追加</button>
         </div>
@@ -760,200 +851,192 @@ https://instagram.com/xxx">
     <h2 style="margin-bottom:8px;">登録済みデータ</h2>
 
     <div class="filterbar">
-      <input type="text" id="f_q" placeholder="キーワード（タイトル/説明/住所/タグ/追加情報/リンク/出典）" oninput="filterCards()">
-      <select id="f_cat" onchange="filterCards()">
-        <option value="">カテゴリー：すべて</option>
-        {% for c in cat_list %}
-          <option value="{{ c }}">{{ c }}</option>
-        {% endfor %}
-      </select>
-      <select id="f_area" onchange="filterCards()">
-        <option value="">エリア：すべて</option>
-        {% for area in area_opts %}
-          <option value="{{ area }}">{{ area }}</option>
-        {% endfor %}
-      </select>
-      <input type="text" id="f_tag" placeholder="タグ（カンマ区切り・AND）" oninput="filterCards()">
-      <select id="f_sort" onchange="filterCards()">
-        <option value="title_asc">並び替え：タイトル↑</option>
-        <option value="title_desc">並び替え：タイトル↓</option>
-        <option value="cat_asc">並び替え：カテゴリ↑</option>
-        <option value="cat_desc">並び替え：カテゴリ↓</option>
-        <option value="dist_asc">並び替え：距離↑（現在地）</option>
-      </select>
-
-      <span class="badge">表示：<span id="f_count">0</span> / <span id="f_total">0</span></span>
-      <select id="f_page_size" onchange="onChangePageSize(this)">
-        <option value="10">1ページ 10件</option>
-        <option value="20" selected>1ページ 20件</option>
-        <option value="30">1ページ 30件</option>
-        <option value="50">1ページ 50件</option>
-      </select>
-
-      <!-- 現在地コントロール -->
-      <div class="nearby-ctl">
-        <button class="btn" type="button" onclick="startNearby()">現在地から</button>
-        <select id="near_radius">
-          <option value="1">1</option>
-          <option value="3" selected>3</option>
-          <option value="5">5</option>
-          <option value="10">10</option>
+        <input type="text" id="f_q" placeholder="キーワード（タイトル/説明/住所/タグ/追加情報/リンク/出典）" oninput="filterCards()">
+        <select id="f_cat" onchange="filterCards()">
+            <option value="">カテゴリー：すべて</option>
+            {% for c in cat_list %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
         </select>
-        <span class="muted">km 以内</span>
-        <button class="btn ghost" type="button" onclick="clearNearby()">解除</button>
-      </div>
+        <select id="f_area" onchange="filterCards()">
+            <option value="">エリア：すべて</option>
+            {% for area in area_opts %}<option value="{{ area }}">{{ area }}</option>{% endfor %}
+        </select>
+        <input type="text" id="f_tag" placeholder="タグ（カンマ区切り・AND）" oninput="filterCards()">
+        <select id="f_sort" onchange="filterCards()">
+            <option value="title_asc">並び替え：タイトル↑</option>
+            <option value="title_desc">並び替え：タイトル↓</option>
+            <option value="cat_asc">並び替え：カテゴリ↑</option>
+            <option value="cat_desc">並び替え：カテゴリ↓</option>
+            <option value="dist_asc">並び替え：距離↑（現在地）</option>
+        </select>
+        <span class="badge">表示：<span id="f_count">0</span> / <span id="f_total">0</span></span>
+        <select id="f_page_size" onchange="onChangePageSize(this)">
+            <option value="10">1ページ 10件</option>
+            <option value="20" selected>1ページ 20件</option>
+            <option value="30">1ページ 30件</option>
+            <option value="50">1ページ 50件</option>
+        </select>
 
-      <button class="btn ghost" type="button" onclick="resetFilters()">リセット</button>
+        <!-- 現在地コントロール -->
+        <div class="nearby-ctl">
+            <button class="btn" type="button" onclick="startNearby()">現在地から</button>
+            <select id="near_radius">
+                <option value="1">1</option>
+                <option value="3" selected>3</option>
+                <option value="5">5</option>
+                <option value="10">10</option>
+            </select>
+            <span class="muted">km 以内</span>
+            <button class="btn ghost" type="button" onclick="clearNearby()">解除</button>
+        </div>
+
+        <button class="btn ghost" type="button" onclick="resetFilters()">リセット</button>
     </div>
 
     <!-- ページャー（上） -->
     <div class="pager">
-      <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
-      <button type="button" class="btn prev"  onclick="gotoPage('prev')">‹ 前へ</button>
-      <span class="info">ページ 1 / 1（1ページ 20件）</span>
-      <button type="button" class="btn next"  onclick="gotoPage('next')">次へ ›</button>
-      <button type="button" class="btn last"  onclick="gotoPage('last')">最後 ≫</button>
+        <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
+        <button type="button" class="btn prev" onclick="gotoPage('prev')">‹ 前へ</button>
+        <span class="info">ページ 1 / 1（1ページ 20件）</span>
+        <button type="button" class="btn next" onclick="gotoPage('next')">次へ ›</button>
+        <button type="button" class="btn last" onclick="gotoPage('last')">最後 ≫</button>
     </div>
 
     <div id="cards">
     {% for e in entries %}
-        {% set _tags = e.tags if e.tags is defined and e.tags is not string
-                else (e.tags | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _tags  = e.tags  if e.tags  is defined and e.tags  is not string else (e.tags  | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
         {% set _areas = e.areas if e.areas is defined and e.areas is not string else (e.areas.split(',') if e.areas else []) %}
-        {% set _links = e.links if e.links is defined and e.links is not string
-                  else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _links = e.links if e.links is defined and e.links is not string else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
         {% set _pay   = e.payment if e.payment is defined and e.payment is not string else (e.payment.split(',') if e.payment else []) %}
         {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ (_links | join(' ')) ~ ' ' ~ (e.extras | tojson) ~ ' ' ~ (e.source or '') ~ ' ' ~ (e.source_url or '')) | lower %}
 
         <div class="entry-card"
-            data-title="{{ e.title or '' }}"
-            data-category="{{ e.category or '' }}"
-            data-areas="{{ _areas|join(', ') }}"
-            data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
-            data-text="{{ all_text }}"
-            data-lat="{{ e.lat if e.lat is defined else '' }}"
-            data-lng="{{ e.lng if e.lng is defined else '' }}">
+             data-title="{{ e.title or '' }}"
+             data-category="{{ e.category or '' }}"
+             data-areas="{{ _areas|join(', ') }}"
+             data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
+             data-text="{{ all_text }}"
+             data-lat="{{ e.lat if e.lat is defined else '' }}"
+             data-lng="{{ e.lng if e.lng is defined else '' }}">
 
-          {% set _img = e.image_file or e.image %}
-          {% set _wm = (e.wm_on if e.wm_on is defined else True) %}
-          {% set _wm_raw_view = (e.wm_external_choice if e.wm_external_choice else '') %}
-          {% set _wm_choice_view = (
-            _wm_raw_view if _wm_raw_view in ['none','fullygoto','gotocity']
-            else ('fullygoto' if _wm_raw_view == 'fully'
-                  else ('gotocity' if _wm_raw_view == 'city' else ('fullygoto' if _wm else 'none')))
-          ) %}
-          <div style="display:flex; gap:12px; align-items:flex-start;">
-            {% if _img %}
-              <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=_wm_choice_view) }}"
-                target="_blank" rel="noopener noreferrer" style="flex:0 0 auto;">
-                <img
-                  src="{{ safe_url_for('serve_image', filename=_img, wm=1) }}"
-                  alt="{{ e.title }} の画像"
-                  style="width:120px; height:90px; object-fit:cover; border-radius:6px;
-                        border:1px solid #e2e8f0; background:#fff;"
-                  loading="lazy" decoding="async" referrerpolicy="no-referrer">
-              </a>
-            {% endif %}
+            {% set _img = e.image_file or e.image %}
+            {% set _wm = (e.wm_on if e.wm_on is defined else True) %}
+            {% set _wm_raw_view = (e.wm_external_choice if e.wm_external_choice else '') %}
+            {% set _wm_choice_view = (
+                _wm_raw_view if _wm_raw_view in ['none','fullygoto','gotocity']
+                else ('fullygoto' if _wm_raw_view == 'fully'
+                else ('gotocity' if _wm_raw_view == 'city'
+                else ('fullygoto' if _wm else 'none')))
+            ) %}
 
-            <div style="flex:1 1 auto;">
-              <span class="card-label">タイトル：</span>{{ e.title }}<br>
-              <span class="card-label">説明：</span>{{ e.desc }}<br>
-
-              {% if e.lat is not none and e.lng is not none %}
-                <span class="card-label">緯度・経度：</span>{{ e.lat }}, {{ e.lng }}
-                （<a href="https://maps.google.com/?q={{ e.lat }},{{ e.lng }}" target="_blank" rel="noopener">地図</a>）<br>
-              {% endif %}
-
-              <span class="card-label">住所：</span>{{ e.address }}<br>
-              <span class="card-label">地図：</span>
-              {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
-
-              <span class="card-label">出典：</span>
-              {% if e.source and e.source_url %}
-                <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source }}</a>
-              {% elif e.source %}
-                {{ e.source }}
-              {% elif e.source_url %}
-                <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source_url }}</a>
-              {% else %}
-                （未入力）
-              {% endif %}<br>
-
-              <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
-              <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
-
-              {% if e.category and e.category != "観光" %}
-                <span class="card-label">電話：</span>{{ e.tel or "" }}<br>
-                <span class="card-label">休み：</span>{{ e.holiday or "" }}<br>
-                <span class="card-label">営業時間：</span>{{ e.open_hours or "" }}<br>
-                <span class="card-label">駐車場：</span>{{ e.parking or "" }}{% if e.parking_num %}（{{ e.parking_num }}台）{% endif %}<br>
-                <span class="card-label">支払方法：</span>{{ _pay|join(', ') }}<br>
-                <span class="card-label">備考：</span>{{ e.remark or "" }}<br>
-              {% endif %}
-
-              {% if _links %}
-                <span class="card-label">リンク：</span>
-                <ul class="compact">
-                  {% for u in _links %}
-                    {% set u2 = (u ~ '') | trim %}
-                    {% if u2 %}<li><a href="{{ u2 }}" target="_blank" rel="noopener noreferrer">{{ u2 }}</a></li>{% endif %}
-                  {% endfor %}
-                </ul>
-              {% endif %}
-
-              {% if e.extras %}
-                <span class="card-label">追加情報：</span>
-                <table class="kv">
-                  {% if e.extras.items is defined %}
-                    {% for k, v in e.extras.items() %}
-                      <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
-                    {% endfor %}
-                  {% elif e.extras is iterable and e.extras is not string %}
-                    {% for it in e.extras %}
-                      {% if it.items is defined %}
-                        {% for k,v in it.items() %}
-                          <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
-                        {% endfor %}
-                      {% else %}
-                        <tr><td class="k">{{ it[0] if it|length>0 else '' }}</td><td>{{ it[1] if it|length>1 else '' }}</td></tr>
-                      {% endif %}
-                    {% endfor %}
-                  {% else %}
-                    <tr><td class="k">備考</td><td>{{ e.extras }}</td></tr>
-                  {% endif %}
-                </table>
-              {% endif %}
-
-              <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
-
-              <div class="entry-actions" style="margin-top:8px;">
-                <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
-                  <input type="hidden" name="edit" value="{{ loop.index0 }}">
-                  <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
-                </form>
-                {% if role == "admin" %}
-                  <form method="post" action="{{ url_for('delete_entry') }}" style="display:inline;"
-                        onsubmit="return confirm('本当に削除しますか？');">
-                    <input type="hidden" name="idx" value="{{ loop.index0 }}">
-                    <button type="submit" class="del-btn">削除</button>
-                  </form>
+            <div style="display:flex; gap:12px; align-items:flex-start;">
+                {% if _img %}
+                <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=_wm_choice_view) }}" target="_blank" rel="noopener noreferrer" style="flex:0 0 auto;">
+                    <img class="thumb"
+                         src="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm='thumb') ~ '&_ts=' ~ (now()|int if now is defined else 0) }}"
+                         alt="{{ e.title }} の画像"
+                         style="width:120px; height:90px; object-fit:cover; border-radius:6px; border:1px solid #e2e8f0; background:#fff;"
+                         loading="lazy" decoding="async" referrerpolicy="no-referrer">
+                </a>
                 {% endif %}
-              </div>
+
+                <div style="flex:1 1 auto;">
+                    <span class="card-label">タイトル：</span>{{ e.title }}<br>
+                    <span class="card-label">説明：</span>{{ e.desc }}<br>
+
+                    {% if e.lat is not none and e.lng is not none %}
+                    <span class="card-label">緯度・経度：</span>{{ e.lat }}, {{ e.lng }} （<a href="https://maps.google.com/?q={{ e.lat }},{{ e.lng }}" target="_blank" rel="noopener">地図</a>）<br>
+                    {% endif %}
+
+                    <span class="card-label">住所：</span>{{ e.address }}<br>
+
+                    <span class="card-label">地図：</span>
+                    {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
+
+                    <span class="card-label">出典：</span>
+                    {% if e.source and e.source_url %}
+                        <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source }}</a>
+                    {% elif e.source %}
+                        {{ e.source }}
+                    {% elif e.source_url %}
+                        <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source_url }}</a>
+                    {% else %}
+                        （未入力）
+                    {% endif %}<br>
+
+                    <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
+                    <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
+
+                    {% if e.category and e.category != "観光" %}
+                        <span class="card-label">電話：</span>{{ e.tel or "" }}<br>
+                        <span class="card-label">休み：</span>{{ e.holiday or "" }}<br>
+                        <span class="card-label">営業時間：</span>{{ e.open_hours or "" }}<br>
+                        <span class="card-label">駐車場：</span>{{ e.parking or "" }}{% if e.parking_num %}（{{ e.parking_num }}台）{% endif %}<br>
+                        <span class="card-label">支払方法：</span>{{ _pay|join(', ') }}<br>
+                        <span class="card-label">備考：</span>{{ e.remark or "" }}<br>
+                    {% endif %}
+
+                    {% if _links %}
+                    <span class="card-label">リンク：</span>
+                    <ul class="compact">
+                        {% for u in _links %}
+                            {% set u2 = (u ~ '') | trim %}
+                            {% if u2 %}<li><a href="{{ u2 }}" target="_blank" rel="noopener noreferrer">{{ u2 }}</a></li>{% endif %}
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+
+                    {% if e.extras %}
+                    <span class="card-label">追加情報：</span>
+                    <table class="kv">
+                        {% if e.extras.items is defined %}
+                            {% for k, v in e.extras.items() %}
+                            <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                            {% endfor %}
+                        {% elif e.extras is iterable and e.extras is not string %}
+                            {% for it in e.extras %}
+                                {% if it.items is defined %}
+                                    {% for k,v in it.items() %}
+                                    <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                                    {% endfor %}
+                                {% else %}
+                                    <tr><td class="k">{{ it[0] if it|length>0 else '' }}</td><td>{{ it[1] if it|length>1 else '' }}</td></tr>
+                                {% endif %}
+                            {% endfor %}
+                        {% else %}
+                            <tr><td class="k">備考</td><td>{{ e.extras }}</td></tr>
+                        {% endif %}
+                    </table>
+                    {% endif %}
+
+                    <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
+
+                    <div class="entry-actions" style="margin-top:8px;">
+                        <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
+                            <input type="hidden" name="edit" value="{{ loop.index0 }}">
+                            <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
+                        </form>
+
+                        {% if role == "admin" %}
+                        <form method="post" action="{{ url_for('delete_entry') }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
+                            <input type="hidden" name="idx" value="{{ loop.index0 }}">
+                            <button type="submit" class="del-btn">削除</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </div>
             </div>
-          </div>
         </div>
     {% endfor %}
     </div>
 
     <!-- ページャー（下） -->
     <div class="pager">
-      <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
-      <button type="button" class="btn prev"  onclick="gotoPage('prev')">‹ 前へ</button>
-      <span class="info">ページ 1 / 1（1ページ 20件）</span>
-      <button type="button" class="btn next"  onclick="gotoPage('next')">次へ ›</button>
-      <button type="button" class="btn last"  onclick="gotoPage('last')">最後 ≫</button>
+        <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
+        <button type="button" class="btn prev" onclick="gotoPage('prev')">‹ 前へ</button>
+        <span class="info">ページ 1 / 1（1ページ 20件）</span>
+        <button type="button" class="btn next" onclick="gotoPage('next')">次へ ›</button>
+        <button type="button" class="btn last" onclick="gotoPage('last')">最後 ≫</button>
     </div>
-
 </div>
 </body>
 </html>
