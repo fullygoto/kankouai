@@ -1,68 +1,94 @@
-{% extends "base.html" %}
-{% block title %}透かし一括生成{% endblock %}
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>透かし一括生成</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:#f6faf9;padding:20px}
+    .container{background:#fff;max-width:1000px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+    h1{margin:0 0 14px}
+    .row{margin:10px 0}
+    .muted{color:#567;font-size:.95em}
+    .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer;text-decoration:none}
+    .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:12px}
+    .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
+    .name{display:block;margin-top:6px;font-size:.92em;color:#345;word-break:break-all}
+    img{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+    label.sel{display:flex;gap:8px;align-items:center}
+    .small{font-size:.9em;color:#567;margin-top:4px}
+    hr{border:1px solid #e7eef5;margin:18px 0}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>透かし一括生成</h1>
 
-{% block content %}
-<h1>透かし一括生成（none / @Goto City / @fullyGOTO）</h1>
-
-<p>オリジナルから3種の画像を作ります。既存画像を選ぶか、新規にアップロードしてください。</p>
-
-<form method="post" enctype="multipart/form-data" style="margin:14px 0; padding:12px; border:1px solid #eee; border-radius:8px;">
-  <h3>① 既存の画像から作る</h3>
-  <p style="margin:6px 0;">IMAGES_DIR 内の「元画像（__none/__goto/__fullygotoが付いていない）」が並びます。複数選択OK。</p>
-  <div style="max-height:220px; overflow:auto; border:1px solid #eee; padding:8px; border-radius:6px;">
-    {% if existing %}
-      {% for fn in existing %}
-        <label style="display:flex; align-items:center; gap:8px; margin:6px 0;">
-          <input type="checkbox" name="selected_existing" value="{{ fn }}">
-          <img src="{{ url_for('serve_image', filename=fn, wm='none') }}" style="height:46px; width:auto; object-fit:cover; border:1px solid #ddd;">
-          <span style="font-family:monospace;">{{ fn }}</span>
-        </label>
-      {% endfor %}
-    {% else %}
-      <em>対象となる既存画像が見つかりませんでした。</em>
-    {% endif %}
-  </div>
-
-  <h3 style="margin-top:16px;">② 新規アップロードして作る</h3>
-  <input type="file" name="files" multiple accept="image/*">
-
-  <div style="margin-top:10px;">
-    <label><input type="checkbox" name="force" value="1"> 既存の生成物があっても上書きする</label>
-  </div>
-
-  <button type="submit" class="btn btn-primary" style="margin-top:12px;">3種を作成</button>
-</form>
-
-{% if results %}
-  <h2>生成結果</h2>
-  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:14px;">
-    {% for r in results %}
-      <div style="border:1px solid #eee; border-radius:10px; padding:10px;">
-        <div style="font-weight:600; margin-bottom:6px;">{{ r.src }}</div>
-        <div style="display:flex; gap:10px; flex-wrap:wrap;">
-          <div style="flex:1 1 120px;">
-            <div style="font-size:12px;">オリジナル</div>
-            <img src="{{ r.url_src }}" style="width:100%; height:auto; border:1px solid #ddd;">
-            <div><a href="{{ r.url_src }}" target="_blank" rel="noopener">開く</a></div>
-          </div>
-          <div style="flex:1 1 120px;">
-            <div style="font-size:12px;">__none</div>
-            <img src="{{ r.url_none }}" style="width:100%; height:auto; border:1px solid #ddd;">
-            <div><a href="{{ r.url_none }}" target="_blank" rel="noopener">URL</a></div>
-          </div>
-          <div style="flex:1 1 120px;">
-            <div style="font-size:12px;">@Goto City</div>
-            <img src="{{ r.url_goto }}" style="width:100%; height:auto; border:1px solid #ddd;">
-            <div><a href="{{ r.url_goto }}" target="_blank" rel="noopener">URL</a></div>
-          </div>
-          <div style="flex:1 1 120px;">
-            <div style="font-size:12px;">@fullyGOTO</div>
-            <img src="{{ r.url_fully }}" style="width:100%; height:auto; border:1px solid #ddd;">
-            <div><a href="{{ r.url_fully }}" target="_blank" rel="noopener">URL</a></div>
-          </div>
-        </div>
+    <form method="post" enctype="multipart/form-data">
+      <div class="row">
+        <label>新規アップロード（複数可）：</label><br>
+        <input type="file" name="files" accept="image/*" multiple>
       </div>
-    {% endfor %}
+
+      <div class="row">
+        <label class="sel">
+          <input type="checkbox" name="force" value="1"> 既存の __none / __goto / __fullygoto を上書きする
+        </label>
+      </div>
+
+      <div class="row">
+        <button class="btn" type="submit">生成する</button>
+        <span class="muted">※ 下の「既存ファイルにチェック」＋「新規アップロード」の両方を同時に処理できます。</span>
+      </div>
+
+      <hr>
+
+      <h2 style="margin:0 0 8px">既存ファイルから選ぶ</h2>
+      <div class="grid">
+        {% if existing and existing|length %}
+          {% for fn in existing %}
+            <div class="card">
+              <label class="sel">
+                <input type="checkbox" name="selected_existing" value="{{ fn }}">
+                <span class="name">{{ fn }}</span>
+              </label>
+              <div class="small muted">プレビュー</div>
+              <img src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">対象画像が見つかりません。</div>
+        {% endif %}
+      </div>
+    </form>
+
+    {% if results and results|length %}
+      <hr>
+      <h2 style="margin:0 0 8px">作成結果</h2>
+      <div class="grid">
+        {% for r in results %}
+          <div class="card">
+            <div class="small muted">元画像</div>
+            <a href="{{ r.url_src }}" target="_blank" rel="noopener"><img src="{{ r.url_src }}" loading="lazy" alt="src"></a>
+            <div class="name">{{ r.src }}</div>
+
+            <div class="small muted" style="margin-top:10px">透かし：なし（__none）</div>
+            <a href="{{ r.url_none }}" target="_blank" rel="noopener"><img src="{{ r.url_none }}" loading="lazy" alt="none"></a>
+
+            <div class="small muted" style="margin-top:10px">透かし：＠Goto City（__goto）</div>
+            <a href="{{ r.url_goto }}" target="_blank" rel="noopener"><img src="{{ r.url_goto }}" loading="lazy" alt="goto"></a>
+
+            <div class="small muted" style="margin-top:10px">透かし：＠fullyGOTO（__fullygoto）</div>
+            <a href="{{ r.url_fully }}" target="_blank" rel="noopener"><img src="{{ r.url_fully }}" loading="lazy" alt="fully"></a>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <div class="row" style="margin-top:18px">
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← 観光データ管理に戻る</a>
+    </div>
   </div>
-{% endif %}
-{% endblock %}
+</body>
+</html>
