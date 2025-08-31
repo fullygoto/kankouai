@@ -5738,7 +5738,7 @@ def admin_entry():
                 _ensure_wm_variants(result)
             except Exception:
                 app.logger.exception("[wm] variants generation failed for %s", result)
-                
+
         # === 緯度・経度（raw/lat/lng/map を総合して決定、片側空は前回値を継承） ===
         lat, lng = _normalize_latlng(
             coords_raw,
@@ -5957,6 +5957,79 @@ def delete_entry(idx):
     else:
         flash("指定された項目が見つかりません")
     return redirect(url_for("admin_entry"))
+
+
+
+def _wm_safe_basename(name: str) -> str:
+    import os, re, unicodedata
+    if not name:
+        return "image"
+    n = os.path.basename(name)
+    n = unicodedata.normalize("NFKC", n)
+    n = re.sub(r"[^0-9A-Za-zぁ-んァ-ヶ一-龠々ー_\-\.]+", "_", n).strip("._")
+    if not n:
+        n = "image"
+    root, _ = os.path.splitext(n)
+    return root[:80] or "image"
+
+def _wm_draw_text(im: Image.Image, text: str) -> Image.Image:
+    """右下に半透明帯＋白文字（黒縁取り）で簡易透かし"""
+    if not text:
+        return im.copy()
+    base = im.convert("RGBA")
+    W, H = base.size
+    draw = ImageDraw.Draw(base)
+
+    # 画像幅に応じてフォントサイズを決める（幅の5%目安）
+    size = max(18, int(W * 0.05))
+    try:
+        # 既存のフォントローダがあれば使ってもOK。ここはデフォルトで十分。
+        font = ImageFont.load_default()
+    except Exception:
+        font = ImageFont.load_default()
+
+    # 文字サイズ取得（stroke対応）
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=max(1, size // 10))
+        tw, th = (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    except Exception:
+        tw, th = draw.textsize(text, font=font)
+
+    pad = max(6, size // 3)
+    x = max(0, W - tw - pad * 2)
+    y = max(0, H - th - pad * 2)
+
+    # 半透明の黒帯
+    bg = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 110))
+    base.alpha_composite(bg, (x, y))
+
+    # 白文字＋黒縁取り
+    try:
+        draw.text(
+            (x + pad, y + pad),
+            text,
+            fill=(255, 255, 255, 230),
+            font=font,
+            stroke_width=max(1, size // 10),
+            stroke_fill=(0, 0, 0, 230),
+        )
+    except TypeError:
+        draw.text((x + pad, y + pad), text, fill=(255, 255, 255, 230), font=font)
+
+    return base.convert("RGB")
+
+def _wm_save_jpeg(im: Image.Image, out_path: str, quality: int = 90):
+    import os
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    im.save(out_path, format="JPEG", quality=quality, optimize=True)
+
+@app.route("/admin/_media_img/<path:filename>")
+@login_required
+def admin_media_img(filename):
+    """IMAGES_DIR 配下の生成物をそのまま配信（管理者/関係者向けプレビュー用）"""
+    # IMAGES_DIR は既存の画像保存ディレクトリを想定
+    return send_from_directory(IMAGES_DIR, filename, as_attachment=False)
+
 
 
 @app.route("/shop/entry", methods=["GET", "POST"])
@@ -7458,6 +7531,201 @@ def admin_upload_image():
 
     url = url_for("serve_image", filename=res, _external=True)
     return jsonify({"ok": True, "file": res, "url": url})
+
+
+# === 透かし一括生成ツール（WEB UI用） =========================
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+WM_TEXT_GOTO  = "@Goto City"
+WM_TEXT_FULLY = "@fullyGOTO"
+WM_SUFFIX_NONE  = "__none"
+WM_SUFFIX_GOTO  = "__goto"
+WM_SUFFIX_FULLY = "__fullygoto"
+
+def _wm_load_font(size: int):
+    """環境依存なく安全にフォントを確保"""
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except Exception:
+        # よくあるパスを順に
+        for p in [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        ]:
+            try:
+                return ImageFont.truetype(p, size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+def _wm_draw(im: Image.Image, text: str, scale=0.05, opacity=180, margin_ratio=0.02):
+    """右下に半透明テキスト透かし"""
+    if not text:
+        return im.copy()
+    base = ImageOps.exif_transpose(im).convert("RGBA")
+    W, H = base.size
+    size = max(12, int(W * float(scale)))
+    font = _wm_load_font(size)
+    draw = ImageDraw.Draw(base)
+    stroke_w = max(1, size // 12)
+
+    try:
+        bbox = draw.textbbox((0,0), text, font=font, stroke_width=stroke_w)
+        tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
+    except Exception:
+        tw, th = draw.textlength(text, font=font), size
+
+    pad = max(6, int(size*0.3))
+    margin = int(min(W,H) * float(margin_ratio))
+    x = max(0, W - tw - pad*2 - margin)
+    y = max(0, H - th - pad*2 - margin)
+    opa = max(0, min(255, int(opacity)))
+
+    # 半透明の黒下地
+    bg = Image.new("RGBA", (int(tw+pad*2), int(th+pad*2)), (0,0,0, int(opa*0.45)))
+    base.alpha_composite(bg, (x, y))
+    # 白文字＋黒縁
+    draw.text((x+pad, y+pad), text, fill=(255,255,255,opa), font=font,
+              stroke_width=stroke_w, stroke_fill=(0,0,0, min(255, opa+50)))
+    return base.convert("RGB")
+
+def _wm_prep_image(path: str, max_size: int | None = 1080) -> Image.Image:
+    """EXIF回転を正し、必要なら長辺max_sizeに縮小"""
+    im = Image.open(path)
+    im = ImageOps.exif_transpose(im)
+    if max_size:
+        w,h = im.size
+        sc = max(w/max_size, h/max_size)
+        if sc > 1:
+            im = im.resize((int(w/sc), int(h/sc)), Image.LANCZOS)
+    return im
+
+def _wm_save(im: Image.Image, dest: str, quality=85):
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    ext = os.path.splitext(dest)[1].lower()
+    out = im
+    params = {}
+    if ext in (".jpg", ".jpeg"):
+        if im.mode not in ("RGB","L"):
+            out = im.convert("RGB")
+        params = dict(quality=int(quality), optimize=True, progressive=True)
+    elif ext == ".webp":
+        if im.mode not in ("RGB","L"):
+            out = im.convert("RGB")
+        params = dict(quality=int(quality), method=6)
+    elif ext == ".png":
+        params = dict(optimize=True)
+    out.save(dest, **params)
+
+def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, margin=0.02, quality=85):
+    """
+    1枚のオリジナルから __none / __goto / __fullygoto を IMAGES_DIR に生成。
+    既存があればスキップ（force=Trueで上書き）。
+    戻り値: {"none":fn, "goto":fn, "fully":fn}
+    """
+    if not os.path.isfile(src_path):
+        raise FileNotFoundError(src_path)
+    im = _wm_prep_image(src_path, max_size=1080)
+    stem, ext = os.path.splitext(os.path.basename(src_path))
+    out_none = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_NONE}{ext.lower()}")
+    out_goto = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_GOTO}{ext.lower()}")
+    out_full = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_FULLY}{ext.lower()}")
+
+    if force or not os.path.exists(out_none):
+        _wm_save(im, out_none, quality=quality)
+    if force or not os.path.exists(out_goto):
+        _wm_save(_wm_draw(im, WM_TEXT_GOTO, scale=scale, opacity=opacity, margin_ratio=margin), out_goto, quality=quality)
+    if force or not os.path.exists(out_full):
+        _wm_save(_wm_draw(im, WM_TEXT_FULLY, scale=scale, opacity=opacity, margin_ratio=margin), out_full, quality=quality)
+
+    return {"none": os.path.basename(out_none),
+            "goto": os.path.basename(out_goto),
+            "fully": os.path.basename(out_full)}
+
+def _list_source_images():
+    """IMAGES_DIR から『元画像っぽいもの（__none/__goto/__fullygotoが付いてない）』だけ列挙"""
+    files = []
+    if not os.path.isdir(IMAGES_DIR):
+        return files
+    for fn in os.listdir(IMAGES_DIR):
+        if fn.startswith("."): 
+            continue
+        root, ext = os.path.splitext(fn)
+        if ext.lower() not in (".jpg",".jpeg",".png",".webp",".bmp",".tif",".tiff"):
+            continue
+        if any(suf in root for suf in (WM_SUFFIX_NONE, WM_SUFFIX_GOTO, WM_SUFFIX_FULLY)):
+            continue
+        files.append(fn)
+    files.sort()
+    return files
+
+@app.route("/admin/watermark", methods=["GET", "POST"])
+@login_required
+def admin_watermark():
+    # 権限は admin / shop のどちらでも使えるように
+    if session.get("role") not in {"admin","shop"}:
+        abort(403)
+
+    results = []
+    errors = []
+
+    if request.method == "POST":
+        force = (request.form.get("force") == "1")
+        # ① 既存ファイルから作る
+        sel = request.form.getlist("selected_existing")
+        for name in sel:
+            path = os.path.join(IMAGES_DIR, os.path.basename(name))
+            try:
+                out = _wm_variants_for_path(path, force=force)
+                results.append({"src": name, "out": out})
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+
+        # ② 新規アップロードして作る（複数）
+        ups = request.files.getlist("files")
+        for f in ups:
+            if not f or not f.filename:
+                continue
+            # 既存のアップロード関数があるならそれで保存
+            try:
+                saved = _save_jpeg_1080_350kb(f, previous=None, delete=False)
+                if not saved:
+                    errors.append(f"{f.filename}: 保存に失敗")
+                    continue
+                path = os.path.join(IMAGES_DIR, saved)
+                out = _wm_variants_for_path(path, force=force)
+                results.append({"src": saved, "out": out})
+            except Exception as e:
+                errors.append(f"{f.filename}: {e}")
+
+        flash(f"{len(results)} 件を処理しました" + ("（上書き）" if force else ""))
+        if errors:
+            flash("一部エラー: " + " / ".join(errors))
+
+    existing = _list_source_images()
+    # サムネイルURLは serve_image を利用（wm=none で二重透かし回避）
+    def img_url(fn): 
+        try:
+            return safe_url_for("serve_image", filename=fn, wm="none", _external=True)
+        except Exception:
+            return url_for("serve_image", filename=fn, wm="none", _external=True)
+
+    # 結果のURL化
+    for r in results:
+        o = r["out"]
+        r["url_none"]  = img_url(o["none"])
+        r["url_goto"]  = img_url(o["goto"])
+        r["url_fully"] = img_url(o["fully"])
+        r["url_src"]   = img_url(r["src"])
+
+    return render_template("admin_watermark.html",
+                           existing=existing,
+                           results=results,
+                           role=session.get("role",""))
+# === / 透かし一括生成ツール ====================================
 
 
 @app.route("/_debug/where")
