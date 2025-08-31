@@ -1,58 +1,63 @@
+# === Standard Library ===
 import os
 import json
 import re
+import math
 import datetime
 import itertools
-import time  
-import threading  
+import time
+import threading
 import ipaddress
 import logging
 import uuid
 import hmac, hashlib, base64
-from PIL import ImageDraw, ImageFont
-from PIL import Image, ImageOps  # ← 追加
+import zipfile
+import io
 from pathlib import Path
-
-# 追加:
-import warnings
-from PIL import ImageFile, UnidentifiedImageError
-from werkzeug.exceptions import RequestEntityTooLarge, NotFound
-
-from werkzeug.utils import secure_filename, safe_join
-
+from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
-from werkzeug.routing import BuildError
+import urllib.parse as _u  # ← _extract_wm_flags などで使用
 
-
-
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, send_file, abort, send_from_directory, render_template_string
-
+# === Third-Party ===
 from dotenv import load_dotenv
 load_dotenv()
 
+from flask import (
+    Flask, render_template, request, redirect, url_for, flash, session,
+    jsonify, send_file, abort, send_from_directory, render_template_string
+)
+
+from werkzeug.exceptions import RequestEntityTooLarge, NotFound
+from werkzeug.utils import secure_filename, safe_join
+from werkzeug.routing import BuildError
 from werkzeug.security import check_password_hash, generate_password_hash
 
-# LINE Bot関連
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage  
-from linebot.models import QuickReply, QuickReplyButton, MessageAction
-from linebot.exceptions import LineBotApiError, InvalidSignatureError   
-from linebot.models import ImageSendMessage
-from linebot.models import LocationMessage, FlexSendMessage, LocationAction
-
-
-
 from openai import OpenAI
-import zipfile
-import io
 
-from functools import wraps
+# --- Pillow / PIL ---
+from PIL import Image, ImageOps, ImageDraw, ImageFont
+from PIL import ImageFile, UnidentifiedImageError
 
+# Pillowのバージョン差を吸収したリサンプリング定数
+try:
+    # Pillow >= 9.1
+    RESAMPLE_LANCZOS = Image.Resampling.LANCZOS
+except AttributeError:
+    # Pillow < 9.1 互換
+    RESAMPLE_LANCZOS = getattr(Image, "LANCZOS", getattr(Image, "ANTIALIAS", Image.BICUBIC))
 
+# 破損気味な画像でも読み込むための安全策（任意）
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-# ==== Nearby (現在地から近いスポット検索) ======================================
-import re, math, json, urllib.parse as _u
+# === LINE Bot ===
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import (
+    MessageEvent, TextMessage, TextSendMessage,
+    QuickReply, QuickReplyButton, MessageAction,
+    ImageSendMessage, LocationMessage, FlexSendMessage, LocationAction
+)
+from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
 # =========================
 #  Flask / 設定
@@ -145,7 +150,6 @@ def _flex_viewpoints_map():
         {"type": "text", "text": "五島列島 展望所マップ", "weight": "bold", "wrap": True},
         {"type": "text", "text": "Googleマイマップで展望スポットを一覧表示します。", "size": "sm", "color": "#666666", "wrap": True},
     ]
-    hero = build_flex_hero(entry)  # ← 追加：ここで毎回作る（entry 変数名は実際のものに合わせて）
 
     bubble = {
         "type": "bubble",
@@ -198,22 +202,64 @@ except Exception:
     pass
 
 
-def _wm_choice_from_entries(filename_only: str) -> str | None:
-    """エントリ側のラジオ選択から既定の透かしモードを推定。None=透かし無し"""
+def _wm_choice_from_entries(arg, *, fmt: str = "legacy") -> str | None:
+    """
+    エントリ既定の透かしモードを返す。
+    引数 arg: エントリ dict か 画像ファイル名(文字列)。
+    fmt:
+      - "legacy"     -> "fullygoto" / "gotocity" / None（互換）
+      - "canonical"  -> "fully" / "city" / "none" / None
+
+    返り値:
+      fmtに応じた文字列。見つからない/未設定時は None。
+    """
+    def _to_fmt(v: str | None) -> str | None:
+        # 既存の正規化関数を流用（'fullygoto'等も 'fully'/'city' に正規化される前提）
+        v = _wm_normalize(v)  # -> 'fully'/'city'/'none'/None
+        if v is None:
+            return None
+        if fmt == "legacy":
+            return {"fully": "fullygoto", "city": "gotocity", "none": None}.get(v, None)
+        # canonical
+        return v  # 'fully'/'city'/'none'
+
     try:
+        # 1) dict 直接
+        if isinstance(arg, dict):
+            # 明示指定があれば最優先
+            v = _to_fmt(arg.get("wm_external_choice"))
+            if v is not None:
+                return v
+
+            # 旧互換のブール群（どれか真なら city を既定、偽なら none）
+            legacy_flag = (
+                arg.get("wm_external")
+                or arg.get("wm_ext_fully")
+                or arg.get("wm_ext")
+            )
+            if isinstance(legacy_flag, bool):
+                return _to_fmt("city" if legacy_flag else "none")
+            if legacy_flag:  # 真偽値以外の真も city 既定に寄せる
+                return _to_fmt("city")
+
+            # さらに旧UIの 'wm_on'（真=city/偽=none）
+            if isinstance(arg.get("wm_on"), bool):
+                return _to_fmt("city" if arg.get("wm_on") else "none")
+
+            return None  # 未設定
+
+        # 2) 画像ファイル名で探索
+        fn = str(arg or "").strip()
+        if not fn:
+            return None
         for e in load_entries():
             img = (e.get("image_file") or e.get("image") or "").strip()
-            if img == filename_only:
-                raw = (e.get("wm_external_choice") or "").strip().lower()
-                if raw in {"fully", "fullygoto"}:
-                    return "fullygoto"
-                if raw in {"city", "gotocity"}:
-                    return "gotocity"
-                # 旧ブール互換
-                legacy = e.get("wm_external") or e.get("wm_ext_fully") or e.get("wm_ext")
-                return "gotocity" if legacy else None
+            if img and img == fn:
+                return _wm_choice_from_entries(e, fmt=fmt)
+
     except Exception:
         app.logger.exception("wm choice lookup failed")
+
     return None
 
 def _verify_sig_if_available(filename: str, args) -> bool:
@@ -335,26 +381,6 @@ def _wm_normalize(v) -> str | None:
     return None
 
 
-def _wm_choice_from_entries(arg) -> str | None:
-    """
-    エントリ既定の透かしモードを返す。引数はエントリdict or 画像ファイル名（文字列）。
-    返り値は "fullygoto" / "gotocity" / None（未設定）。
-    """
-    try:
-        if isinstance(arg, dict):
-            raw = arg.get("wm_external_choice")
-            return _wm_normalize(raw)
-        fn = str(arg).strip()
-        if not fn:
-            return None
-        # entries.json から該当画像を探す
-        for e in load_entries():
-            img = (e.get("image_file") or e.get("image") or "").strip()
-            if img and img == fn:
-                return _wm_normalize(e.get("wm_external_choice"))
-    except Exception:
-        pass
-    return None
 # ============================================================================
 
 @app.route("/media/img/<path:filename>")
@@ -691,7 +717,6 @@ def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = No
         if st:
             body_contents.append({"type": "text", "text": st, "size": "sm", "color": "#666666", "wrap": True})
 
-    hero = build_flex_hero(entry)  # ← 追加：ここで毎回作る（entry 変数名は実際のものに合わせて）
 
     bubble = {
         "type": "bubble",
@@ -757,8 +782,6 @@ def _flex_map_series_carousel(exclude_key: str | None = None):
                 {"type": "text", "text": subtitle, "size": "sm", "color": "#666666", "wrap": True}
             )
         
-        hero = build_flex_hero(entry)  # ← 追加：ここで毎回作る（entry 変数名は実際のものに合わせて）
-
         bubble = {
             "type": "bubble",
             **({"hero": hero} if hero else {}),
@@ -853,8 +876,6 @@ def entry_open_map_url(e: dict, *, lat: float|None=None, lng: float|None=None) -
     2) place_id があれば API=1 の query_place_id で “店名つき”検索URLを生成
     3) どちらも無ければ、名前/住所 or 緯度経度で Google Maps の検索URLを組み立てる
     """
-    import urllib.parse as _u
-
     if not isinstance(e, dict):
         return ""
 
@@ -1530,6 +1551,7 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
         legacy = any(_boolish(e.get(k)) for k in ("wm_external", "wm_ext_fully", "wm_ext"))
         wm_choice = "gotocity" if legacy else "none"
     e["wm_external_choice"] = wm_choice
+    e["wm"] = wm_choice          # ← 追加（新コードが参照するエイリアス）
 
     return e
 
@@ -2704,12 +2726,38 @@ def handle_message(event):
                 except Exception:
                     pass
 
-            img_msg = make_line_image_message(entry)  # ← これだけで wm/署名/プレビュー統一
-            if img_msg:
-                msgs.append(img_msg)
+            # 先に URL が作れたならそれを使う
+            if orig_url and prev_url:
+                try:
+                    msgs.append(ImageSendMessage(original_content_url=orig_url, preview_image_url=prev_url))
+                except Exception as e:
+                    app.logger.warning("ImageSendMessage via URL failed: %s", e)
+
+            # URL で送れなかった場合だけ、entry ベースでフォールバック
+            if not any(isinstance(m, ImageSendMessage) for m in msgs):
+                entry_for_img = None
+                try:
+                    entry_for_img = (
+                        locals().get("entry")
+                        or locals().get("entry_edit")
+                        or locals().get("best_entry")
+                    )
+                    if not entry_for_img:
+                        top_hit = locals().get("top_hit")
+                        if isinstance(top_hit, dict) and top_hit.get("id"):
+                            try:
+                                entry_for_img = load_entry_by_id(top_hit["id"])  # 無ければこの3行は削除OK
+                            except Exception:
+                                entry_for_img = None
+                except Exception:
+                    entry_for_img = None
+
+                img_msg = make_line_image_message(entry_for_img) if entry_for_img else None
+                if img_msg:
+                    msgs.append(img_msg)
 
         # 本文は安全分割して複数通に
-        for p in _split_for_line(ans, LINE_SAFE_CHARS):
+        for p in _split_for_line(ans):
             msgs.append(TextSendMessage(text=p))
 
         line_bot_api.reply_message(event.reply_token, msgs)
@@ -2990,16 +3038,41 @@ def _wm_choice_for_entry(entry: dict | None) -> str:
         raw = "fullygoto" if entry.get("wm_on", True) else "none"
     return _normalize_wm_choice(raw, wm_on_default=True)
 
+def _abs_media_url(img: str, query: dict | None = None) -> str:
+    """/media/img/<img>?... の絶対URLを https で作る"""
+    from urllib.parse import urlencode
+    from flask import request
+    base = (request.url_root or "").rstrip("/")
+    url = f"{base}/media/img/{img}"
+    if query:
+        url += "?" + urlencode(query)
+    # LINE 用に https を強制（Renderでhttpが混ざる事故防止）
+    if url.startswith("http://"):
+        url = "https://" + url[len("http://"):]
+    return url
 
-def _wm_image_urls(entry: dict, filename: str):
+def _wm_image_urls(entry: dict, img: str) -> tuple[str, str]:
     """
-    送信用の画像URLを一元生成するユーティリティ。
-      - original:   原寸（外部公開）→ 選択モードの透かし（署名付き）
-      - preview:    サムネ           → 常に透かし
+    original: 選択透かし（wm=none のときは素の画像）
+    preview : 常に透かし（wm=none のとき PREVIEW_WM_DEFAULT を使用）
     """
-    mode = _wm_choice_for_entry(entry)
-    original = safe_url_for("serve_image", filename=filename, _sign=True, wm=mode)
-    preview  = safe_url_for("serve_image", filename=filename, wm=1)
+    wm = (entry.get("wm") or "none").strip()
+    if wm not in WM_VALUES:
+        wm = "none"
+
+    # original は wm が none なら素の画像、それ以外は署名つき
+    if wm == "none":
+        original = _abs_media_url(img)
+    else:
+        original = _abs_media_url(img, {"_sign": "True", "wm": wm})
+
+    # preview は常に透かし。wm=none のときは既定の透かしを使う
+    p_wm = wm if wm != "none" else PREVIEW_WM_DEFAULT
+    if p_wm != "none":
+        preview = _abs_media_url(img, {"_sign": "True", "wm": p_wm})
+    else:
+        preview = original  # 既定が none の設定なら original を流用
+
     return original, preview
 
 def build_flex_hero(entry: dict, ratio: str = "16:9"):
@@ -3027,30 +3100,52 @@ def build_flex_hero(entry: dict, ratio: str = "16:9"):
     }
 
 # ==== LINE 送信用：画像URLを一元生成するヘルパ ===========================
+PREVIEW_WM_DEFAULT = os.getenv("PREVIEW_WM_DEFAULT", "fullygoto")
 
-def _entry_image_name(entry: dict | None) -> str | None:
-    """エントリから主画像ファイル名を取得（image_file 優先）。"""
+def _entry_image_name(entry: dict) -> str | None:
+    """entry から主画像ファイル名を1つ取り出す（images優先, imageフォールバック）"""
     if not entry:
         return None
-    return entry.get("image_file") or entry.get("image") or None
+    imgs = entry.get("images")
+    if isinstance(imgs, list) and imgs and isinstance(imgs[0], str) and imgs[0]:
+        return imgs[0]
+    img = entry.get("image")
+    if isinstance(img, str) and img:
+        return img
+    return None
 
 
-def make_line_image_message(entry: dict) -> "ImageSendMessage | None":
+def make_line_image_message(entry: dict) -> ImageSendMessage:
     """
-    ImageSendMessage を“正規化済みURL”で作る。
-    - original_content_url: 署名 + 選択透かし（none/fullygoto/gotocity）
-    - preview_image_url:    常に透かし（サムネ）
+    entry から主画像を1枚取り、選択中の透かしで署名URLを作って返す。
+    必要キー:
+      - images: List[str]  先頭を使用
+      - wm: str            'none' / 'fullygoto' / 'gotocity' のいずれか
     """
-    img = _entry_image_name(entry)
-    if not img:
-        return None
-    original, preview = _wm_image_urls(entry, img)
-    try:
-        return ImageSendMessage(original_content_url=original, preview_image_url=preview)
-    except Exception:
-        app.logger.exception("make_line_image_message failed")
-        return None
+    from urllib.parse import urlencode
+    from flask import request
 
+    if not entry or not isinstance(entry, dict):
+        raise ValueError("make_line_image_message: entry is missing or not a dict")
+
+    images = entry.get("images") or []
+    if not images:
+        raise ValueError("make_line_image_message: entry['images'] is empty")
+
+    fname = images[0]
+    wm = (entry.get("wm") or "none").strip()
+    qs = ""
+    if wm != "none":
+        qs = "?" + urlencode({"_sign": True, "wm": wm})
+
+    # 絶対URL（Render で https を強制）
+    base = (request.url_root or "").rstrip("/")
+    signed = f"{base}/media/img/{fname}{qs}"
+
+    return ImageSendMessage(
+        original_content_url=signed,
+        preview_image_url=signed,
+    )
 
 def make_flex_hero_image(entry: dict) -> dict | None:
     """
@@ -3726,7 +3821,7 @@ def _compose_watermark(base_im, mode: str):
     target_w = max(1, int(bw * _WM_SCALE_W))
     scale = target_w / wm.width
     target_h = max(1, int(wm.height * scale))
-    wm_resized = wm.resize((target_w, target_h), RESAMPLE_LANCZOS)
+    wm_resized = wm.resize((target_w, target_h), resample=RESAMPLE_LANCZOS)
 
     # 透明度
     if _WM_OPACITY < 1.0:
