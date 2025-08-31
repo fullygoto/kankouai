@@ -440,8 +440,6 @@ def _wm_normalize(v) -> str | None:
 
 # ============================================================================
 
-
-
 @app.route("/media/img/<path:filename>")
 def serve_image(filename):
     """
@@ -467,26 +465,25 @@ def serve_image(filename):
             _env_truthy(os.getenv("WM_ENABLE"))
         )
 
-    # ============================================================
-    # Watermark 正規化ヘルパ（どこからでも呼べる場所に配置）
-    # ============================================================
-
-    # --- 正規化関数（グローバル版を使う。無ければ安全フォールバック） ---
-    _normalize_wm_choice_local = globals().get("_normalize_wm_choice")
-    if not callable(_normalize_wm_choice_local):
-        def _normalize_wm_choice_local(choice: str | None, wm_on_default: bool = True) -> str:
-            c = (str(choice or "")).strip().lower()
-            if c in ("none", "fullygoto", "gotocity"):
-                return c
-            if c in ("1", "true", "on", "yes"):
-                return "fullygoto"
-            if c in ("0", "false", "off", "no", ""):
-                return "none"
-            if c == "fully":
-                return "fullygoto"
-            if c == "city":
-                return "gotocity"
-            return "fullygoto" if wm_on_default else "none"
+    # --- wm 正規化 ---
+    def _normalize_wm_choice_local(choice: str | None, wm_on_default: bool = True) -> str:
+        if "_normalize_wm_choice" in globals():
+            try:
+                return globals()["_normalize_wm_choice"](choice, wm_on_default=wm_on_default)
+            except Exception:
+                pass
+        c = (str(choice or "")).strip().lower()
+        if c in ("none", "fullygoto", "gotocity"):
+            return c
+        if c in ("1", "true", "on", "yes", "thumb", "preview"):
+            return "gotocity"  # サムネ指定や真値は既定で gotocity
+        if c in ("0", "false", "off", "no", ""):
+            return "none"
+        if c == "fully":
+            return "fullygoto"
+        if c == "city":
+            return "gotocity"
+        return "fullygoto" if wm_on_default else "none"
 
     # --- 署名検証（外部があれば利用／無ければfail-open） ---
     def _verify_sig_if_available_local(fn: str, qargs) -> bool:
@@ -3171,6 +3168,24 @@ WM_TEXTS = {
 # Watermark 正規化ヘルパ（どこからでも呼べる場所に配置）
 # ============================================================
 
+def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+    """
+    入力のゆらぎ（'fully' / 'city' / '1' / True / None など）を
+    保存・配信で使う正規形 'none' / 'fullygoto' / 'gotocity' に統一する。
+    """
+    c = (str(choice or "")).strip().lower()
+    if c in ("none", "fullygoto", "gotocity"):
+        return c
+    if c in ("1", "true", "on", "yes"):
+        return "fullygoto"
+    if c in ("0", "false", "off", "no", ""):
+        return "none"
+    if c == "fully":
+        return "fullygoto"
+    if c == "city":
+        return "gotocity"
+    return "fullygoto" if wm_on_default else "none"
+
 
 def _wm_choice_for_entry(entry: dict | None) -> str:
     """
@@ -4827,36 +4842,6 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
         return entries, stats, preview
     return new_list, stats, preview
 
-# ============================================================
-# Watermark 正規化（グローバル唯一の定義）
-# ============================================================
-def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
-    """
-    入力のゆらぎ（'fully' / 'city' / '1' / True / None など）を
-    保存・配信で使う正規形 'none' / 'fullygoto' / 'gotocity' に統一する。
-
-    受理する主な入力:
-      - 'none' / 'fullygoto' / 'gotocity' → そのまま返す
-      - 'fully' → 'fullygoto'（全面透かし）
-      - 'city'  → 'gotocity'（市ロゴのみ）
-      - 真偽っぽい値:
-          '1', 'true', 'on', 'yes'  → 'fullygoto'
-          '0', 'false', 'off', 'no', '' → 'none'
-      - それ以外/未指定 → wm_on_default が True なら 'fullygoto'、False なら 'none'
-    """
-    c = (str(choice or "")).strip().lower()
-    if c in ("none", "fullygoto", "gotocity"):
-        return c
-    if c in ("1", "true", "on", "yes"):
-        return "fullygoto"
-    if c in ("0", "false", "off", "no", ""):
-        return "none"
-    if c == "fully":
-        return "fullygoto"
-    if c == "city":
-        return "gotocity"
-    return "fullygoto" if wm_on_default else "none"
-
 # =========================
 #  基本I/O
 # =========================
@@ -5373,6 +5358,19 @@ def build_refine_suggestions(question):
     # 返り値の meta に probe も載せる（後方互換）
     return msg, {"areas": areas, "tags": top_tags, "filters": filters, "probe": probe_lines}
 
+def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+    """
+    UI/旧データの 'fully' / 'city' / '' を正規化して
+    'none' / 'fullygoto' / 'gotocity' に統一する。
+    """
+    c = (choice or "").strip().lower()
+    if c in ("none", "fullygoto", "gotocity"):
+        return c
+    if c == "fully":
+        return "fullygoto"
+    if c == "city":
+        return "gotocity"
+    return "fullygoto" if wm_on_default else "none"
 
 # ---- 画像メタ情報（共通化） ----
 def _image_meta(img_name: str | None):
@@ -5426,6 +5424,22 @@ def admin_entry():
     import os  # ローカルimportで安全に
     import re as _re
     from werkzeug.exceptions import RequestEntityTooLarge  # ★ 追加：except用に確実に定義
+
+    # --- 透かし選択の正規化ヘルパ（この関数内専用・既存に影響なし） ---
+    def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+        """
+        UI/旧データの 'fully' / 'city' / '' を正規化して
+        'none' / 'fullygoto' / 'gotocity' に統一する。
+        wm_on_default は未指定時の既定（True→fullygoto, False→none）
+        """
+        c = (choice or "").strip().lower()
+        if c in ("none", "fullygoto", "gotocity"):
+            return c
+        if c == "fully":
+            return "fullygoto"
+        if c == "city":
+            return "gotocity"
+        return "fullygoto" if wm_on_default else "none"
 
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
@@ -7478,14 +7492,28 @@ def _format_entry_messages(e: dict):
     # 画像（image_file 優先 / 後方互換で image も見る）
     img_name = (e.get("image_file") or e.get("image") or "").strip()
     if img_name:
+        img_url = ""
         try:
-            # 透かし/署名/プレビューはヘルパーで統一処理
-            img_msg = make_line_image_message(e)  # ← 修正: entry ではなく e を渡す
-            if img_msg:
-                msgs.append(img_msg)
+            # 可能なら絶対URLを生成（LINEは絶対URL推奨）
+            img_url = build_signed_image_url(img_name, wm=True, external=True)
         except Exception:
-            # LINE SDKの型エラー等は握りつぶしてテキストのみ送る
-            app.logger.exception("failed to build ImageSendMessage")
+            # リクエストコンテキスト外などで失敗した場合のフォールバック
+            try:
+                base = (request.url_root or "").rstrip("/")
+                img_url = f"{base}{MEDIA_URL_PREFIX}/{img_name}" if base else f"{MEDIA_URL_PREFIX}/{img_name}"
+            except Exception:
+                img_url = ""
+
+        if img_url:
+            try:
+                # img_url に wm= が付いていれば最優先、無ければ透かし無し扱いで署名URL化
+                orig_url, prev_url = _line_img_pair_from_url(img_url, None)
+                img_msg = make_line_image_message(entry)  # ← これだけで wm/署名/プレビュー統一
+                if img_msg:
+                    msgs.append(img_msg)
+            except Exception:
+                # LINE SDKの型エラー等は握りつぶしてテキストのみ送る
+                app.logger.exception("failed to build ImageSendMessage")
 
     # 本文テキスト（長文は安全分割）
     text = _format_entry_text(e)
