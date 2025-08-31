@@ -121,7 +121,6 @@
               <img class="thumb" src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
               <div class="card-actions">
                 <a class="btn small" href="{{ _edit_href }}">編集</a>
-                <!-- ★ 削除はネストフォームをやめて外部フォームを使う -->
                 <button class="btn ghost small" type="button" data-del="{{ fn }}">削除</button>
               </div>
             </div>
@@ -132,9 +131,13 @@
       </div>
     </form>
 
-    <!-- ★ 削除専用フォーム：ページ末尾に1つだけ置く -->
+    <!-- 削除専用フォーム（現在の表示条件も同梱してPOST） -->
     <form id="delForm" method="post" action="{{ safe_url_for('admin_media_delete') or url_for('admin_media_delete') }}" style="display:none">
       <input type="hidden" name="filename" id="delName">
+      <input type="hidden" name="order"    id="delOrder"  value="{{ _order }}">
+      <input type="hidden" name="picker"   id="delPicker" value="{{ '1' if picker else '' }}">
+      <input type="hidden" name="subdir"   id="delSubdir" value="{{ _subdir }}">
+      <input type="hidden" name="q"        id="delQ"      value="{{ q|e }}">
     </form>
 
     {% if results and results|length %}
@@ -146,6 +149,7 @@
             <div class="small muted">元画像</div>
             <a href="{{ r.url_src }}" target="_blank" rel="noopener"><img src="{{ r.url_src }}" loading="lazy" alt="src"></a>
             <div class="name">{{ r.src }}</div>
+
             {% if r.url_none %}
               <div class="small muted" style="margin-top:10px">透かし：なし（__none）</div>
               <a href="{{ r.url_none }}" target="_blank" rel="noopener"><img src="{{ r.url_none }}" loading="lazy" alt="none"></a>
@@ -246,16 +250,27 @@
         });
       }
 
-      // ★ 削除：隠しフォームを使ってPOST
+      // 削除：隠しフォームに現在の表示条件も詰めてPOST
       const delForm = document.getElementById('delForm');
       const delName = document.getElementById('delName');
+      const delOrder  = document.getElementById('delOrder');
+      const delPicker = document.getElementById('delPicker');
+      const delSubdir = document.getElementById('delSubdir');
+      const delQ      = document.getElementById('delQ');
+
       grid.addEventListener('click', (e)=>{
         const btn = e.target.closest('[data-del]');
         if(!btn) return;
         const name = btn.getAttribute('data-del');
         if(!name) return;
         if(!confirm('この画像を削除します。よろしいですか？')) return;
+
         delName.value = name;
+        delOrder.value  = orderSel ? orderSel.value : (delOrder.value || '');
+        delPicker.value = picker ? '1' : '';
+        delSubdir.value = subdir || '';
+        delQ.value      = (q && q.value) ? q.value : (delQ.value || '');
+
         delForm.submit();
       });
 
