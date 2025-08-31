@@ -45,6 +45,20 @@
             input[type=text], textarea {width:96%;}
             .filterbar input[type=text], .filterbar select {min-width:130px}
         }
+
+        /* === 追加：透かし生成済みから選ぶ専用UI === */
+        .wm-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0 8px}
+        .wm-toolbar .grow{flex:1}
+        .wm-search{width:100%;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
+        .wm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:10px}
+        .wm-card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
+        .wm-card .name{display:block;margin-top:6px;font-size:.92em;color:#345;word-break:break-all}
+        .wm-card .small{font-size:.9em;color:#567;margin-top:4px}
+        .wm-variant{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+        .wm-variant button{padding:6px 10px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+        .wm-variant button.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+        .wm-preview{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+        .wm-counts{font-size:.9em;color:#567}
     </style>
 
     <script>
@@ -379,6 +393,7 @@
 
     // ラジオ名分離 + hidden 同期（観光=t, 店舗=s）
     function _bindWmRadios(section){
+        // （観光側は下で差し替え済みのため、店舗側のみ動作）
         const rootId = section==='t' ? 'form_tourism' : 'form_shop';
         const blockId = section==='t' ? 'wm-block-t' : 'wm-block-s';
         const imgId = section==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s';
@@ -411,7 +426,6 @@
             });
         });
 
-        // 初期表示：checked → hidden 反映 & プレビュー同期
         const init = root.querySelector(`input[name="${radioName}"]:checked`);
         if(init){
             master.value = init.value || master.value;
@@ -437,8 +451,7 @@
         const master = document.getElementById('wm_choice_master');
         if(!master) return;
         if(cat === '観光'){
-            const p = document.querySelector('#form_tourism input[name="wm_choice_t"]:checked');
-            if(p) master.value = p.value;
+            // 観光側はギャラリー選択で master を更新するためここでは何もしない
         }else{
             const p = document.querySelector('#form_shop input[name="wm_choice_s"]:checked');
             if(p) master.value = p.value;
@@ -452,13 +465,88 @@
         _syncWmFromVisible();
     }
 
+    /* ========= 観光フォーム：透かし生成済みギャラリー選択 ========= */
+
+    function _wmBuildVariantName(fn, kind){
+        // kind: 'none' | 'fullygoto' | 'gotocity'（ファイルは __none / __fullygoto / __goto）
+        const dot = fn.lastIndexOf('.');
+        const base = dot >= 0 ? fn.slice(0, dot) : fn;
+        const ext  = dot >= 0 ? fn.slice(dot) : '';
+        const suf  = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
+        return base + suf + ext;
+    }
+    function _wmVariantUrl(fn, kind){
+        // 透かしバリアントの静的プレビュー（サーバ側の admin_media_img で配信）
+        const vname = _wmBuildVariantName(fn, kind);
+        return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(vname);
+    }
+    function _wmSrcUrl(fn){
+        return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(fn);
+    }
+    function _setSelectedImage(fn, kind){
+        // hidden へ反映（従来の保存仕様を維持）
+        const sel = document.getElementById('selected_image');
+        const master = document.getElementById('wm_choice_master');
+        if(sel) sel.value = fn;                 // 元画像ファイル名
+        if(master) master.value = kind;         // none/fullygoto/gotocity
+
+        // 上部の現在画像プレビューも更新（実体はバリアントを見せる）
+        const img = document.getElementById('admin-image-preview-t');
+        if(img){
+            const url = _wmVariantUrl(fn, kind);
+            img.src = url;
+            img.setAttribute('data-fullsrc', url);
+            if(img.complete) annotateImageMeta(img);
+            else img.onload = ()=> annotateImageMeta(img);
+        }
+    }
+    function bindWmGallery(){
+        const q = document.getElementById('wm_q');
+        const grid = document.getElementById('wm_grid');
+        if(!grid) return;
+        const cards = Array.from(grid.querySelectorAll('.wm-card'));
+        const shownCount = document.getElementById('wm_shown');
+        const totalCount = document.getElementById('wm_total');
+
+        function updateCounts(){
+            if(totalCount) totalCount.textContent = cards.length;
+            if(shownCount){
+                let shown = 0;
+                for(const c of cards){ if(c.style.display !== 'none') shown++; }
+                shownCount.textContent = shown;
+            }
+        }
+        function filter(){
+            const term = (q?.value || '').trim().toLowerCase();
+            for(const c of cards){
+                const name = (c.dataset.name || '').toLowerCase();
+                c.style.display = (!term || name.includes(term)) ? '' : 'none';
+            }
+            updateCounts();
+        }
+        grid.addEventListener('click', (e)=>{
+            const btn = e.target.closest('button[data-fn][data-kind]');
+            if(btn){
+                const fn = btn.getAttribute('data-fn');
+                const kind = btn.getAttribute('data-kind');
+                _setSelectedImage(fn, kind);
+                // 選択の視覚フィードバック
+                grid.querySelectorAll('button[data-fn][data-kind]').forEach(b=>b.classList.remove('ghost'));
+                btn.classList.add('ghost');
+            }
+        });
+        q?.addEventListener('input', filter);
+        updateCounts();
+    }
+
     window.onload = function(){
         onCategoryChange();
         filterCards();
-        _bindWmRadios('t');
+        _bindWmRadios('t'); // 観光側は実質無視（店舗側のみ使用）
         _bindWmRadios('s');
         _syncWmFromVisible();
         annotateAllImages(); // 画像メタの初期表示
+        bindWmGallery();
     };
     </script>
 </head>
@@ -492,7 +580,7 @@
         <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
         <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
-        <!-- ▼ 追加：透かし一括生成ページ -->
+        <!-- 追加：透かし一括生成ページ -->
         <a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}">[透かし一括生成]</a>
         <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
@@ -548,6 +636,8 @@
 
         <!-- 代表（サーバに送る唯一の値） -->
         <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_init }}">
+        <!-- 新UIで選んだ元画像ファイル名を送る -->
+        <input type="hidden" name="selected_image" id="selected_image" value="">
 
         <label>カテゴリー</label><br>
         <select name="category" id="category_select" onchange="onCategoryChange()">
@@ -566,37 +656,10 @@
             <label>説明</label><br>
             <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
 
-            <!-- 画像アップロード（観光地） -->
-            <div class="mb-3">
-                <label for="image_file_t" class="form-label">画像アップロード</label>
-                <input type="file" class="form-control" id="image_file_t" name="image_file" accept="image/*">
-                {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
-                {% if _imgname_t %}
-                <div class="mt-2" id="wm-block-t" data-filename="{{ _imgname_t }}">
-                    <div>現在の画像:</div>
-                    {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
-                    {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
-                    {% set _wm_choice_t = (
-                        _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
-                        else ('fullygoto' if _wm_raw_t == 'fully'
-                        else ('gotocity' if _wm_raw_t == 'city'
-                        else ('fullygoto' if _wm_on_t else 'none')))
-                    ) %}
-                    <img id="admin-image-preview-t" class="thumb"
-                         src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
-                         alt="現在の画像"
-                         style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
-                         referrerpolicy="no-referrer" loading="lazy" />
-                    <div class="form-check mt-2">
-                        <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
-                        <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
-                    </div>
-                </div>
-                {% endif %}
-                <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
-            </div>
+            {# ====== ここから差し替え：既存「画像アップロード＋透かし選択」を削除 ====== #}
 
-            {# ▼▼▼ 透かし選択 ▼▼▼ #}
+            {# 現在の画像（従来通り保持） #}
+            {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
             {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
             {% set _wm_choice_t = (
@@ -605,19 +668,58 @@
                 else ('gotocity' if _wm_raw_t == 'city'
                 else ('fullygoto' if _wm_on_t else 'none')))
             ) %}
-            <div class="mt-2">
-                <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
-                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                    <input type="radio" name="wm_choice_t" value="none" {% if _wm_choice_t=='none' %}checked{% endif %}> なし
-                </label>
-                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                    <input type="radio" name="wm_choice_t" value="fullygoto" {% if _wm_choice_t=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
-                </label>
-                <label style="display:inline-flex;align-items:center;gap:.4em;">
-                    <input type="radio" name="wm_choice_t" value="gotocity" {% if _wm_choice_t=='gotocity' %}checked{% endif %}> ＠Goto City
-                </label>
+
+            {% if _imgname_t %}
+            <div class="mt-2" id="wm-block-t" data-filename="{{ _imgname_t }}">
+                <div>現在の画像:</div>
+                <img id="admin-image-preview-t" class="thumb"
+                     src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
+                     alt="現在の画像"
+                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                     referrerpolicy="no-referrer" loading="lazy" />
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
+                    <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
+                </div>
             </div>
-            {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
+            {% endif %}
+
+            <!-- 新：透かし一括作成ページで生成した写真から選ぶ -->
+            <div class="row" style="margin-top:12px">
+                <div class="mini-note" style="margin-bottom:6px;">
+                    下の一覧は「透かし一括作成」で作成した画像です（新しい順）。必要なら
+                    <a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">こちら</a>
+                    で新たに生成してください。
+                </div>
+
+                {% if wm_recent and wm_recent|length %}
+                  <div class="wm-toolbar">
+                    <div class="grow"><input id="wm_q" class="wm-search" type="search" placeholder="ファイル名で絞り込み（例: beach, 2024_ など）"></div>
+                    <span class="wm-counts"><span id="wm_shown">0</span> / <span id="wm_total">{{ wm_recent|length }}</span> 表示</span>
+                  </div>
+
+                  <div id="wm_grid" class="wm-grid">
+                    {% for fn in wm_recent %}
+                      <div class="wm-card" data-name="{{ fn|lower }}">
+                        <div class="small muted">プレビュー（透かし：なし）</div>
+                        <img class="wm-preview" src="{{ url_for('admin_media_img', filename=fn[:-fn.rfind('.')-1] ~ '__none' ~ fn[fn.rfind('.'):]) if ('.' in fn) else url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
+
+                        <span class="name">{{ fn }}</span>
+
+                        <div class="wm-variant">
+                          <button type="button" class="ghost" data-fn="{{ fn }}" data-kind="none">選ぶ（なし）</button>
+                          <button type="button" data-fn="{{ fn }}" data-kind="fullygoto">選ぶ（＠fullyGOTO）</button>
+                          <button type="button" data-fn="{{ fn }}" data-kind="gotocity">選ぶ（＠Goto City）</button>
+                        </div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                {% else %}
+                  <div class="mini-note">生成済み画像がまだありません。<a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">透かし一括作成</a>で作成後、ここで選択できます。</div>
+                {% endif %}
+            </div>
+
+            {# ====== 差し替えここまで ====== #}
 
             <label>住所</label><br>
             <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
@@ -689,7 +791,7 @@
             <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-tourism')">＋ 行を追加</button>
         </div>
 
-        <!-- 店舗系カテゴリ用フォーム -->
+        <!-- 店舗系カテゴリ用フォーム（従来のまま） -->
         <div id="form_shop" style="display:none;">
             <label>タイトル</label><br>
             <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
@@ -727,7 +829,7 @@
                 <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
             </div>
 
-            {# ▼▼▼ 透かし選択 ▼▼▼ #}
+            {# ▼▼▼ 透かし選択（店舗） ▼▼▼ #}
             {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
             {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
             {% set _wm_choice_s = (
@@ -1040,5 +1142,12 @@
         <button type="button" class="btn last" onclick="gotoPage('last')">最後 ≫</button>
     </div>
 </div>
+
+<script>
+/* サーバの画像URLテンプレート（必要なら上書き）
+   例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
+   今回はデフォルトで /admin/media/img/<filename> を想定
+*/
+</script>
 </body>
 </html>
