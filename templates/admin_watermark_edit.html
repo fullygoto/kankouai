@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>透かし編集：{{ filename }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:#f6faf9;padding:20px}
+    .container{background:#fff;max-width:980px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;text-decoration:none}
+    .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .muted{color:#567}
+    img{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+    fieldset{border:1px solid #e7eef5;border-radius:10px;padding:10px 12px;margin-top:12px}
+    legend{padding:0 6px;color:#234}
+    .radios{display:flex;gap:10px;flex-wrap:wrap}
+    .radios label{display:flex;gap:6px;align-items:center;background:#f3f8fc;border:1px solid #dbe8f3;border-radius:10px;padding:6px 10px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <h1 style="margin:0">透かし編集</h1>
+      <div class="row">
+        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧へ</a>
+      </div>
+    </div>
+
+    <div class="row">
+      <div style="flex:1;min-width:260px">
+        <div class="muted">元画像</div>
+        <a href="{{ url_for('admin_media_img', filename=filename) }}" target="_blank" rel="noopener">
+          <img src="{{ url_for('admin_media_img', filename=filename) }}" loading="lazy" alt="{{ filename }}">
+        </a>
+        <div class="muted" style="margin-top:6px;word-break:break-all">{{ filename }}</div>
+      </div>
+      {% if preview %}
+      <div style="flex:1;min-width:260px">
+        <div class="muted">現在の外部公開バリエーション</div>
+        <div class="row">
+          {% if preview.none %}<a href="{{ preview.none }}" target="_blank" rel="noopener" class="btn ghost">none</a>{% endif %}
+          {% if preview.goto %}<a href="{{ preview.goto }}" target="_blank" rel="noopener" class="btn ghost">@Goto</a>{% endif %}
+          {% if preview.fully %}<a href="{{ preview.fully }}" target="_blank" rel="noopener" class="btn ghost">@fullyGOTO</a>{% endif %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    <form method="post" action="{{ url_for('admin_watermark_edit_apply') }}" style="margin-top:12px">
+      <input type="hidden" name="filename" value="{{ filename }}">
+      <fieldset>
+        <legend>生成する透かし</legend>
+        {% set current = wm or 'all' %}
+        <div class="radios">
+          <label><input type="radio" name="wm" value="all"   {{ 'checked' if current=='all' }}> 全部（none/@Goto/@fully を生成）</label>
+          <label><input type="radio" name="wm" value="none"  {{ 'checked' if current=='none' }}> なし（__none）</label>
+          <label><input type="radio" name="wm" value="goto"  {{ 'checked' if current=='goto' }}> ＠Goto City（__goto）</label>
+          <label><input type="radio" name="wm" value="fully" {{ 'checked' if current=='fully' }}> ＠fullyGOTO（__fullygoto）</label>
+        </div>
+        <div style="margin-top:8px">
+          <label style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" name="force" value="1"> 既存の __none / __goto / __fullygoto を上書きする
+          </label>
+        </div>
+      </fieldset>
+      <div style="margin-top:12px" class="row">
+        <button class="btn" type="submit">再生成する</button>
+        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">キャンセル</a>
+      </div>
+    </form>
+  </div>
+</body>
+</html>

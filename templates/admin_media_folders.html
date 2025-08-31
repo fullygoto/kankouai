@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>画像フォルダを選択</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{--bg:#f6faf9;--card:#fff;--line:#e7eef5;--brand:#2a8ed8;--muted:#567}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
+  .container{background:var(--card);max-width:900px;margin:0 auto;padding:18px 20px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+  h1{margin:0 0 10px}
+  .tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+  .input{flex:1;min-width:220px;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:10px}
+  .card{border:1px solid #e5eef5;border-radius:10px;padding:12px;background:#fbfdff}
+  .name{font-weight:600;color:#234}
+  .muted{color:var(--muted);font-size:.92em}
+  .btn{display:inline-block;padding:7px 12px;border-radius:8px;background:var(--brand);color:#fff;text-decoration:none}
+  .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="topbar">
+    <h1>画像フォルダを選択</h1>
+    <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+  </div>
+
+  {% set picker = (request.args.get('picker') if request is defined else (picker if picker is defined else 0)) %}
+  <div class="tools">
+    <input id="q" class="input" type="search" placeholder="フォルダ名で絞り込み（例: 2024, summer, beach）">
+    <span class="muted"><span id="shown">0</span> / <span id="total">{{ folders|length if folders else 0 }}</span> 表示</span>
+  </div>
+
+  <div id="grid" class="grid">
+    {% if folders and folders|length %}
+      {% for f in folders %}
+        <div class="card" data-name="{{ f|lower }}">
+          <div class="name">{{ f }}</div>
+          <div class="muted">{{ (folder_counts[f] ~ ' 枚') if folder_counts is defined and f in folder_counts else '' }}</div>
+          <div style="margin-top:8px">
+            <a class="btn" href="{{ url_for('admin_media_browse', folder=f, picker=picker or 0) }}">このフォルダを開く</a>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="muted">フォルダがありません。</div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+(function(){
+  const q = document.getElementById('q');
+  const grid = document.getElementById('grid');
+  const shown = document.getElementById('shown');
+  const total = document.getElementById('total');
+  function update(){
+    const term = (q.value||'').trim().toLowerCase();
+    let c=0;
+    grid.querySelectorAll('.card').forEach(card=>{
+      const ok = !term || (card.dataset.name||'').includes(term);
+      card.style.display = ok ? '' : 'none';
+      if(ok) c++;
+    });
+    shown.textContent = c;
+  }
+  if(q) q.addEventListener('input', update);
+  update();
+})();
+</script>
+</body>
+</html>

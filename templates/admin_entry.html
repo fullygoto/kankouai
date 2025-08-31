@@ -573,33 +573,33 @@
 
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
-        <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
-        <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-        <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-        <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-        <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
-        <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
-        <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
-        <!-- 追加：透かし一括生成ページ -->
-        <a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}">[透かし一括生成]</a>
-        <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+    <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
+    <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+    <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+    <!-- ▼ 復活：全体バックアップ -->
+    <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
+    <!-- ▲ 復活ここまで -->
+    <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
+    <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
+    <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
+    <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
+    <a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}">[透かし一括生成]</a>
+    <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
-        <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
-            <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
-            <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
-        </form>
+    <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
+        <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
+        <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
+    </form>
 
-        <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
-            <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">
-                [LINE応答 一時停止]
-            </button>
-        </form>
-        <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
-            <button class="btn ghost" type="submit">[再開]</button>
-        </form>
-        {% if global_paused %}
-          <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">LINE停止中</span>
-        {% endif %}
+    <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
+        <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">[LINE応答 一時停止]</button>
+    </form>
+    <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
+        <button class="btn ghost" type="submit">[再開]</button>
+    </form>
+    {% if global_paused %}
+        <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">LINE停止中</span>
+    {% endif %}
     </div>
     <h1 style="margin-bottom:20px;">観光データ（管理者モード） {{ '編集' if edit_id else '登録' }}</h1>
     {% else %}
@@ -650,301 +650,426 @@
 
         <!-- 観光地用フォーム -->
         <div id="form_tourism" style="display:none;">
-            <label>タイトル</label><br>
-            <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
 
-            <label>説明</label><br>
-            <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+        <style>
+            /* ▼ 画像ピッカー連携の軽量スタイル（他と衝突しないプリフィクス） */
+            .pickbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+            .pickbar .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+            .pickbar .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+            .mini-note a{color:#2a8ed8;text-decoration:none}
+            .mini-note a:hover{text-decoration:underline}
+        </style>
 
-            {# ====== ここから差し替え：既存「画像アップロード＋透かし選択」を削除 ====== #}
+        <label>タイトル</label><br>
+        <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
 
-            {# 現在の画像（従来通り保持） #}
-            {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
-            {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
-            {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
-            {% set _wm_choice_t = (
-                _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
-                else ('fullygoto' if _wm_raw_t == 'fully'
-                else ('gotocity' if _wm_raw_t == 'city'
-                else ('fullygoto' if _wm_on_t else 'none')))
-            ) %}
+        <label>説明</label><br>
+        <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
 
-            {% if _imgname_t %}
+        {# ===== 現在の画像プレビュー（従来どおり保持） ===== #}
+        {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+        {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+        {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+        {% set _wm_choice_t = (
+            _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
+            else ('fullygoto' if _wm_raw_t == 'fully'
+            else ('gotocity' if _wm_raw_t == 'city'
+            else ('fullygoto' if _wm_on_t else 'none')))
+        ) %}
+        {% if _imgname_t %}
             <div class="mt-2" id="wm-block-t" data-filename="{{ _imgname_t }}">
-                <div>現在の画像:</div>
-                <img id="admin-image-preview-t" class="thumb"
-                     src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
-                     alt="現在の画像"
-                     style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
-                     referrerpolicy="no-referrer" loading="lazy" />
-                <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
-                    <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
-                </div>
+            <div>現在の画像:</div>
+            <img id="admin-image-preview-t" class="thumb"
+                src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
+                alt="現在の画像"
+                style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                referrerpolicy="no-referrer" loading="lazy" />
+            <div class="imgmeta"></div>
+            <div class="form-check mt-2">
+                <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
+                <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
             </div>
-            {% endif %}
-
-            <!-- 新：透かし一括作成ページで生成した写真から選ぶ -->
-            <div class="row" style="margin-top:12px">
-                <div class="mini-note" style="margin-bottom:6px;">
-                    下の一覧は「透かし一括作成」で作成した画像です（新しい順）。必要なら
-                    <a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">こちら</a>
-                    で新たに生成してください。
-                </div>
-
-                {% if wm_recent and wm_recent|length %}
-                  <div class="wm-toolbar">
-                    <div class="grow"><input id="wm_q" class="wm-search" type="search" placeholder="ファイル名で絞り込み（例: beach, 2024_ など）"></div>
-                    <span class="wm-counts"><span id="wm_shown">0</span> / <span id="wm_total">{{ wm_recent|length }}</span> 表示</span>
-                  </div>
-
-                  <div id="wm_grid" class="wm-grid">
-                    {% for fn in wm_recent %}
-                      <div class="wm-card" data-name="{{ fn|lower }}">
-                        <div class="small muted">プレビュー（透かし：なし）</div>
-                        <img class="wm-preview" src="{{ url_for('admin_media_img', filename=fn[:-fn.rfind('.')-1] ~ '__none' ~ fn[fn.rfind('.'):]) if ('.' in fn) else url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
-
-                        <span class="name">{{ fn }}</span>
-
-                        <div class="wm-variant">
-                          <button type="button" class="ghost" data-fn="{{ fn }}" data-kind="none">選ぶ（なし）</button>
-                          <button type="button" data-fn="{{ fn }}" data-kind="fullygoto">選ぶ（＠fullyGOTO）</button>
-                          <button type="button" data-fn="{{ fn }}" data-kind="gotocity">選ぶ（＠Goto City）</button>
-                        </div>
-                      </div>
-                    {% endfor %}
-                  </div>
-                {% else %}
-                  <div class="mini-note">生成済み画像がまだありません。<a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">透かし一括作成</a>で作成後、ここで選択できます。</div>
-                {% endif %}
             </div>
+        {% endif %}
 
-            {# ====== 差し替えここまで ====== #}
+        <!-- サーバに渡す：選択した「元画像」ファイル名（拡張子そのまま） -->
+        <input type="hidden" name="image_existing" id="image_existing_t" value="{{ _imgname_t }}">
 
-            <label>住所</label><br>
-            <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+        <!-- 代表の透かし選択値（ページ上部に既存 hidden がある想定）。無ければ以下を有効化してください。 -->
+        <!-- <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_t }}"> -->
 
-            <label>地図URL</label><br>
-            <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
-
-            <!-- ★ 出典 -->
-            <label>出典</label><br>
-            <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
-
-            <label>出典URL</label><br>
-            <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
-            <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
-
-            <!-- ★ 座標コピペ欄（なんでもOK） -->
-            <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
-            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
-            <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
-
-            <!-- 緯度・経度（小数、任意） -->
-            <label>緯度・経度（任意）</label><br>
-            <div class="row" style="display:flex; gap:10px; align-items:center;">
-                <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
-                <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
-            </div>
-            <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
-
-            <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
-            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
-
-            <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
-            <div class="row">
-                {% for area in area_opts %}
-                <label style="min-width:unset;">
-                    <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
-                </label>
-                {% endfor %}
-            </div>
-
-            <!-- ▼ リンク（複数） -->
-            <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
-            <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
-{% if entry_edit and entry_edit.links %}
-{{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
-{% endif %}
-            </textarea><br>
-
-            <!-- ▼ 追加情報（項目＝内容） -->
-            <label>追加情報（項目＝内容）</label>
-            <div id="extras-list-tourism">
-                {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
-                {% if _extras.items is defined %}
-                    {% for k, v in _extras.items() %}
-                    <div class="extra-row">
-                        <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
-                        <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                        <button type="button" onclick="this.parentNode.remove()">－</button>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="extra-row">
-                        <input name="extras_key[]" placeholder="項目"> ＝
-                        <input name="extras_val[]" placeholder="内容">
-                        <button type="button" onclick="this.parentNode.remove()">－</button>
-                    </div>
-                {% endif %}
-            </div>
-            <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-tourism')">＋ 行を追加</button>
+        <!-- ▼ 画像ピッカー連携バー（フォルダ→画像一覧→選択） -->
+        <div class="pickbar">
+            <button type="button" class="btn" id="btn_open_folder_picker">フォルダから選ぶ</button>
+            <a class="btn ghost" href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">透かし一括作成を開く</a>
+            <span class="mini-note">※「フォルダから選ぶ」＝ 既存フォルダを選択 → 中の画像（登録日の新しい順）からワンクリックで選択できます。</span>
         </div>
 
-        <!-- 店舗系カテゴリ用フォーム（従来のまま） -->
+        <script>
+            (function(){
+            // フォルダ選択ページ（ピッカーモード）を開く
+            const btn = document.getElementById('btn_open_folder_picker');
+            if(btn){
+                btn.addEventListener('click', ()=>{
+                const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
+                const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
+                window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
+                });
+            }
+
+            // バリアント名生成：元画像 + 透かし種別 → 派生ファイル
+            function variantFilename(fn, kind){
+                const i = fn.lastIndexOf('.');
+                const base = i>0 ? fn.slice(0, i) : fn;
+                const ext  = i>0 ? fn.slice(i) : '';
+                const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto'); // gotocity→__goto
+                return base + suffix + ext;
+            }
+
+            // ピッカーからの postMessage を受け取り、hidden とプレビューに反映
+            async function applyPicked(fn, kind){
+                try{
+                // hidden 更新
+                const hImg = document.getElementById('image_existing_t');
+                if(hImg) hImg.value = fn;
+
+                const hWm = document.getElementById('wm_choice_master');
+                if(hWm) hWm.value = kind;
+
+                // プレビュー更新（署名URLが使える場合はそれを優先）
+                const img = document.getElementById('admin-image-preview-t');
+                if(img){
+                    let url = null;
+                    if(typeof _signPreview === 'function'){
+                    try{ url = await _signPreview(fn, kind); }catch(_e){}
+                    }
+                    if(!url){
+                    const vname = variantFilename(fn, kind);
+                    try{
+                        url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname));
+                    }catch(_e){
+                        url = img.src;
+                    }
+                    }
+                    if(url){
+                    img.src = url;
+                    img.setAttribute('data-fullsrc', url);
+                    if(typeof annotateImageMeta === 'function'){
+                        if(img.complete) annotateImageMeta(img);
+                        else img.onload = ()=> annotateImageMeta(img);
+                    }
+                    }
+                }
+                }catch(_e){}
+            }
+
+            // postMessage 受信
+            window.addEventListener('message', (e)=>{
+                const d = e && e.data;
+                if(!d || d.type!=='wm-pick') return;
+                // d = {type:'wm-pick', filename:'xxx.jpg', kind:'none|fullygoto|gotocity'}
+                applyPicked(d.filename, d.kind);
+            }, false);
+
+            // 初期プレビューのメタ注釈
+            const initImg = document.getElementById('admin-image-preview-t');
+            if(initImg){
+                initImg.setAttribute('data-fullsrc', initImg.currentSrc || initImg.src);
+                if(typeof annotateImageMeta==='function'){
+                if(initImg.complete) annotateImageMeta(initImg);
+                else initImg.onload = ()=> annotateImageMeta(initImg);
+                }
+            }
+            })();
+        </script>
+
+        <!-- ▼ 以降は従来の入力群（住所・地図URL・出典・座標・タグ・エリア・リンク・追加情報） -->
+        <label>住所</label><br>
+        <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+
+        <label>地図URL</label><br>
+        <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+
+        <!-- ★ 出典 -->
+        <label>出典</label><br>
+        <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+
+        <label>出典URL</label><br>
+        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source if entry_edit else '' }}"><br>
+        <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
+
+        <!-- ★ 座標コピペ欄（URL / 「緯度,経度」 / DMS 可） -->
+        <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
+        <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
+        <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
+
+        <!-- 緯度・経度（小数、任意） -->
+        <label>緯度・経度（任意）</label><br>
+        <div class="row" style="display:flex; gap:10px; align-items:center;">
+            <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
+            <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
+        </div>
+        <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
+
+        <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
+        <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
+
+        <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
+        <div class="row">
+            {% for area in area_opts %}
+            <label style="min-width:unset;">
+            <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
+            </label>
+            {% endfor %}
+        </div>
+
+        <!-- ▼ リンク（複数） -->
+        <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
+        <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
+        {% if entry_edit and entry_edit.links %}
+        {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
+        {% endif %}
+        </textarea><br>
+
+        <!-- ▼ 追加情報（項目＝内容） -->
+        <label>追加情報（項目＝内容）</label>
+        <div id="extras-list-tourism">
+            {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
+            {% if _extras.items is defined %}
+            {% for k, v in _extras.items() %}
+            <div class="extra-row">
+                <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                <button type="button" onclick="this.parentNode.remove()">－</button>
+            </div>
+            {% endfor %}
+            {% else %}
+            <div class="extra-row">
+                <input name="extras_key[]" placeholder="項目"> ＝
+                <input name="extras_val[]" placeholder="内容">
+                <button type="button" onclick="this.parentNode.remove()">－</button>
+            </div>
+            {% endif %}
+        </div>
+        <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-tourism')">＋ 行を追加</button>
+
+        </div>
+
+        <!-- 店舗系カテゴリ用フォーム -->
         <div id="form_shop" style="display:none;">
-            <label>タイトル</label><br>
-            <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
 
-            <label>説明</label><br>
-            <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+        <style>
+            .pickbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+            .pickbar .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+            .pickbar .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+            .mini-note a{color:#2a8ed8;text-decoration:none}
+            .mini-note a:hover{text-decoration:underline}
+        </style>
 
-            <!-- 画像アップロード（店舗） -->
-            <div class="mb-3">
-                <label for="image_file_s" class="form-label">画像アップロード</label>
-                <input type="file" class="form-control" id="image_file_s" name="image_file" accept="image/*">
-                {% set _imgname_s = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
-                {% if _imgname_s %}
-                <div class="mt-2" id="wm-block-s" data-filename="{{ _imgname_s }}">
-                    <div>現在の画像:</div>
-                    {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
-                    {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
-                    {% set _wm_choice_s = (
-                        _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
-                        else ('fullygoto' if _wm_raw_s == 'fully'
-                        else ('gotocity' if _wm_raw_s == 'city'
-                        else ('fullygoto' if _wm_on_s else 'none')))
-                    ) %}
-                    <img id="admin-image-preview-s" class="thumb"
-                         src="{{ safe_url_for('serve_image', filename=_imgname_s, _sign=True, wm=_wm_choice_s) }}"
-                         alt="現在の画像"
-                         style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
-                         referrerpolicy="no-referrer" loading="lazy" />
-                    <div class="form-check mt-2">
-                        <input class="form-check-input" type="checkbox" id="image_delete_s" name="image_delete" value="1">
-                        <label class="form-check-label" for="image_delete_s">この画像を削除する</label>
-                    </div>
-                </div>
-                {% endif %}
-                <small class="text-muted d-block mt-1">JPEG/PNG/WebP（最大10MB）。アップロード時に自動リサイズされます。</small>
+        <label>タイトル</label><br>
+        <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+
+        <label>説明</label><br>
+        <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+
+        {# 現在の画像プレビュー保持 #}
+        {% set _imgname_s = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+        {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+        {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+        {% set _wm_choice_s = (
+            _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
+            else ('fullygoto' if _wm_raw_s == 'fully'
+            else ('gotocity' if _wm_raw_s == 'city'
+            else ('fullygoto' if _wm_on_s else 'none')))
+        ) %}
+        {% if _imgname_s %}
+            <div class="mt-2" id="wm-block-s" data-filename="{{ _imgname_s }}">
+            <div>現在の画像:</div>
+            <img id="admin-image-preview-s" class="thumb"
+                src="{{ safe_url_for('serve_image', filename=_imgname_s, _sign=True, wm=_wm_choice_s) }}"
+                alt="現在の画像"
+                style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                referrerpolicy="no-referrer" loading="lazy" />
+            <div class="imgmeta"></div>
+            <div class="form-check mt-2">
+                <input class="form-check-input" type="checkbox" id="image_delete_s" name="image_delete" value="1">
+                <label class="form-check-label" for="image_delete_s">この画像を削除する</label>
             </div>
-
-            {# ▼▼▼ 透かし選択（店舗） ▼▼▼ #}
-            {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
-            {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
-            {% set _wm_choice_s = (
-                _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
-                else ('fullygoto' if _wm_raw_s == 'fully'
-                else ('gotocity' if _wm_raw_s == 'city'
-                else ('fullygoto' if _wm_on_s else 'none')))
-            ) %}
-            <div class="mt-2">
-                <div class="mini-note" style="margin-bottom:6px;">外部公開URLに付ける透かし（クリック時の原寸画像）。一覧のサムネは常に透かし表示です。</div>
-                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                    <input type="radio" name="wm_choice_s" value="none" {% if _wm_choice_s=='none' %}checked{% endif %}> なし
-                </label>
-                <label style="display:inline-flex;align-items:center;gap:.4em;margin-right:10px;">
-                    <input type="radio" name="wm_choice_s" value="fullygoto" {% if _wm_choice_s=='fullygoto' %}checked{% endif %}> ＠fullyGOTO
-                </label>
-                <label style="display:inline-flex;align-items:center;gap:.4em;">
-                    <input type="radio" name="wm_choice_s" value="gotocity" {% if _wm_choice_s=='gotocity' %}checked{% endif %}> ＠Goto City
-                </label>
             </div>
-            {# ▲▲▲ 透かし選択ここまで ▲▲▲ #}
+        {% endif %}
 
-            <label>住所</label><br>
-            <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+        <!-- サーバに渡す：選択した「元画像」ファイル名 -->
+        <input type="hidden" name="image_existing" id="image_existing_s" value="{{ _imgname_s }}">
+        <!-- 必要なら代表の hidden を追加 -->
+        <!-- <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_s }}"> -->
 
-            <label>電話番号</label><br>
-            <input type="text" name="tel" value="{{ entry_edit.tel if entry_edit else '' }}"><br>
+        <!-- 画像ピッカーへ -->
+        <div class="pickbar">
+            <button type="button" class="btn" id="btn_open_folder_picker_s">フォルダから選ぶ</button>
+            <a class="btn ghost" href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}" target="_blank" rel="noopener">透かし一括作成を開く</a>
+            <span class="mini-note">※ 既存フォルダ → 画像（新しい順）から選べます。</span>
+        </div>
 
-            <label>休み</label><br>
-            <input type="text" name="holiday" value="{{ entry_edit.holiday if entry_edit else '' }}"><br>
+        <script>
+            (function(){
+            const openBtn = document.getElementById('btn_open_folder_picker_s');
+            if(openBtn){
+                openBtn.addEventListener('click', ()=>{
+                const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
+                const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
+                window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
+                });
+            }
 
-            <label>営業時間</label><br>
-            <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
+            function variantFilename(fn, kind){
+                const i = fn.lastIndexOf('.');
+                const base = i>0 ? fn.slice(0, i) : fn;
+                const ext  = i>0 ? fn.slice(i) : '';
+                const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
+                return base + suffix + ext;
+            }
 
-            <label>駐車場：</label>
-            <select name="parking">
-                <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
-                <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
-            </select>
-            台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
+            async function applyPicked(fn, kind){
+                try{
+                const hImg = document.getElementById('image_existing_s');
+                if(hImg) hImg.value = fn;
 
-            <label>支払方法</label><br>
-            {% set _pay_edit = (entry_edit.payment if entry_edit and entry_edit.payment is defined and entry_edit.payment is not string else (entry_edit.payment.split(',') if entry_edit and entry_edit.payment else [])) %}
-            <input type="checkbox" name="payment" value="現金" {% if '現金' in _pay_edit %}checked{% endif %}>現金
-            <input type="checkbox" name="payment" value="カード" {% if 'カード' in _pay_edit %}checked{% endif %}>カード
-            <input type="checkbox" name="payment" value="その他" {% if 'その他' in _pay_edit %}checked{% endif %}>その他<br>
+                const hWm = document.getElementById('wm_choice_master');
+                if(hWm) hWm.value = kind;
 
-            <label>備考（自由記述）</label><br>
-            <textarea name="remark" rows="2">{{ entry_edit.remark if entry_edit else '' }}</textarea><br>
+                const img = document.getElementById('admin-image-preview-s');
+                if(img){
+                    let url = null;
+                    if(typeof _signPreview === 'function'){
+                    try{ url = await _signPreview(fn, kind); }catch(_e){}
+                    }
+                    if(!url){
+                    const vname = variantFilename(fn, kind);
+                    try{
+                        url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname));
+                    }catch(_e){
+                        url = img.src;
+                    }
+                    }
+                    if(url){
+                    img.src = url;
+                    img.setAttribute('data-fullsrc', url);
+                    if(typeof annotateImageMeta==='function'){
+                        if(img.complete) annotateImageMeta(img);
+                        else img.onload = ()=> annotateImageMeta(img);
+                    }
+                    }
+                }
+                }catch(_e){}
+            }
 
-            <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
-            <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
+            window.addEventListener('message', (e)=>{
+                const d = e && e.data;
+                if(!d || d.type!=='wm-pick') return;
+                applyPicked(d.filename, d.kind);
+            }, false);
 
-            <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
-            <div class="row">
-                {% for area in area_opts %}
-                <label style="min-width:unset;">
-                    <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
-                </label>
-                {% endfor %}
+            const initImg = document.getElementById('admin-image-preview-s');
+            if(initImg){
+                initImg.setAttribute('data-fullsrc', initImg.currentSrc || initImg.src);
+                if(typeof annotateImageMeta==='function'){
+                if(initImg.complete) annotateImageMeta(initImg);
+                else initImg.onload = ()=> annotateImageMeta(initImg);
+                }
+            }
+            })();
+        </script>
+
+        <!-- ▼ 以下、従来の店舗入力項目（住所/電話/休み/営業時間/駐車場/支払方法/備考/タグ/エリア/地図/出典/座標/リンク/追加情報）をそのまま残してください -->
+        <label>住所</label><br>
+        <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+
+        <label>電話番号</label><br>
+        <input type="text" name="tel" value="{{ entry_edit.tel if entry_edit else '' }}"><br>
+
+        <label>休み</label><br>
+        <input type="text" name="holiday" value="{{ entry_edit.holiday if entry_edit else '' }}"><br>
+
+        <label>営業時間</label><br>
+        <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
+
+        <label>駐車場：</label>
+        <select name="parking">
+            <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
+            <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
+        </select>
+        台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
+
+        <label>支払方法</label><br>
+        {% set _pay_edit = (entry_edit.payment if entry_edit and entry_edit.payment is defined and entry_edit.payment is not string else (entry_edit.payment.split(',') if entry_edit and entry_edit.payment else [])) %}
+        <input type="checkbox" name="payment" value="現金" {% if '現金' in _pay_edit %}checked{% endif %}>現金
+        <input type="checkbox" name="payment" value="カード" {% if 'カード' in _pay_edit %}checked{% endif %}>カード
+        <input type="checkbox" name="payment" value="その他" {% if 'その他' in _pay_edit %}checked{% endif %}>その他<br>
+
+        <label>備考（自由記述）</label><br>
+        <textarea name="remark" rows="2">{{ entry_edit.remark if entry_edit else '' }}</textarea><br>
+
+        <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
+        <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
+
+        <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
+        <div class="row">
+            {% for area in area_opts %}
+            <label style="min-width:unset;">
+            <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
+            </label>
+            {% endfor %}
+        </div>
+
+        <label>地図URL</label><br>
+        <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+
+        <label>出典</label><br>
+        <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+
+        <label>出典URL</label><br>
+        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source if entry_edit else '' }}"><br>
+        <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
+
+        <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
+        <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
+        <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
+
+        <label>緯度・経度（任意）</label><br>
+        <div class="row" style="display:flex; gap:10px; align-items:center;">
+            <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
+            <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
+        </div>
+        <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
+
+        <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
+        <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
+        {% if entry_edit and entry_edit.links %}
+        {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
+        {% endif %}
+        </textarea><br>
+
+        <label>追加情報（項目＝内容）</label>
+        <div id="extras-list-shop">
+            {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
+            {% if _extras2.items is defined %}
+            {% for k, v in _extras2.items() %}
+            <div class="extra-row">
+                <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                <button type="button" onclick="this.parentNode.remove()">－</button>
             </div>
-
-            <label>地図URL</label><br>
-            <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
-
-            <!-- ★ 出典 -->
-            <label>出典</label><br>
-            <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
-
-            <label>出典URL</label><br>
-            <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
-            <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
-
-            <!-- ★ 座標コピペ欄 -->
-            <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
-            <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
-            <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
-
-            <!-- 緯度・経度（小数、任意） -->
-            <label>緯度・経度（任意）</label><br>
-            <div class="row" style="display:flex; gap:10px; align-items:center;">
-                <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
-                <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
+            {% endfor %}
+            {% else %}
+            <div class="extra-row">
+                <input name="extras_key[]" placeholder="項目"> ＝
+                <input name="extras_val[]" placeholder="内容">
+                <button type="button" onclick="this.parentNode.remove()">－</button>
             </div>
-            <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
+            {% endif %}
+        </div>
+        <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-shop')">＋ 行を追加</button>
 
-            <!-- ▼ リンク（複数） -->
-            <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
-            <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
-{% if entry_edit and entry_edit.links %}
-{{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
-{% endif %}
-            </textarea><br>
-
-            <!-- ▼ 追加情報（項目＝内容） -->
-            <label>追加情報（項目＝内容）</label>
-            <div id="extras-list-shop">
-                {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
-                {% if _extras2.items is defined %}
-                    {% for k, v in _extras2.items() %}
-                    <div class="extra-row">
-                        <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
-                        <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                        <button type="button" onclick="this.parentNode.remove()">－</button>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="extra-row">
-                        <input name="extras_key[]" placeholder="項目"> ＝
-                        <input name="extras_val[]" placeholder="内容">
-                        <button type="button" onclick="this.parentNode.remove()">－</button>
-                    </div>
-                {% endif %}
-            </div>
-            <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-shop')">＋ 行を追加</button>
         </div>
 
         <button class="add-btn" type="submit">{{ '編集' if edit_id else '登録' }}</button>
