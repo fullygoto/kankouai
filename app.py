@@ -71,8 +71,6 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
-from watermark_ext import init_watermark_ext
-init_watermark_ext(app)
 
 # 10MB上限（Flaskがリクエストボディで制御）
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB
@@ -1227,6 +1225,10 @@ def _haversine_km(lat1, lon1, lat2, lon2) -> float:
     except Exception:
         return 1e9  # 計算不可時は超遠距離扱い
 
+# 互換ラッパー：_boolish を呼ぶコードのための別名
+def _boolish(x) -> bool:
+    return _boolish_strict(x)
+
 def _build_image_urls(img_name: str | None):
     """サムネ用（透かし付き）と原寸用（署名付き）"""
     if not img_name:
@@ -2300,7 +2302,8 @@ def safe_url_for(endpoint, **values):
                     wm_q = "1"
 
             # 署名の既定: 外部(=未ログイン)は署名
-            must_sign = (IMAGE_PROTECT_ON and not session.get("user_id"))
+            # 変更前: must_sign = (IMAGE_PROTECT_ON and not session.get("user_id"))
+            must_sign = (IMAGE_PROTECT_ON and not (session.get("user_id") or session.get("role")))
             sign = _boolish(values.pop("_sign", must_sign))
 
             # 署名URLを生成
@@ -9137,6 +9140,9 @@ except Exception:
     # ここで失敗してもアプリ動作は継続
     app.logger.exception("norm-entry post patch failed")
 # ===== ここまでパッチ =====
+# ... 全ての @app.route(...) 定義が終わった一番最後に置く
+from watermark_ext import init_watermark_ext
+init_watermark_ext(app)
 
 
 # メイン起動（重複禁止：これ1つだけ残す）
