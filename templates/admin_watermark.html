@@ -31,7 +31,6 @@
     .counts{font-size:.9em;color:var(--muted)}
     .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
-
     /* 追加：カード内のアクション行 */
     .card-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px}
   </style>
@@ -94,9 +93,9 @@
       <div id="grid" class="grid" data-total="{{ existing|length if existing else 0 }}">
         {% if existing and existing|length %}
           {% for fn in existing %}
-            {# 編集ボタンの行き先を安全に決定：admin_watermark_one が無ければ /admin/watermark?src=.. にフォールバック #}
-            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or (url_for('admin_watermark') ~ '?src=' ~ (fn|urlencode))) %}
-            {# 削除エンドポイントも安全化：無ければ /admin/media/delete にフォールバック #}
+            {# 編集先の安全リンク：admin_watermark_one が無ければ /admin/watermark?q=.. にフォールバック #}
+            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or (url_for('admin_watermark') ~ '?q=' ~ (fn|urlencode))) %}
+            {# 削除の安全リンク：admin_media_delete が無ければ固定パスへ #}
             {% set _del_action = (safe_url_for('admin_media_delete') or '/admin/media/delete') %}
 
             <div class="card" data-name="{{ fn|lower }}">
@@ -110,7 +109,10 @@
               <!-- 追加：編集／削除アクション -->
               <div class="card-actions">
                 <a class="btn small" href="{{ _edit_href }}">編集</a>
-                <form method="post" action="{{ _del_action }}" onsubmit="return confirm('この画像を削除します。よろしいですか？');" style="display:inline;">
+                <form method="post"
+                      action="{{ _del_action }}"
+                      onsubmit="return confirm('この画像を削除します。よろしいですか？');"
+                      style="display:inline;">
                   <input type="hidden" name="filename" value="{{ fn }}">
                   <button class="btn ghost small" type="submit">削除</button>
                 </form>
