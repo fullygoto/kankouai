@@ -1,135 +1,137 @@
-<!-- templates/admin_watermark_one.html（新規作成：丸ごとコピペOK） -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
-  <title>透かし編集（単体）</title>
+  <title>透かし：単体編集</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     :root{ --bg:#f6faf9; --card:#fff; --muted:#567; --line:#e7eef5; --brand:#2a8ed8; }
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
-    .container{background:var(--card);max-width:1000px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+    .container{background:var(--card);max-width:980px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
     h1{margin:0 0 14px}
+    .row{margin:10px 0}
     .muted{color:var(--muted);font-size:.95em}
     .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer;text-decoration:none}
     .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
     .btn.small{padding:6px 10px;font-size:.92em}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin-top:12px}
-    .card{border:1px solid #e5eef5;border-radius:10px;padding:12px;background:#fbfdff}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:12px}
+    .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
     .name{display:block;margin-top:6px;font-size:.92em;color:#345;word-break:break-all}
     img{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
-    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
-    .row{margin:10px 0}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}
-    .danger{background:#e35}
+    fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+    legend{padding:0 6px;color:#234}
+    .radios{display:flex;flex-wrap:wrap;gap:10px}
+    .radios label{display:flex;gap:6px;align-items:center;background:#f3f8fc;border:1px solid #dbe8f3;border-radius:10px;padding:6px 10px}
+    .actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="topbar">
-      <h1>透かし編集（単体）</h1>
-      <div class="actions">
-        <a class="btn ghost" href="{{ url_for('admin_watermark', q=src) }}">← 一覧に戻る</a>
-        <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
-      </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <h1>透かし：単体編集</h1>
+      <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧に戻る</a>
     </div>
 
-    {% set i = src.rfind('.') %}
-    {% set base = src[:i] if i!=-1 else src %}
-    {% set ext  = src[i:]  if i!=-1 else '' %}
-    {% set none  = base ~ '__none' ~ ext %}
-    {% set goto  = base ~ '__goto' ~ ext %}
-    {% set fully = base ~ '__fullygoto' ~ ext %}
-    {% set _del_action = (safe_url_for('admin_media_delete') or '/admin/media/delete') %}
+    {% set src_name = src %}
+    {% set parts = src_name.rsplit('.', 1) %}
+    {% if parts|length == 2 %}
+      {% set stem = parts[0] %}
+      {% set ext  = '.' ~ parts[1] %}
+    {% else %}
+      {% set stem = src_name %}
+      {% set ext  = '' %}
+    {% endif %}
+
+    <!-- サフィックス定義（アプリ本体の設定と揃える想定） -->
+    {% set s_none  = '__none' %}
+    {% set s_goto  = '__goto' %}
+    {% set s_fully = '__fullygoto' %}
+
+    <!-- 派生ファイル名（出力は .jpg 想定。必要なら ext に置換可） -->
+    {% set fn_none  = stem ~ s_none  ~ '.jpg' %}
+    {% set fn_goto  = stem ~ s_goto  ~ '.jpg' %}
+    {% set fn_fully = stem ~ s_fully ~ '.jpg' %}
 
     <div class="row">
-      <div class="muted">対象ファイル：</div>
-      <div style="word-break:break-all">{{ src }}</div>
+      <div class="muted">元画像</div>
+      <img id="orig" src="{{ url_for('admin_media_img', filename=src_name) }}" alt="{{ src_name }}" loading="lazy">
+      <div class="name">{{ src_name }}</div>
     </div>
 
-    <div class="grid">
-      <div class="card">
-        <div class="muted">元画像</div>
-        <a href="{{ url_for('admin_media_img', filename=src) }}" target="_blank" rel="noopener">
-          <img src="{{ url_for('admin_media_img', filename=src) }}" alt="src" loading="lazy">
-        </a>
-        <div class="name">{{ src }}</div>
-      </div>
-
-      <div class="card">
-        <div class="muted">透かし：なし（__none）</div>
-        <a href="{{ url_for('admin_media_img', filename=none) }}" target="_blank" rel="noopener">
-          <img src="{{ url_for('admin_media_img', filename=none) }}" alt="none" loading="lazy">
-        </a>
-        <div class="actions">
-          <form method="post" action="{{ url_for('admin_watermark') }}">
-            <input type="hidden" name="selected_existing" value="{{ src }}">
-            <input type="hidden" name="wm" value="none">
-            <input type="hidden" name="force" value="1">
-            <button class="btn small" type="submit">この派生を再生成</button>
-          </form>
-          <a class="btn ghost small" href="{{ url_for('admin_media_img', filename=none) }}" download>ダウンロード</a>
-        </div>
-        <div class="name">{{ none }}</div>
-      </div>
-
-      <div class="card">
-        <div class="muted">透かし：＠Goto City（__goto）</div>
-        <a href="{{ url_for('admin_media_img', filename=goto) }}" target="_blank" rel="noopener">
-          <img src="{{ url_for('admin_media_img', filename=goto) }}" alt="goto" loading="lazy">
-        </a>
-        <div class="actions">
-          <form method="post" action="{{ url_for('admin_watermark') }}">
-            <input type="hidden" name="selected_existing" value="{{ src }}">
-            <input type="hidden" name="wm" value="goto">
-            <input type="hidden" name="force" value="1">
-            <button class="btn small" type="submit">この派生を再生成</button>
-          </form>
-          <a class="btn ghost small" href="{{ url_for('admin_media_img', filename=goto) }}" download>ダウンロード</a>
-        </div>
-        <div class="name">{{ goto }}</div>
-      </div>
-
-      <div class="card">
-        <div class="muted">透かし：＠fullyGOTO（__fullygoto）</div>
-        <a href="{{ url_for('admin_media_img', filename=fully) }}" target="_blank" rel="noopener">
-          <img src="{{ url_for('admin_media_img', filename=fully) }}" alt="fully" loading="lazy">
-        </a>
-        <div class="actions">
-          <form method="post" action="{{ url_for('admin_watermark') }}">
-            <input type="hidden" name="selected_existing" value="{{ src }}">
-            <input type="hidden" name="wm" value="fully">
-            <input type="hidden" name="force" value="1">
-            <button class="btn small" type="submit">この派生を再生成</button>
-          </form>
-          <a class="btn ghost small" href="{{ url_for('admin_media_img', filename=fully) }}" download>ダウンロード</a>
-        </div>
-        <div class="name">{{ fully }}</div>
-      </div>
+    <div class="row">
+      <fieldset>
+        <legend>再生成</legend>
+        <form method="post" action="{{ url_for('admin_watermark') }}" class="actions">
+          <input type="hidden" name="selected_existing" value="{{ src_name }}">
+          <div class="radios">
+            <label><input type="radio" name="wm" value="all"   checked> 全部（__none / __goto / __fullygoto）</label>
+            <label><input type="radio" name="wm" value="none"> なしのみ（__none）</label>
+            <label><input type="radio" name="wm" value="goto"> City のみ（__goto）</label>
+            <label><input type="radio" name="wm" value="fully"> fullyGOTO のみ（__fullygoto）</label>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;margin-left:8px">
+            <input type="checkbox" name="force" value="1" checked> 既存派生を上書き
+          </label>
+          <button class="btn" type="submit">この画像を再生成する</button>
+        </form>
+        <div class="muted" style="margin-top:6px">※ 再生成は一覧のバッチ処理と同じエンドポイント（/admin/watermark）を使います。</div>
+      </fieldset>
     </div>
 
-    <hr>
-
-    <div class="row actions">
-      <!-- 3種まとめて再生成（既存ロジックを再利用） -->
-      <form method="post" action="{{ url_for('admin_watermark') }}">
-        <input type="hidden" name="selected_existing" value="{{ src }}">
-        <input type="hidden" name="wm" value="all">
-        <input type="hidden" name="force" value="1">
-        <button class="btn" type="submit">この画像の派生を全部再生成</button>
-      </form>
-
-      <!-- 元画像の削除 -->
-      <form method="post" action="{{ _del_action }}" onsubmit="return confirm('元画像と派生を削除します。よろしいですか？');">
-        <input type="hidden" name="filename" value="{{ src }}">
-        <button class="btn danger" type="submit">元画像を削除</button>
-      </form>
+    <div class="row">
+      <fieldset>
+        <legend>削除</legend>
+        <form method="post" action="{{ safe_url_for('admin_media_delete') or url_for('admin_media_delete') }}"
+              onsubmit="return confirm('元画像と派生（__none/__goto/__fullygoto）を削除します。よろしいですか？');" class="actions">
+          <input type="hidden" name="filename" value="{{ src_name }}">
+          <button class="btn ghost" type="submit">この画像を削除する</button>
+        </form>
+        <div class="muted" style="margin-top:6px">※ 元画像と派生 .jpg をまとめて削除します。</div>
+      </fieldset>
     </div>
 
-    <div class="row" style="margin-top:12px">
-      <a class="btn ghost" href="{{ url_for('admin_watermark', q=src) }}">← 一覧に戻る</a>
-      <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+    <div class="row">
+      <h2 style="margin:0 0 8px">派生プレビュー（存在するものだけ自動表示）</h2>
+      <div class="grid" id="derivs">
+        <div class="card">
+          <div class="muted">__none</div>
+          <img data-fn="{{ fn_none }}" alt="none" loading="lazy">
+          <div class="name">{{ fn_none }}</div>
+        </div>
+        <div class="card">
+          <div class="muted">__goto</div>
+          <img data-fn="{{ fn_goto }}" alt="goto" loading="lazy">
+          <div class="name">{{ fn_goto }}</div>
+        </div>
+        <div class="card">
+          <div class="muted">__fullygoto</div>
+          <img data-fn="{{ fn_fully }}" alt="fully" loading="lazy">
+          <div class="name">{{ fn_fully }}</div>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:6px">※ 404 の派生は自動的に非表示になります。再生成後はこのページを再読み込みしてください。</div>
+    </div>
+
+    <div class="row" style="margin-top:18px">
+      <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧に戻る</a>
     </div>
   </div>
+
+  <script>
+    (function(){
+      // 既存の画像配信エンドポイント名（管理画面のもの）
+      const base = "{{ url_for('admin_media_img', filename='') }}";
+
+      // 派生の <img> に実ファイル URL を設定し、404 の場合はカードごと非表示
+      document.querySelectorAll('#derivs img[data-fn]').forEach(img => {
+        const fn = img.getAttribute('data-fn') || '';
+        img.src = base + encodeURIComponent(fn);
+        img.addEventListener('error', () => {
+          const card = img.closest('.card');
+          if(card) card.style.display = 'none';
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
