@@ -440,6 +440,8 @@ def _wm_normalize(v) -> str | None:
 
 # ============================================================================
 
+
+
 @app.route("/media/img/<path:filename>")
 def serve_image(filename):
     """
@@ -472,7 +474,6 @@ def serve_image(filename):
     # --- 正規化関数（グローバル版を使う。無ければ安全フォールバック） ---
     _normalize_wm_choice_local = globals().get("_normalize_wm_choice")
     if not callable(_normalize_wm_choice_local):
-        # フォールバック（グローバル版と同じ仕様）
         def _normalize_wm_choice_local(choice: str | None, wm_on_default: bool = True) -> str:
             c = (str(choice or "")).strip().lower()
             if c in ("none", "fullygoto", "gotocity"):
@@ -4825,6 +4826,36 @@ def dedupe_entries_by_title(entries: List[dict], use_ai: bool = DEDUPE_USE_AI, d
         # 乾式の場合は元データを返して外側で表示だけに使う
         return entries, stats, preview
     return new_list, stats, preview
+
+# ============================================================
+# Watermark 正規化（グローバル唯一の定義）
+# ============================================================
+def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+    """
+    入力のゆらぎ（'fully' / 'city' / '1' / True / None など）を
+    保存・配信で使う正規形 'none' / 'fullygoto' / 'gotocity' に統一する。
+
+    受理する主な入力:
+      - 'none' / 'fullygoto' / 'gotocity' → そのまま返す
+      - 'fully' → 'fullygoto'（全面透かし）
+      - 'city'  → 'gotocity'（市ロゴのみ）
+      - 真偽っぽい値:
+          '1', 'true', 'on', 'yes'  → 'fullygoto'
+          '0', 'false', 'off', 'no', '' → 'none'
+      - それ以外/未指定 → wm_on_default が True なら 'fullygoto'、False なら 'none'
+    """
+    c = (str(choice or "")).strip().lower()
+    if c in ("none", "fullygoto", "gotocity"):
+        return c
+    if c in ("1", "true", "on", "yes"):
+        return "fullygoto"
+    if c in ("0", "false", "off", "no", ""):
+        return "none"
+    if c == "fully":
+        return "fullygoto"
+    if c == "city":
+        return "gotocity"
+    return "fullygoto" if wm_on_default else "none"
 
 # =========================
 #  基本I/O
