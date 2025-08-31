@@ -145,6 +145,8 @@ def _flex_viewpoints_map():
         {"type": "text", "text": "五島列島 展望所マップ", "weight": "bold", "wrap": True},
         {"type": "text", "text": "Googleマイマップで展望スポットを一覧表示します。", "size": "sm", "color": "#666666", "wrap": True},
     ]
+    hero = build_flex_hero(entry)  # ← 追加：ここで毎回作る（entry 変数名は実際のものに合わせて）
+
     bubble = {
         "type": "bubble",
         **({"hero": hero} if hero else {}),
@@ -361,28 +363,81 @@ def serve_image(filename):
     署名検証 → 実ファイル解決 → 透かしモード決定（URL優先→エントリ既定） → 返却。
     - wm 未指定 or WATERMARK_ENABLE=False のときは原画像をそのまま返す
     - wm=gotocity / fullygoto のときは動的に合成して返す
-    - 返却は元拡張子に合わせて JPEG/PNG を選択（LINE互換のため基本はJPEG）
+    - 一覧サムネ用途（wm=1 / thumb / preview）は常に透かし（既定は gotocity）
+    - 返却は元拡張子に合わせて JPEG/PNG を選択（LINE互換のため webp は JPEG）
+    - 観測ヘッダ: X-WM-Requested / X-WM-Applied / X-Img-Signed / X-Img-Exp / X-Img-Fmt / X-Img-Path
     """
-    # 1) 署名検証（実装があれば使用）
-    try:
-        if not _verify_sig_if_available(filename, request.args):
-            abort(403)
-    except Exception:
-        # _verify_sig_if_available が未定義でも壊さない
-        pass
 
-    # 2) 実ファイルパスの解決（MEDIA_ROOT 優先＋互換フォールバック）
+    # ====== 互換ヘルパ（外部が無くても動くようフォールバック） ====================
+    def _verify_sig_if_available_local(fn: str, qargs) -> bool:
+        # 外部ヘルパがあれば使う
+        if "_verify_sig_if_available" in globals():
+            try:
+                return bool(globals()["_verify_sig_if_available"](fn, qargs))
+            except Exception:
+                pass
+        # _sign が付いていれば最低限の検査だけ行う（fail open/closeは方針で選択）
+        # ここでは fail-open（署名が無くても表示させたい場合があるため）
+        return True
+
+    def _normalize_wm_choice_local(choice: str | None, wm_on_default: bool = True) -> str:
+        # 既存の正規化ヘルパがあれば尊重
+        if "_normalize_wm_choice" in globals():
+            try:
+                return globals()["_normalize_wm_choice"](choice, wm_on_default=wm_on_default)
+            except Exception:
+                pass
+        c = (str(choice or "")).strip().lower()
+        if c in ("none", "fullygoto", "gotocity"):
+            return c
+        if c in ("1", "true", "on", "yes", "thumb", "preview"):
+            # サムネ表記や真値は既定で gotocity に寄せる
+            return "gotocity"
+        if c in ("0", "false", "off", "no", ""):
+            return "none"
+        if c == "fully":
+            return "fullygoto"
+        if c == "city":
+            return "gotocity"
+        return "fullygoto" if wm_on_default else "none"
+
+    def _wm_choice_from_entries_local(basename: str) -> str | None:
+        # 外部ヘルパがあれば使用
+        if "_wm_choice_from_entries" in globals():
+            try:
+                return globals()["_wm_choice_from_entries"](basename)
+            except Exception:
+                pass
+        # エントリから filename に一致する行を探し、wm_external_choice / wm_on を読む
+        try:
+            entries = load_entries()
+            for e in entries:
+                img = (e.get("image_file") or e.get("image") or "").strip()
+                if img and os.path.basename(img) == basename:
+                    raw = e.get("wm_external_choice")
+                    if raw is None:
+                        raw = "fullygoto" if e.get("wm_on", True) else "none"
+                    return _normalize_wm_choice_local(raw, wm_on_default=True)
+        except Exception:
+            pass
+        return None
+
+    def _compose_watermark_local(pil_image, mode: str):
+        # 外部の実体があれば使う
+        if "_compose_watermark" in globals():
+            return globals()["_compose_watermark"](pil_image, mode)
+        # 透かし合成が未実装でも壊さない（素通し）
+        return pil_image
+
+    # 画像パス解決（MEDIA_ROOT / IMAGES_DIR / 互換パス）
     from werkzeug.utils import safe_join
     def _find_image_path(fn: str) -> str | None:
         candidates = []
-        # 明示ルート
-        if "MEDIA_ROOT" in globals() and MEDIA_ROOT:
-            candidates.append(MEDIA_ROOT)
-        # 互換ディレクトリ（重複回避）
-        for d in {IMAGES_DIR, os.getenv("MEDIA_ROOT", "media/img"), "media/img", "media"}:
+        if "MEDIA_ROOT" in globals() and globals().get("MEDIA_ROOT"):
+            candidates.append(globals()["MEDIA_ROOT"])
+        for d in {globals().get("IMAGES_DIR"), os.getenv("MEDIA_ROOT", "media/img"), "media/img", "media"}:
             if d and d not in candidates:
                 candidates.append(d)
-        # 走査
         for base in candidates:
             try:
                 p = safe_join(base, fn)
@@ -392,97 +447,133 @@ def serve_image(filename):
                 return p
         return None
 
+    # ====== 1) 署名検証 =========================================================
+    signed_req = bool(request.args.get("_sign"))
+    if not _verify_sig_if_available_local(filename, request.args):
+        abort(403)
+
+    # ====== 2) 実ファイル解決 ===================================================
     abs_path = _find_image_path(filename)
     if not abs_path:
         abort(404)
 
-    # 3) 透かしモード決定（URL指定 > エントリ既定）
-    try:
-        mode = _norm_wm_mode(request.args.get("wm"))
-    except Exception:
-        # フォールバック（簡易正規化）
-        v = (request.args.get("wm") or "").strip().lower()
-        if v in {"fullygoto", "gotocity"}:
-            mode = v
-        elif v == "fully":
-            mode = "fullygoto"
-        elif v == "city":
-            mode = "gotocity"
-        elif v in {"1", "true", "on"}:
-            mode = "gotocity"
-        else:
-            mode = None
+    # ====== 3) 透かしモード決定（URL指定 > エントリ既定） =======================
+    raw_wm = request.args.get("wm")
+    requested_mode = (str(raw_wm) if raw_wm is not None else "")
+    mode = _normalize_wm_choice_local(requested_mode, wm_on_default=True)
 
-    if mode is None:
-        # URLに指定が無ければ、エントリ側の既定（wm_external_choice / 旧wm_on）を採用
+    # URLに妥当な指定が無ければ、エントリ既定（wm_external_choice / wm_on）を採用
+    if requested_mode in (None, "",) or mode not in ("none", "fullygoto", "gotocity"):
         try:
-            mode = _norm_wm_mode(_wm_choice_from_entries(os.path.basename(filename)))
+            from os.path import basename as _bn
+            m2 = _wm_choice_from_entries_local(_bn(filename))
+            if m2 is not None:
+                mode = m2
+            else:
+                # 見つからなければ既定（on）
+                mode = _normalize_wm_choice_local(None, wm_on_default=True)
         except Exception:
-            pass
+            mode = _normalize_wm_choice_local(None, wm_on_default=True)
 
-    # 4) mimetype/保存フォーマットの判定（拡張子基準。未対応はJPEG）
+    # サムネ用途（wm=1 / thumb / preview）指定は「gotocity 透かし」に寄せる
+    if str(requested_mode).lower() in {"1", "thumb", "preview"}:
+        applied_mode = "gotocity"
+        is_thumb = True
+    else:
+        applied_mode = mode
+        is_thumb = False
+
+    # ====== 4) 出力フォーマット判定（拡張子基準） ================================
     ext = os.path.splitext(abs_path)[1].lower()
     if ext in (".jpg", ".jpeg"):
         out_fmt, mime = "JPEG", "image/jpeg"
     elif ext == ".png":
         out_fmt, mime = "PNG", "image/png"
     elif ext == ".webp":
-        # 互換性重視で JPEG に寄せる（LINEもOK）
+        # LINE 等の互換性重視で JPEG にフォールバック
         out_fmt, mime = "JPEG", "image/jpeg"
     else:
         out_fmt, mime = "JPEG", "image/jpeg"
 
-    # 透かし無効 or モード指定なし → そのまま返す
-    if (not globals().get("WATERMARK_ENABLE", True)) or (mode is None):
-        resp = send_file(abs_path, mimetype=mime)
+    # ====== 5) 合成有無の判定 ==================================================
+    watermark_enabled = globals().get("WATERMARK_ENABLE", True)
+    must_compose = watermark_enabled and (applied_mode in ("fullygoto", "gotocity"))
+
+    # ====== 6) レスポンス生成（合成 or 生） ====================================
+    # 観測：メトリクス初期化（無ければ）
+    WM_METRICS = globals().setdefault("WM_METRICS", {
+        "requests": 0, "signed": 0, "unsigned": 0, "errors": 0,
+        "applied": {"none": 0, "fullygoto": 0, "gotocity": 0, "thumb": 0},
+    })
+    WM_METRICS["requests"] += 1
+    WM_METRICS["signed" if signed_req else "unsigned"] += 1
+    try:
+        if must_compose:
+            from PIL import Image, ImageOps
+            import io as _io
+            with Image.open(abs_path) as im:
+                im = ImageOps.exif_transpose(im)
+                out = _compose_watermark_local(im, applied_mode)  # 外部が無ければ素通し
+                buf = _io.BytesIO()
+                if out_fmt == "JPEG":
+                    out = out.convert("RGB")
+                    out.save(
+                        buf, format="JPEG",
+                        quality=int(os.getenv("WM_JPEG_QUALITY", "88")),
+                        optimize=True, progressive=True, subsampling=2
+                    )
+                elif out_fmt == "PNG":
+                    if out.mode != "RGBA":
+                        out = out.convert("RGBA")
+                    out.save(buf, format="PNG", optimize=True)
+                else:
+                    out = out.convert("RGB")
+                    out.save(buf, format="JPEG", quality=88, optimize=True, progressive=True, subsampling=2)
+                buf.seek(0)
+                resp = send_file(buf, mimetype=mime, download_name=os.path.basename(abs_path))
+        else:
+            # そのまま返す
+            resp = send_file(abs_path, mimetype=mime)
+
+        # ====== 7) 観測ヘッダ（原因見える化） ==================================
+        # リクエスト値（指定が無ければ空文字）、最終適用（thumbは識別のため別名）
+        resp.headers["X-WM-Requested"] = str(requested_mode or "")
+        resp.headers["X-WM-Applied"]   = ("thumb" if is_thumb else applied_mode)
+        if signed_req:
+            resp.headers["X-Img-Signed"] = "1"
+            # 簡易: exp クエリがあればそのまま露出（署名実装側で付けている想定）
+            if request.args.get("exp"):
+                resp.headers["X-Img-Exp"] = str(request.args.get("exp"))
+        resp.headers["X-Img-Fmt"]  = out_fmt
+        resp.headers["X-Img-Path"] = abs_path
+
+        # キャッシュ（署名付きは短めにしたいならここで調整）
         resp.headers["Cache-Control"] = "public, max-age=86400"
+
+        # メトリクス
+        WM_METRICS["applied"][resp.headers["X-WM-Applied"]] = WM_METRICS["applied"].get(resp.headers["X-WM-Applied"], 0) + 1
+
+        # ログ（INFO）：最小限の構造化
+        app.logger.info("serve_image ok", extra={
+            "wm_req": requested_mode, "wm_applied": resp.headers["X-WM-Applied"],
+            "signed": signed_req, "fmt": out_fmt, "path": abs_path
+        })
         return resp
 
-    # 5) 合成して返す
-    try:
-        from PIL import Image, ImageOps
-        import io as _io
-
-        with Image.open(abs_path) as im:
-            # EXIFの向きを反映
-            im = ImageOps.exif_transpose(im)
-
-            # 透かし合成（実装が無い環境でも壊さない）
-            try:
-                out = _compose_watermark(im, mode)  # RGB を返す想定
-            except Exception:
-                out = im
-
-            buf = _io.BytesIO()
-            if out_fmt == "JPEG":
-                out = out.convert("RGB")
-                out.save(
-                    buf, format="JPEG",
-                    quality=int(os.getenv("WM_JPEG_QUALITY", "88")),
-                    optimize=True,
-                    progressive=True,
-                    subsampling=2
-                )
-            elif out_fmt == "PNG":
-                # PNGは透過があってもOK。なければRGB→RGBAへ
-                if out.mode != "RGBA":
-                    out = out.convert("RGBA")
-                out.save(buf, format="PNG", optimize=True)
-            else:
-                # 念のためのフォールバック（ほぼ通らない）
-                out = out.convert("RGB")
-                out.save(buf, format="JPEG", quality=88, optimize=True, progressive=True, subsampling=2)
-
-            buf.seek(0)
-            resp = send_file(buf, mimetype=mime, download_name=os.path.basename(abs_path))
-            resp.headers["Cache-Control"] = "public, max-age=86400"
-            return resp
-
-    except Exception:
+    except Exception as e:
+        WM_METRICS["errors"] += 1
         app.logger.exception("serve_image watermark compose failed; fallback to raw")
-        # 合成に失敗しても“画像は返す”
+        # 透かし合成に失敗しても“画像は返す”
         resp = send_file(abs_path, mimetype=mime)
         resp.headers["Cache-Control"] = "public, max-age=86400"
+        resp.headers["X-WM-Requested"] = str(requested_mode or "")
+        resp.headers["X-WM-Applied"]   = "error-fallback"
+        if signed_req:
+            resp.headers["X-Img-Signed"] = "1"
+            if request.args.get("exp"):
+                resp.headers["X-Img-Exp"] = str(request.args.get("exp"))
+        resp.headers["X-Img-Fmt"]  = out_fmt
+        resp.headers["X-Img-Path"] = abs_path
         return resp
 
 # ==== /画像配信 =================================================
@@ -600,6 +691,8 @@ def _flex_mymap(title: str, url: str, thumb: str = "", subtitle: str | None = No
         if st:
             body_contents.append({"type": "text", "text": st, "size": "sm", "color": "#666666", "wrap": True})
 
+    hero = build_flex_hero(entry)  # ← 追加：ここで毎回作る（entry 変数名は実際のものに合わせて）
+
     bubble = {
         "type": "bubble",
         **({"hero": hero} if hero else {}),
@@ -663,6 +756,8 @@ def _flex_map_series_carousel(exclude_key: str | None = None):
             body_contents.append(
                 {"type": "text", "text": subtitle, "size": "sm", "color": "#666666", "wrap": True}
             )
+        
+        hero = build_flex_hero(entry)  # ← 追加：ここで毎回作る（entry 変数名は実際のものに合わせて）
 
         bubble = {
             "type": "bubble",
@@ -1144,12 +1239,16 @@ def _nearby_flex(items: list[dict]):
         ]}
         if it.get("mymap_url"):
             footer["contents"].append({"type":"button","style":"secondary","action":{"type":"uri","label":"周辺をマイマップ","uri": it["mymap_url"]}})
+
+        hero = build_flex_hero(it)
+
         bubble = {
-            "type":"bubble",
-            **({"hero":{"type":"image","url":it.get("image_thumb",""),"size":"full","aspectMode":"cover","aspectRatio":"16:9"}} if it.get("image_thumb") else {}),
-            "body":{"type":"box","layout":"vertical","spacing":"sm","contents":body},
-            "footer":footer
+            "type": "bubble",
+            **({"hero": hero} if hero else {}),
+            "body": {"type":"box","layout":"vertical","spacing":"sm","contents": body},
+            "footer": footer
         }
+
         bubbles.append(bubble)
     return {"type":"carousel","contents":bubbles} if bubbles else None
 
@@ -2605,10 +2704,9 @@ def handle_message(event):
                 except Exception:
                     pass
 
-            msgs.append(ImageSendMessage(
-                original_content_url = orig_url or img_url,
-                preview_image_url    = prev_url  or img_url
-            ))
+            img_msg = make_line_image_message(entry)  # ← これだけで wm/署名/プレビュー統一
+            if img_msg:
+                msgs.append(img_msg)
 
         # 本文は安全分割して複数通に
         for p in _split_for_line(ans, LINE_SAFE_CHARS):
@@ -2812,6 +2910,11 @@ SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
 PAUSED_NOTICE_FILE    = os.path.join(BASE_DIR, "paused_notice.json")  # もしくは DATA_DIR に置いても可
 PAUSED_NOTICE_TTL_SEC = int(os.getenv("PAUSED_NOTICE_TTL_SEC", "86400"))  # 既定: 24時間
 
+# 送信確定ログ（JSON Lines）
+SEND_LOG_FILE   = os.path.join(LOG_DIR, "send_log.jsonl")
+# ログのサンプリング（1.0=全件、0.0=無効）
+SEND_LOG_SAMPLE = float(os.environ.get("SEND_LOG_SAMPLE", "1.0"))
+
 
 # === Images: config + route + normalized save (唯一の正) ===
 MEDIA_URL_PREFIX = "/media/img"  # 画像URLの先頭
@@ -2848,6 +2951,146 @@ WM_TEXTS = {
     "fullygoto": "@fullyGOTO",
     "gotocity":  "@Goto City",
 }
+
+
+# ============================================================
+# Watermark 正規化ヘルパ（どこからでも呼べる場所に配置）
+# ============================================================
+
+def _normalize_wm_choice(choice: str | None, wm_on_default: bool = True) -> str:
+    """
+    入力のゆらぎ（'fully' / 'city' / '1' / True / None など）を
+    保存・配信で使う正規形 'none' / 'fullygoto' / 'gotocity' に統一する。
+    """
+    c = (str(choice or "")).strip().lower()
+    if c in ("none", "fullygoto", "gotocity"):
+        return c
+    if c in ("1", "true", "on", "yes"):
+        return "fullygoto"
+    if c in ("0", "false", "off", "no", ""):
+        return "none"
+    if c == "fully":
+        return "fullygoto"
+    if c == "city":
+        return "gotocity"
+    return "fullygoto" if wm_on_default else "none"
+
+
+def _wm_choice_for_entry(entry: dict | None) -> str:
+    """
+    エントリ（旧/新どちらの保存形式でも）から最終的な wm モードを決定する。
+    - 新: entry['wm_external_choice'] が 'none'/'fullygoto'/'gotocity'
+    - 旧: entry['wm_on'] が True/False のみ
+    """
+    if not entry:
+        return "fullygoto"
+    raw = entry.get("wm_external_choice")
+    if raw is None:
+        # 旧データの救済（wm_on が True なら fullygoto、False なら none）
+        raw = "fullygoto" if entry.get("wm_on", True) else "none"
+    return _normalize_wm_choice(raw, wm_on_default=True)
+
+
+def _wm_image_urls(entry: dict, filename: str):
+    """
+    送信用の画像URLを一元生成するユーティリティ。
+      - original:   原寸（外部公開）→ 選択モードの透かし（署名付き）
+      - preview:    サムネ           → 常に透かし
+    """
+    mode = _wm_choice_for_entry(entry)
+    original = safe_url_for("serve_image", filename=filename, _sign=True, wm=mode)
+    preview  = safe_url_for("serve_image", filename=filename, wm=1)
+    return original, preview
+
+def build_flex_hero(entry: dict, ratio: str = "16:9"):
+    """
+    Flexのhero画像用ユーティリティ。
+    - 表示: 透かし付きプレビュー（wm=1）
+    - タップ: 原寸（選択モードの透かし＋署名付き）
+    """
+    if not entry:
+        return None
+    img_name = (entry.get("image_file") or entry.get("image") or "").strip()
+    if not img_name:
+        return None
+    original, preview = _wm_image_urls(entry, img_name)
+    return {
+        "type": "image",
+        "url": preview,              # 一覧に表示するのは常時透かしサムネ
+        "size": "full",
+        "aspectMode": "cover",
+        "aspectRatio": ratio,
+        "action": {                  # タップで原寸（選択モード透かし・署名付き）
+            "type": "uri",
+            "uri": original
+        }
+    }
+
+# ==== LINE 送信用：画像URLを一元生成するヘルパ ===========================
+
+def _entry_image_name(entry: dict | None) -> str | None:
+    """エントリから主画像ファイル名を取得（image_file 優先）。"""
+    if not entry:
+        return None
+    return entry.get("image_file") or entry.get("image") or None
+
+
+def make_line_image_message(entry: dict) -> "ImageSendMessage | None":
+    """
+    ImageSendMessage を“正規化済みURL”で作る。
+    - original_content_url: 署名 + 選択透かし（none/fullygoto/gotocity）
+    - preview_image_url:    常に透かし（サムネ）
+    """
+    img = _entry_image_name(entry)
+    if not img:
+        return None
+    original, preview = _wm_image_urls(entry, img)
+    try:
+        return ImageSendMessage(original_content_url=original, preview_image_url=preview)
+    except Exception:
+        app.logger.exception("make_line_image_message failed")
+        return None
+
+
+def make_flex_hero_image(entry: dict) -> dict | None:
+    """
+    Flex の hero 用 image コンポーネントを“正規化済みURL”で返す。
+    - 表示: preview（常に透かし）
+    - タップ: original（署名+選択透かし）に遷移
+    """
+    img = _entry_image_name(entry)
+    if not img:
+        return None
+    original, preview = _wm_image_urls(entry, img)
+    return {
+        "type": "image",
+        "url": preview,              # 画面表示
+        "size": "full",
+        "aspectMode": "cover",
+        "action": {                  # 画像タップで原寸（署名+選択透かし）を開く
+            "type": "uri",
+            "label": "open",
+            "uri": original
+        }
+    }
+
+
+def apply_thumbnail_for_template_column(entry: dict, column: dict) -> dict:
+    """
+    テンプレート（Buttons/Carousel など）の column にサムネURLを適用。
+    既存の column を破壊せず、thumbnailImageUrl だけ入れる/上書きする。
+    """
+    try:
+        img = _entry_image_name(entry)
+        if not img:
+            return column
+        _, preview = _wm_image_urls(entry, img)
+        column = dict(column)  # defensively copy
+        column["thumbnailImageUrl"] = preview
+        return column
+    except Exception:
+        app.logger.exception("apply_thumbnail_for_template_column failed")
+        return column
 
 
 def _load_wm_font(base_size: int):
@@ -3619,6 +3862,102 @@ def _atomic_json_dump(path, obj):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def _append_jsonl(path: str, obj: dict):
+    """JSONLに1行追記（失敗してもアプリは落とさない）"""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except Exception:
+        app.logger.exception("sendlog append failed")
+
+def _extract_wm_flags(url: str | None) -> dict | None:
+    """URLから wm / _sign / exp などを抽出"""
+    if not url:
+        return None
+    try:
+        pr = _u.urlparse(url)
+        qs = _u.parse_qs(pr.query or "")
+        wm  = (qs.get("wm", [None])[0] or "")
+        exp = (qs.get("exp", [None])[0] or None)
+        signed = ("_sign" in qs)
+        return {"url": url, "wm": wm, "signed": bool(signed), "exp": exp}
+    except Exception:
+        return {"url": url}
+
+def _iter_image_links_from_messages(messages) -> list[dict]:
+    """
+    LINEメッセージ配列から、実際に送る画像URL群をフラット収集。
+    - ImageSendMessage: original/preview
+    - Flex: どこにあっても type=image の url を走査
+    """
+    out: list[dict] = []
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            if (obj.get("type") == "image") and obj.get("url"):
+                info = _extract_wm_flags(obj.get("url"))
+                if info: out.append(info)
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, list):
+            for it in obj:
+                _walk(it)
+
+    for m in (messages or []):
+        # ImageSendMessage
+        if getattr(m, "original_content_url", None) or getattr(m, "preview_image_url", None):
+            oi = _extract_wm_flags(getattr(m, "original_content_url", None))
+            pi = _extract_wm_flags(getattr(m, "preview_image_url", None))
+            if oi: out.append({"kind": "image:original", **oi})
+            if pi: out.append({"kind": "image:preview",  **pi})
+            continue
+
+        # FlexSendMessage
+        if m.__class__.__name__ == "FlexSendMessage":
+            try:
+                payload = m.as_json_dict()  # line-bot-sdk のAPI
+                _walk(payload)
+            except Exception:
+                pass
+
+    return out
+
+def _log_sent_messages(event, messages, status: str):
+    """
+    送信確定ログ（確実に“このURLで投げた”という証跡）
+    status: 'replied' | 'pushed' | 'dryrun' | 'error' | 'noop'
+    """
+    import random, time
+    try:
+        if SEND_LOG_SAMPLE <= 0.0:
+            return
+        if random.random() > SEND_LOG_SAMPLE:
+            return
+
+        rt  = getattr(event, "reply_token", None)
+        tid = None
+        try:
+            tid = _line_target_id(event)
+        except Exception:
+            pass
+
+        record = {
+            "ts": int(time.time()),
+            "kind": "line_send",
+            "status": status,
+            "reply": bool(rt),
+            "target": tid,
+            "count": len(messages or []),
+            "images": _iter_image_links_from_messages(messages),
+        }
+        _append_jsonl(SEND_LOG_FILE, record)
+    except Exception:
+        # ログでアプリを止めない
+        app.logger.exception("send confirm log failed")
+
 
 # ★ここから追加：一度だけ案内 用の保存/読込/クリア
 def _load_paused_notices() -> dict:
@@ -5200,6 +5539,119 @@ def admin_entry():
         role=session.get("role", ""),
         global_paused=_is_global_paused(),
     )
+
+@app.route("/admin/_wm_diag", methods=["GET"])
+@login_required
+def admin_wm_diag():
+    """
+    /admin/_wm_diag?idx=<entriesのindex>
+    - 対象エントリの画像について:
+      * プレビュー(常時透かし)URL
+      * 原寸(選択透かし/署名付き)URL
+      * 明示モード別( none / fullygoto / gotocity )の原寸URL
+    を一覧表示し、同時にアプリ内部リクエストで実レスポンスヘッダも確認する。
+    """
+    if session.get("role") != "admin":
+        abort(403)
+
+    try:
+        idx = int(request.args.get("idx", ""))
+    except Exception:
+        return "idx=? を指定してください（例: /admin/_wm_diag?idx=0）", 400
+
+    # 正規化済みで読む
+    entries = [_norm_entry(x) for x in load_entries()]
+    if idx < 0 or idx >= len(entries):
+        return f"idx={idx} は範囲外です（0〜{len(entries)-1}）", 404
+
+    entry = entries[idx]
+    img_name = (entry.get("image_file") or entry.get("image") or "").strip()
+    if not img_name:
+        return f"idx={idx} のエントリには画像がありません", 404
+
+    # 実際に適用されるモード（旧/新保存形式どちらでもOK）
+    effective_mode = _wm_choice_for_entry(entry)
+
+    # URL（外部表示用=絶対URL）と、内部プローブ用の相対パスを両方作る
+    def _abs_rel(endpoint, **kwargs):
+        # 表示用(絶対)と内部GET用(相対)の両方を返す
+        abs_url = safe_url_for(endpoint, _external=True, **kwargs)
+        rel_url = safe_url_for(endpoint, _external=False, **kwargs)
+        return abs_url, rel_url
+
+    # 代表URLセット
+    preview_abs, preview_rel = _abs_rel("serve_image", filename=img_name, wm=1)
+    original_abs, original_rel = _abs_rel("serve_image", filename=img_name, _sign=True, wm=effective_mode)
+
+    # 明示モード（テスト用）
+    none_abs, none_rel       = _abs_rel("serve_image", filename=img_name, _sign=True, wm="none")
+    fully_abs, fully_rel     = _abs_rel("serve_image", filename=img_name, _sign=True, wm="fullygoto")
+    city_abs, city_rel       = _abs_rel("serve_image", filename=img_name, _sign=True, wm="gotocity")
+
+    # ---- アプリ内部で実際に叩いてヘッダを採取（外部HTTPに出ない） ----
+    def _probe(rel_path):
+        # 注意: ここは本番アプリの中から test_client を使って内部GETします
+        # 画像本体は重いので HEAD にしたいところですが、署名や動的変換の都合で GET を推奨
+        with app.test_client() as c:
+            rv = c.get(rel_path)
+        return {
+            "status": rv.status_code,
+            "content_type": rv.headers.get("Content-Type"),
+            "content_length": rv.headers.get("Content-Length"),
+            # ここは serve_image 側で付けていれば拾える（後述の追加②を参照）
+            "X-WM-Requested": rv.headers.get("X-WM-Requested"),
+            "X-WM-Applied": rv.headers.get("X-WM-Applied"),
+            "X-Img-Signed": rv.headers.get("X-Img-Signed"),
+            "X-Img-Exp": rv.headers.get("X-Img-Exp"),
+        }
+
+    rows = [
+        ("Preview (常時透かし)", preview_abs, _probe(preview_rel)),
+        (f"Original (選択透かし: {effective_mode})", original_abs, _probe(original_rel)),
+        ("Original 明示 none",      none_abs,  _probe(none_rel)),
+        ("Original 明示 fullygoto", fully_abs, _probe(fully_rel)),
+        ("Original 明示 gotocity",  city_abs,  _probe(city_rel)),
+    ]
+
+    # シンプルに表で出力
+    html = """
+    <!doctype html><meta charset="utf-8">
+    <title>WM Diag</title>
+    <style>
+      body{font-family:system-ui, -apple-system, Segoe UI, Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;padding:16px}
+      table{border-collapse:collapse;width:100%}
+      th,td{border:1px solid #ddd;padding:6px 8px;font-size:14px;vertical-align:top}
+      th{background:#f5f7fb;text-align:left}
+      code{background:#f1f4f7;padding:2px 4px;border-radius:4px}
+      .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace}
+    </style>
+    <h1>Watermark Diagnostics</h1>
+    <p>idx=<b>{{ idx }}</b> / タイトル: <b>{{ title }}</b> / 適用モード: <code>{{ effective_mode }}</code></p>
+    <table>
+      <tr><th>種別</th><th>URL</th><th>レスポンス(抜粋)</th></tr>
+      {% for label, url, meta in rows %}
+      <tr>
+        <td>{{ label }}</td>
+        <td class="mono"><a href="{{ url }}" target="_blank" rel="noopener">{{ url }}</a></td>
+        <td>
+          status: {{ meta.status }}<br>
+          Content-Type: {{ meta.content_type }} / Content-Length: {{ meta.content_length }}<br>
+          X-WM-Requested: {{ meta["X-WM-Requested"] }} / X-WM-Applied: {{ meta["X-WM-Applied"] }}<br>
+          X-Img-Signed: {{ meta["X-Img-Signed"] }} / X-Img-Exp: {{ meta["X-Img-Exp"] }}
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    <p style="margin-top:10px;"><a href="{{ url_for('admin_entry', edit=idx) }}">← このエントリを編集に戻る</a></p>
+    """
+    return render_template_string(
+        html,
+        idx=idx,
+        title=(entry.get("title") or ""),
+        effective_mode=effective_mode,
+        rows=rows,
+    )
+
 
 @app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
 @app.route("/admin/entry/delete/<int:idx>", methods=["POST"])
@@ -6809,10 +7261,9 @@ def _format_entry_messages(e: dict):
             try:
                 # img_url に wm= が付いていれば最優先、無ければ透かし無し扱いで署名URL化
                 orig_url, prev_url = _line_img_pair_from_url(img_url, None)
-                msgs.append(ImageSendMessage(
-                    original_content_url = orig_url or img_url,
-                    preview_image_url    = prev_url  or img_url
-                ))
+                img_msg = make_line_image_message(entry)  # ← これだけで wm/署名/プレビュー統一
+                if img_msg:
+                    msgs.append(img_msg)
             except Exception:
                 # LINE SDKの型エラー等は握りつぶしてテキストのみ送る
                 app.logger.exception("failed to build ImageSendMessage")
@@ -7733,27 +8184,44 @@ def _reply_or_push(event, text: str, *, reqgen: int | None = None):
 def _send_messages(event, messages):
     """テキスト/画像など複合メッセージ送信（出典フッターは line_bot_api のプロキシで付与されます）"""
     if not _line_enabled() or not line_bot_api:
-        # ログ出力のみ（開発/LINE無効時）
-        for m in (messages or []):
-            try:
-                app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
-            except Exception:
-                pass
+        for m in messages:
+            app.logger.info("[LINE disabled] would send: %s", getattr(m, "text", "(non-text)"))
+        # ← 確定ログ（ドライラン扱い）
+        try: _log_sent_messages(event, messages, status="dryrun")
+        except Exception: pass
         return
+
+    status = "noop"
     try:
-        reply_token = getattr(event, "reply_token", None)
-        if reply_token:
-            line_bot_api.reply_message(reply_token, messages)
+        rt = getattr(event, "reply_token", None)
+        if rt:
+            line_bot_api.reply_message(rt, messages)
+            status = "replied"
         else:
             tid = _line_target_id(event)
             if tid:
                 line_bot_api.push_message(tid, messages)
+                status = "pushed"
+            else:
+                status = "noop"
     except LineBotApiError as e:
         global LAST_SEND_ERROR, SEND_ERROR_COUNT
         SEND_ERROR_COUNT += 1
         LAST_SEND_ERROR = f"{type(e).__name__}: {e}"
         app.logger.exception("LINE send failed: %s", e)
+        # ← 失敗時もログ
+        try: _log_sent_messages(event, messages, status="error")
+        except Exception: pass
+        return
+    except Exception:
+        app.logger.exception("LINE send unexpected error")
+        try: _log_sent_messages(event, messages, status="error")
+        except Exception: pass
+        return
 
+    # ← 成功時の確定ログ
+    try: _log_sent_messages(event, messages, status=status)
+    except Exception: pass
 
 def _notice_paused_once(event, target_id: str) -> bool:
     """
