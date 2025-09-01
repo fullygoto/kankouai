@@ -88,7 +88,9 @@
           </div>
           <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
             <button class="btn" data-pick="{{ filename }}">この画像を選ぶ</button>
-            <a class="btn ghost" href="{{ url_for('admin_watermark_one', src=filename) if 'admin_watermark_one' in current_app.view_functions else url_for('admin_watermark', picker=1, order='new') }}" target="_blank" rel="noopener">詳細/透かし</a>
+            <a class="btn ghost"
+              href="{{ url_for('admin_watermark_one', src=filename) if has_endpoint('admin_watermark_one') else url_for('admin_watermark', picker=1, order='new') }}"
+              target="_blank" rel="noopener">詳細/透かし</a>
           </div>
         </div>
       {% endfor %}
