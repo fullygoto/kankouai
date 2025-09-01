@@ -6342,7 +6342,7 @@ def admin_watermark_generate():
         w, h = im.size
         r = min(MAXW / w, MAXH / h, 1.0)
         if r < 1.0:
-            im = im.resize((int(w * r), int(h * r)), RESAMPLE_LANCZOS)
+            im = im.resize((int(w * r), int(h * r)), Image.LANCZOS)
 
         buf = _io.BytesIO()
         # WEBP→JPEG など、LINE互換も考慮して JPEG/PNG に正規化
@@ -6402,20 +6402,20 @@ def shop_entry():
     user_id = session["user_id"]
 
     if request.method == "POST":
-        category = request.form.get("category", "")
-        title = request.form.get("title", "")
-        desc = request.form.get("desc", "")
-        address = request.form.get("address", "")
-        tel = request.form.get("tel", "")
-        holiday = request.form.get("holiday", "")
-        open_hours = request.form.get("open_hours", "")
-        parking = request.form.get("parking", "")
+        category    = request.form.get("category", "")
+        title       = request.form.get("title", "")
+        desc        = request.form.get("desc", "")
+        address     = request.form.get("address", "")
+        tel         = request.form.get("tel", "")
+        holiday     = request.form.get("holiday", "")
+        open_hours  = request.form.get("open_hours", "")
+        parking     = request.form.get("parking", "")
         parking_num = request.form.get("parking_num", "")
-        payment = request.form.getlist("payment")
-        map_url = request.form.get("map", "")
+        payment     = request.form.getlist("payment")
+        map_url     = request.form.get("map", "")
 
-        tags = _split_lines_commas(request.form.get("tags", ""))
-        areas = request.form.getlist("areas")
+        tags   = _split_lines_commas(request.form.get("tags", ""))
+        areas  = request.form.getlist("areas")
         remark = request.form.get("remark", "")
 
         links = _split_lines_commas(request.form.get("links", ""))
@@ -6448,6 +6448,7 @@ def shop_entry():
             "extras": extras
         }
         entry_data = _norm_entry(entry_data)
+
         # 画像アップロード（任意）
         up = request.files.get("image_file")
         if up and up.filename:
@@ -6456,18 +6457,21 @@ def shop_entry():
             prev_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
             prev_img = entries[prev_idx].get("image_file") if prev_idx is not None else None
 
-        res = _save_jpeg_1080_350kb(up, previous=prev_img, delete=False)
-        if res is None:
-            flash("画像アップロードに失敗しました")
+            res = _save_jpeg_1080_350kb(up, previous=prev_img, delete=False)
+            if res is None or res == "":
+                flash("画像アップロードに失敗しました")
+            else:
+                entry_data["image_file"] = res
+                # 3種の透かしを事前生成
+                try:
+                    _ensure_wm_variants(res)
+                except Exception:
+                    app.logger.exception("[wm] variants generation failed (shop) for %s", res)
         else:
-            entry_data["image_file"] = res
-            # ▼【追記】3種を事前生成
-            try:
-                _ensure_wm_variants(res)
-            except Exception:
-                app.logger.exception("[wm] variants generation failed (shop) for %s", res)
+            # 画像アップロードが無い場合でも既存の entries は必要
+            entries = load_entries()
 
-        entries = load_entries()
+        # 既存エントリがあれば上書き、なければ追加
         entry_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
         if entry_idx is not None:
             entries[entry_idx] = entry_data
@@ -7966,54 +7970,6 @@ def _wm_prep_image(path: str, max_size: int | None = 1080) -> Image.Image:
     return im
 
 
-# --- 透かしテキストを右下に描画 ---
-def _wm_draw(im, text, scale=0.05, opacity=180, margin_ratio=0.02):
-    from PIL import Image, ImageDraw, ImageFont
-    if not text:
-        return im
-
-    base = im.convert("RGBA")
-    W, H = base.size
-
-    size = max(18, int(W * float(scale)))
-    margin = max(6, int(W * float(margin_ratio)))
-    stroke_w = max(1, size // 12)
-
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", size=size)
-    except Exception:
-        font = ImageFont.load_default()
-
-    draw = ImageDraw.Draw(base)
-    try:
-        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_w)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    except Exception:
-        tw, th = draw.textsize(text, font=font)
-
-    x = max(0, W - tw - margin * 2)
-    y = max(0, H - th - margin * 2)
-
-    # 半透明の下地
-    bg = Image.new("RGBA", (tw + margin * 2, th + margin * 2), (0, 0, 0, int(opacity * 0.45)))
-    base.alpha_composite(bg, (x, y))
-
-    # 本体文字（白＋黒縁）
-    try:
-        draw.text(
-            (x + margin, y + margin),
-            text,
-            fill=(255, 255, 255, int(opacity)),
-            font=font,
-            stroke_width=stroke_w,
-            stroke_fill=(0, 0, 0, min(255, int(opacity) + 50)),
-        )
-    except TypeError:
-        draw.text((x + margin, y + margin), text, fill=(255, 255, 255, int(opacity)), font=font)
-
-    return base.convert("RGB")
-
-
 # --- JPEG 保存ヘルパー（品質指定・最適化） ---
 def _wm_save_jpeg(im, out_path, quality=85):
     from pathlib import Path
@@ -9285,7 +9241,7 @@ def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
     for t in texts:
         if not t:
             continue
-        for ch in _split_for_line(t, max_len=4900):
+        for ch in _split_for_line(t, limit=4900):
             # 世代ガード：新しいユーザー発話が来て世代が進んでいれば以降は送らない
             if (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen):
                 app.logger.info("abort stale push uid=%s", target_id)
@@ -9381,7 +9337,7 @@ def admin_notices():
                     break
         else:
             notice = {
-                "id": notices[-1]["id"] + 1 if notices else 1,
+                "id": (max((n.get("id") or 0) for n in notices) + 1) if notices else 1,
                 "title": title,
                 "content": content,
                 "category": category,
