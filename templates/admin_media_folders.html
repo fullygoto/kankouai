@@ -2,12 +2,12 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>画像フォルダを選択</title>
+<title>画像フォルダ / 画像を選択</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{--bg:#f6faf9;--card:#fff;--line:#e7eef5;--brand:#2a8ed8;--muted:#567}
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
-  .container{background:var(--card);max-width:1100px;margin:0 auto;padding:18px 20px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+  .container{background:var(--card);max-width:1000px;margin:0 auto;padding:18px 20px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
   h1{margin:0 0 10px}
   .tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
   .input{flex:1;min-width:220px;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
@@ -15,107 +15,88 @@
   .card{border:1px solid #e5eef5;border-radius:10px;padding:12px;background:#fbfdff}
   .name{font-weight:600;color:#234;word-break:break-all}
   .muted{color:var(--muted);font-size:.92em}
-  .btn{display:inline-block;padding:7px 12px;border-radius:8px;background:var(--brand);color:#fff;text-decoration:none}
-  .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
+  .btn{display:inline-block;padding:7px 12px;border-radius:8px;background:var(--brand);color:#fff;text-decoration:none;border:0;cursor:pointer}
+  .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
   .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
-  img{max-width:100%;height:150px;object-fit:cover;border:1px solid #e5eef5;border-radius:8px;background:#fff}
-  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .thumb{width:100%;height:140px;background:#eef3f7;border:1px solid #e6edf3;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .thumb img{max-width:100%;max-height:100%;display:block}
 </style>
 </head>
 <body>
 <div class="container">
-
-  {% if images is defined %}
-    <!-- ========= 画像一覧モード（フォルダ指定 or フォルダが存在しない場合のルート直下） ========= -->
-    <div class="topbar">
-      <h1>
-        {% if folder %}フォルダ：{{ folder }}{% else %}全体の画像一覧（ルート直下）{% endif %}
-      </h1>
-      <div class="row">
-        <a class="btn ghost" href="{{ url_for('admin_media_folders', entry_id=entry_id, next=next) }}">← フォルダ一覧</a>
-        <a class="btn ghost" href="{{ next or url_for('admin_entry', edit=entry_id) }}">エントリに戻る</a>
-        <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new', **({'subdir': folder} if folder else {})) }}" target="_blank" rel="noopener">ピッカーで開く</a>
-      </div>
+  <div class="topbar">
+    <h1>画像を選択</h1>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a class="btn ghost" href="{{ url_for('admin_entry', edit=entry_id) if entry_id else url_for('admin_entry') }}">データ管理に戻る</a>
+      <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new') }}" target="_blank" rel="noopener">全体から選ぶ（ピッカー）</a>
     </div>
+  </div>
 
-    <div class="tools">
-      <input id="q" class="input" type="search" placeholder="ファイル名で絞り込み（例: beach, 2024_ など）" autocomplete="off">
-      <span class="muted"><span id="shown">0</span> / <span id="total">{{ images|length if images else 0 }}</span> 表示</span>
-    </div>
+  <div class="tools">
+    <input id="q" class="input" type="search" placeholder="名前で絞り込み（例: 2024, summer, beach, xxx.jpg）" autocomplete="off">
+    <span class="muted"><span id="shown">0</span> / <span id="total">0</span> 表示</span>
+  </div>
 
-    <div id="grid" class="grid">
-      {% if images and images|length %}
-        {% for f in images %}
-          {% set relfn = f.rel if f.rel is defined else (folder ~ '/' ~ f.name if folder else f.name) %}
-          {% set img_url = url_for('admin_media_img', filename=relfn) ~ (('?v=' ~ f.v) if f.v else '') %}
-          <div class="card" data-name="{{ f.name|lower }}">
-            <a href="{{ img_url }}" target="_blank" rel="noopener">
-              <img src="{{ img_url }}" loading="lazy" alt="{{ f.name }}">
+  {# =========================
+     1) フォルダ一覧（folders が渡っている場合）
+     ========================= #}
+  {% if folders %}
+    <div id="grid" class="grid" data-mode="folders">
+      {% for f in folders %}
+        <div class="card" data-name="{{ f|lower }}">
+          <div class="name">{{ f }}</div>
+          <div class="muted">{{ (folder_counts[f] ~ ' 枚') if folder_counts is defined and f in folder_counts else '' }}</div>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+            <!-- ピッカーを別タブで開く（サムネ付きで選べる既存機能） -->
+            <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new', subdir=f) }}" target="_blank" rel="noopener">
+              このフォルダから選ぶ（ピッカー）
             </a>
-            <div class="name">{{ relfn }}</div>
-            <div class="muted">更新: {{ f.ts }}</div>
-            <div class="row" style="margin-top:6px">
-              <!-- この画像を使う：編集中の観光データにアタッチ -->
-              <form method="post" action="{{ url_for('admin_entry_attach') }}">
-                <input type="hidden" name="entry_id" value="{{ entry_id }}">
-                <input type="hidden" name="filename" value="{{ relfn }}">
-                <input type="hidden" name="next" value="{{ next or url_for('admin_entry', edit=entry_id) }}">
-                <button class="btn" type="submit">この画像を使う</button>
-              </form>
-              <!-- 透かし単体編集 -->
-              <a class="btn ghost" href="{{ url_for('admin_watermark_one', src=relfn) }}" target="_blank" rel="noopener">再生成/編集</a>
-              <!-- 削除（元＋派生まとめて） -->
-              <form method="post" action="{{ url_for('admin_media_delete') }}" onsubmit="return confirm('この画像（元＋派生）を削除します。よろしいですか？');">
-                <input type="hidden" name="filename" value="{{ relfn }}">
-                <button class="btn ghost" type="submit">削除</button>
-              </form>
-            </div>
+            <!-- このページ内で画像一覧へ -->
+            <a class="btn ghost" href="{{ url_for('admin_media_folders', folder=f, entry_id=entry_id, next=next) }}">
+              一覧をこのページで表示
+            </a>
           </div>
-        {% endfor %}
-      {% else %}
-        <div class="muted">画像が見つかりません。</div>
-      {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+
+  {# =========================
+     2) 画像一覧（images が渡っている場合）
+     ========================= #}
+  {% elif images %}
+    <!-- 選択して戻る： next に GET で src を渡す -->
+    <form id="backForm" method="get" action="{{ next or url_for('admin_entry', edit=entry_id) }}">
+      {% if entry_id %}<input type="hidden" name="edit" value="{{ entry_id }}">{% endif %}
+      <input type="hidden" name="src" id="srcInput">
+    </form>
+
+    <div id="grid" class="grid" data-mode="images">
+      {% for img in images %}
+        {# img が辞書 or 文字列、どちらでも動くように #}
+        {% set filename = (img.filename if (img is mapping and 'filename' in img) else img) %}
+        {% set display = filename %}
+        <div class="card" data-name="{{ display|lower }}">
+          <div class="name">{{ display }}</div>
+          <div class="thumb">
+            {# サムネURLが分からない環境もあるため、推測パスとフォールバックの両対応 #}
+            {% set thumb = (img.url if (img is mapping and 'url' in img) else None) %}
+            {% if thumb %}
+              <img src="{{ thumb }}" alt="{{ display }}">
+            {% else %}
+              <span class="muted">プレビューなし</span>
+            {% endif %}
+          </div>
+          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" data-pick="{{ filename }}">この画像を選ぶ</button>
+            <a class="btn ghost" href="{{ url_for('admin_watermark_one', src=filename) if 'admin_watermark_one' in current_app.view_functions else url_for('admin_watermark', picker=1, order='new') }}" target="_blank" rel="noopener">詳細/透かし</a>
+          </div>
+        </div>
+      {% endfor %}
     </div>
 
   {% else %}
-    <!-- ========= フォルダ一覧モード ========= -->
-    <div class="topbar">
-      <h1>画像フォルダを選択</h1>
-      <div class="row">
-        <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
-        <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new') }}" target="_blank" rel="noopener">全体から選ぶ（ピッカー）</a>
-      </div>
-    </div>
-
-    <div class="tools">
-      <input id="q" class="input" type="search" placeholder="フォルダ名で絞り込み（例: 2024, summer, beach）" autocomplete="off">
-      <span class="muted"><span id="shown">0</span> / <span id="total">{{ folders|length if folders else 0 }}</span> 表示</span>
-    </div>
-
-    <div id="grid" class="grid">
-      {% if folders and folders|length %}
-        {% for f in folders %}
-          <div class="card" data-name="{{ f|lower }}">
-            <div class="name">{{ f }}</div>
-            <div class="muted">{{ (folder_counts[f] ~ ' 枚（元画像）') if folder_counts is defined and f in folder_counts else '' }}</div>
-            <div class="row" style="margin-top:8px">
-              <!-- このページ内で画像一覧モードへ遷移（entry_id/next を引き継ぐ） -->
-              <a class="btn" href="{{ url_for('admin_media_folders', folder=f, entry_id=entry_id, next=next) }}">
-                このフォルダの画像を表示
-              </a>
-              <!-- ピッカー直行（従来UIが良ければこちら） -->
-              <a class="btn ghost" href="{{ url_for('admin_watermark', picker=1, order='new', subdir=f) }}" target="_blank" rel="noopener">
-                ピッカーで開く
-              </a>
-            </div>
-          </div>
-        {% endfor %}
-      {% else %}
-        <div class="muted">フォルダがありません。上の「全体から選ぶ（ピッカー）」または左メニューからアップロードしてください。</div>
-      {% endif %}
-    </div>
+    <p class="muted">表示できるフォルダ/画像がありません。</p>
   {% endif %}
-
 </div>
 
 <script>
@@ -123,17 +104,41 @@
   const q = document.getElementById('q');
   const grid = document.getElementById('grid');
   const shown = document.getElementById('shown');
+  const total = document.getElementById('total');
+
+  function recount(){
+    if(!grid){ shown.textContent = 0; total.textContent = 0; return; }
+    const cards = grid.querySelectorAll('.card');
+    let vis = 0;
+    cards.forEach(c => { if(c.style.display !== 'none') vis++; });
+    shown.textContent = vis;
+    total.textContent = cards.length;
+  }
+
   function update(){
-    if(!q || !grid) return;
     const term = (q.value||'').trim().toLowerCase();
-    let c=0;
+    if(!grid) return;
     grid.querySelectorAll('.card').forEach(card=>{
       const ok = !term || (card.dataset.name||'').includes(term);
       card.style.display = ok ? '' : 'none';
-      if(ok) c++;
     });
-    if(shown) shown.textContent = c;
+    recount();
   }
+
+  // 画像の「この画像を選ぶ」→ next へ GET 送信
+  if(grid && grid.dataset.mode === 'images'){
+    const form = document.getElementById('backForm');
+    const srcInput = document.getElementById('srcInput');
+    grid.addEventListener('click', (e)=>{
+      const btn = e.target.closest('button[data-pick]');
+      if(!btn) return;
+      e.preventDefault();
+      const src = btn.getAttribute('data-pick');
+      srcInput.value = src;
+      form.submit();
+    });
+  }
+
   if(q) q.addEventListener('input', update);
   update();
 })();
