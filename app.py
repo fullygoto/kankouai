@@ -5831,6 +5831,8 @@ def admin_entry():
         # === 画像アップロード/削除（変更なしなら前画像を必ず維持） ===
         upload = request.files.get("image_file")
         delete_flag = (request.form.get("image_delete") == "1")
+        # ★ 追加：ピッカー／ギャラリーで選んだ既存ファイル名（フォールバック用）
+        selected_from_ui = (request.form.get("selected_image") or request.form.get("image_existing") or "").strip()
         try:
             result = _save_jpeg_1080_350kb(upload, previous=prev_img, delete=delete_flag)
         except RequestEntityTooLarge:
@@ -5844,11 +5846,19 @@ def admin_entry():
             app.logger.exception("image handler failed")
 
         if result is None:
-            # 変更なし → 前画像を維持（削除指示がない限り）
-            if prev_img and not delete_flag:
+            # ★ アップロードなし → ピッカーで選んだファイル名があればそれを優先採用
+            if selected_from_ui:
+                new_entry["image_file"] = selected_from_ui
+                new_entry["image"] = selected_from_ui
+                try:
+                    _ensure_wm_variants(selected_from_ui)
+                except Exception:
+                    app.logger.exception("[wm] backfill variants failed for %s", selected_from_ui)
+
+            # ★ 何も選んでいなければ前の画像を維持（削除指示がない限り）
+            elif prev_img and not delete_flag:
                 new_entry["image_file"] = prev_img
                 new_entry["image"] = prev_img
-                # ▼ ここを追加（既存画像に派生ファイルが無ければ作る）
                 try:
                     _ensure_wm_variants(prev_img)
                 except Exception:
