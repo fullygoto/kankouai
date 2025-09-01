@@ -3525,6 +3525,70 @@ def _img_sig(filename: str, exp: int) -> str:
         hmac.new(IMAGES_SIGNING_KEY, msg, hashlib.sha256).digest()
     ).rstrip(b"=").decode("ascii")
 
+# === Media URL 正規化＆署名付きURL生成 ===
+from flask import current_app
+
+def _extract_media_basename(val: str | None) -> str | None:
+    """
+    'https://.../media/img/abc.jpg?sig=...&exp=...' でも
+    '/media/img/abc.jpg' でも 'abc.jpg' でも -> 'abc.jpg' に正規化。
+    """
+    if not val:
+        return None
+    v = str(val).strip()
+    v = v.split("?", 1)[0]          # ?以降を落とす
+    v = v.rsplit("/", 1)[-1]        # パスを落としてベース名に
+    # 最低限の安全対策
+    if not v or ".." in v or "/" in v or "\\" in v:
+        return None
+    return v
+
+def _media_img_signed_url(name: str | None, *, ttl_seconds: int = 60 * 60 * 24 * 30) -> str | None:
+    """
+    保存している 'abc.jpg' → 表示用の署名付きURLを作る。
+    既存 _sign_url(path, ttl=...) or sign_media_url(path, expires=...) があれば使う。
+    """
+    if not name:
+        return None
+    path = f"/media/img/{name}"
+    signer = globals().get("_sign_url") or globals().get("sign_media_url")
+    if callable(signer):
+        try:
+            try:
+                return signer(path, ttl=ttl_seconds)
+            except TypeError:
+                import time
+                return signer(path, expires=int(time.time()) + ttl_seconds)
+        except Exception:
+            pass
+    return path  # 署名器が無い環境ではプレーンで返す
+
+def _media_root():
+    # 既に定義済みならそれを使う（あなたのコードに同名がある想定）
+    if "_media_root" in globals():
+        return globals()["_media_root"]()
+    # 無い場合のフォールバック
+    import os
+    return current_app.config.get("MEDIA_DIR") or os.path.join(current_app.root_path, "media")
+
+def _media_dir(folder="img"):
+    import os
+    return os.path.join(_media_root(), folder)
+
+def _list_media_images():
+    """
+    media/img 配下を列挙して [{'name': 'abc.jpg', 'thumb_url': '署名URL'}...] を返す
+    """
+    import os
+    exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+    img_dir = _media_dir("img")
+    out = []
+    if os.path.isdir(img_dir):
+        for fn in sorted(os.listdir(img_dir)):
+            if os.path.splitext(fn.lower())[1] in exts:
+                out.append({"name": fn, "thumb_url": _media_img_signed_url(fn)})
+    return out
+
 # ---- HTTPSの絶対URLを保証するヘルパ／url_forの安全版 ----
 def _force_https_abs(u: str) -> str:
     """
@@ -5585,6 +5649,20 @@ def _image_meta(img_name: str | None):
 # =========================
 #  管理画面: 観光データ登録・編集
 # =========================
+# POST 受信後、保存処理の直前に差し込み
+img_val = (
+    request.form.get("image")
+    or request.form.get("image_name")
+    or request.form.get("img_name")
+    or request.form.get("hero_img")
+    or request.form.get("cover_img")
+)
+img_basename = _extract_media_basename(img_val)
+if img_basename:
+    # ← DB/JSONなどあなたの実装の保存キーに合わせる
+    # 例: entry["image_main"] を使っているならそちらへ
+    entry["image"] = img_basename
+
 @app.route("/admin/entry", methods=["GET", "POST"])
 @login_required
 def admin_entry():
@@ -5594,6 +5672,21 @@ def admin_entry():
 
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
+
+    # ---- ★ 追加：メディアのベース名抽出（?sig=... や パスを除去） ----
+    def _extract_media_basename(val: str | None) -> str | None:
+        """
+        'https://.../media/img/abc.jpg?sig=...&exp=...' でも
+        '/media/img/abc.jpg' でも 'abc.jpg' でも -> 'abc.jpg' に正規化。
+        """
+        if not val:
+            return None
+        v = str(val).strip()
+        v = v.split("?", 1)[0]       # ?以降(署名/期限)を落とす
+        v = v.rsplit("/", 1)[-1]     # パス区切りを落としてベース名だけに
+        if not v or ".." in v or "/" in v or "\\" in v:
+            return None
+        return v
 
     # ---- 座標ユーティリティ（全角/URL/DMSなど何でも受ける）----
     def _zen2han(s: str) -> str:
@@ -5613,7 +5706,6 @@ def admin_entry():
         if _re.search(r'[S南]', s, _re.I): hemi = 'S'
         if _re.search(r'[E東]', s, _re.I): hemi = 'E'
         if _re.search(r'[W西]', s, _re.I): hemi = 'W'
-        # ★ ここを「ダブルクォートの raw 文字列」に修正
         m = _re.search(
             r"(\d+(?:\.\d+)?)\s*[°度]\s*(\d+(?:\.\d+)?)?\s*['’′分]?\s*(\d+(?:\.\d+)?)?\s*[\"”″秒]?",
             s
@@ -5659,7 +5751,7 @@ def admin_entry():
                 a, b = b, a
             return a, b
 
-        # 3) DMS ブロック×2（★ ここもダブルクォートの raw 文字列）
+        # 3) DMS ブロック×2
         dms_blocks = _re.findall(
             r"(\d+(?:\.\d+)?\s*[°度]\s*\d*(?:\.\d+)?\s*['’′分]?\s*\d*(?:\.\d+)?\s*[\"”″秒]?\s*[NSEW北南東西]?)",
             s, flags=_re.I
@@ -5828,6 +5920,18 @@ def admin_entry():
         }
         new_entry = _norm_entry(new_entry)
 
+        # === ★ 追加：既存画像の「選択」対応（hiddenの 'image' 等） ===
+        #   署名付きURLや /media/img/xxx.jpg を受けても、必ず 'xxx.jpg' に正規化して扱う
+        picked_img_val = (
+            request.form.get("image")
+            or request.form.get("image_name")
+            or request.form.get("img_name")
+            or request.form.get("hero_img")
+            or request.form.get("cover_img")
+            or ""
+        ).strip()
+        picked_img = _extract_media_basename(picked_img_val)
+
         # === 画像アップロード/削除（変更なしなら前画像を必ず維持） ===
         upload = request.files.get("image_file")
         delete_flag = (request.form.get("image_delete") == "1")
@@ -5843,12 +5947,16 @@ def admin_entry():
             result = None
             app.logger.exception("image handler failed")
 
+        # ★ 核心：アップロードも削除も無い場合に「既存画像の選択」があれば、それを採用
+        if (result is None) and picked_img and not delete_flag:
+            result = picked_img  # ← 以降のブランチで新規保存と同等に扱わせる
+
         if result is None:
             # 変更なし → 前画像を維持（削除指示がない限り）
             if prev_img and not delete_flag:
                 new_entry["image_file"] = prev_img
                 new_entry["image"] = prev_img
-                # ▼ ここを追加（既存画像に派生ファイルが無ければ作る）
+                # ▼ 既存画像に派生ファイル（透かし3種）が無ければ作る
                 try:
                     _ensure_wm_variants(prev_img)
                 except Exception:
@@ -5860,10 +5968,10 @@ def admin_entry():
             new_entry.pop("image", None)
 
         else:
-            # 置換/新規保存
+            # 置換/新規保存 または「既存ピック」（上の result=picked_img もここに入る）
             new_entry["image_file"] = result
             new_entry["image"] = result
-            # ▼ ここを追加（新しい画像の3種を事前生成）
+            # ▼ 新しい画像（または選択画像）の3種を事前生成
             try:
                 _ensure_wm_variants(result)
             except Exception:
@@ -5876,16 +5984,20 @@ def admin_entry():
             (request.form.get("lng") or "").strip(),
             prev_entry
         )
-        if (lat is None or lng is None) and map_url:
-            a, b = _parse_latlng_any(map_url)
-            if lat is None: lat = a
-            if lng is None: lng = b
-
-        if lat is not None: new_entry["lat"] = lat
-        if lng is not None: new_entry["lng"] = lng
-
-        # （※ 旧UI互換 'wm_on' の**再代入はしない**。上の wm_choice を真にする）
-        # new_entry["wm_on"] = ('wm_on' in request.form)  # ← 上書きしない
+        if (lat is not None) or (lng is not None):
+            # map_url からの補完は残しつつ二重に壊さない
+            if (lat is None or lng is None) and map_url:
+                a, b = _parse_latlng_any(map_url)
+                if lat is None: lat = a
+                if lng is None: lng = b
+            if lat is not None: new_entry["lat"] = lat
+            if lng is not None: new_entry["lng"] = lng
+        else:
+            # まったく入っていない場合のみ map_url から抽出
+            if map_url:
+                a, b = _parse_latlng_any(map_url)
+                if a is not None: new_entry["lat"] = a
+                if b is not None: new_entry["lng"] = b
 
         # === 保存 ===
         if (idx_edit is not None) and (0 <= idx_edit < len(entries)):
@@ -6088,6 +6200,21 @@ def delete_entry(idx):
         flash("指定された項目が見つかりません")
     return redirect(url_for("admin_entry"))
 
+@app.get("/admin/api/media-signed-url")
+@login_required
+def admin_api_media_signed_url():
+    from flask import request, abort
+    folder = request.args.get("folder") or "img"
+    name = _extract_media_basename(request.args.get("name"))
+    if not name:
+        abort(400)
+    # 今回は img 専用。将来拡張したければ folder を使ってもOK
+    if folder != "img":
+        abort(400)
+    url = _media_img_signed_url(name)
+    if not url:
+        abort(404)
+    return url
 
 
 def _wm_safe_basename(name: str) -> str:
