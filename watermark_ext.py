@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-watermark_ext.py (rev5)
+watermark_ext.py (rev7)
 - /admin/watermark: ピッカー + 並び替え + subdir（フォルダ）対応
 - /admin/media/delete: サブフォルダ対応 & 削除後に元の表示条件へ戻る
 - /admin/watermark/one: 単体編集
 - /admin/watermark/one/regenerate: 単体の再生成
-- ★ /admin/media/folders: フォルダ一覧（←今回追加）
+- /admin/media/folders: フォルダ一覧 or 画像一覧（フォルダ無しでもルート直下を表示）
 """
 
 from __future__ import annotations
-import os, importlib
+import os, importlib, datetime
 from types import SimpleNamespace
 from typing import List, Dict, Iterable, Tuple, Optional
 from flask import current_app, render_template, request, session, abort, flash, redirect, url_for
@@ -19,11 +19,12 @@ WM_SUFFIX_NONE  = "__none"
 WM_SUFFIX_GOTO  = "__goto"
 WM_SUFFIX_FULLY = "__fullygoto"
 
+_IMG_EXTS = (".jpg",".jpeg",".png",".webp",".bmp",".tif",".tiff")
+
 # ---------------------------
-# 共通ヘルパ
+# 共通
 # ---------------------------
 def _get_images_dir() -> str:
-    """画像のベース格納ディレクトリを推定"""
     try:
         appmod = importlib.import_module("app")
         v = getattr(appmod, "IMAGES_DIR", None)
@@ -40,7 +41,6 @@ def _get_images_dir() -> str:
     )
 
 def _get_suffixes() -> Tuple[str, str, str]:
-    """app.py で上書きされている可能性があるので毎回取得"""
     s_none, s_goto, s_fully = WM_SUFFIX_NONE, WM_SUFFIX_GOTO, WM_SUFFIX_FULLY
     try:
         appmod = importlib.import_module("app")
@@ -55,7 +55,6 @@ def _boolish(x) -> bool:
     return str(x).lower() in {"1","true","on","yes"}
 
 def _secure_subdir(subdir: Optional[str]) -> str:
-    """subdir を IMAGES_DIR 内の相対パスに正規化（サブフォルダ名/階層を許容、親ディレクトリ禁止）"""
     subdir = (subdir or "").strip().strip("/")
     if not subdir:
         return ""
@@ -71,13 +70,17 @@ def _require_login():
     except Exception:
         abort(403)
 
-# ---------------------------
-# フォルダ列挙 & 画像列挙
-# ---------------------------
-_IMG_EXTS = (".jpg",".jpeg",".png",".webp",".bmp",".tif",".tiff")
+def _fmt_ts(ts: float) -> str:
+    try:
+        dt = datetime.datetime.fromtimestamp(ts)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
 
+# ---------------------------
+# 列挙
+# ---------------------------
 def _is_src_image(filename: str) -> bool:
-    """派生（__none/__goto/__fullygoto）を除いた“元画像か？”"""
     if not filename or filename.startswith("."):
         return False
     root, ext = os.path.splitext(filename)
@@ -87,20 +90,16 @@ def _is_src_image(filename: str) -> bool:
     return not any(suf in root for suf in (s_none, s_goto, s_fully))
 
 def _list_folders() -> Tuple[List[str], Dict[str,int]]:
-    """IMAGES_DIR 直下のフォルダ一覧と、各フォルダ内の元画像枚数を返す"""
     base = _get_images_dir()
     folders: List[str] = []
     counts: Dict[str,int] = {}
     if not os.path.isdir(base):
         return folders, counts
-
     for name in os.listdir(base):
-        if name.startswith("."):
-            continue
+        if name.startswith("."): continue
         p = os.path.join(base, name)
         if os.path.isdir(p):
             folders.append(name)
-            # 枚数カウント（直下のみ）
             c = 0
             try:
                 for fn in os.listdir(p):
@@ -113,38 +112,62 @@ def _list_folders() -> Tuple[List[str], Dict[str,int]]:
     return folders, counts
 
 def _list_source_images(order: str = "name", subdir: Optional[str] = None) -> List[str]:
-    """IMAGES_DIR[/subdir] の直下から元画像だけ列挙。"""
     images_dir = _get_images_dir()
     rel = _secure_subdir(subdir)
     base = os.path.join(images_dir, rel) if rel else images_dir
-
     files: List[str] = []
     if not os.path.isdir(base):
         return files
     for fn in os.listdir(base):
         if _is_src_image(fn):
             files.append(f"{rel}/{fn}" if rel else fn)
-
     if (order or "").lower() == "new":
         def _mtime(relfn: str) -> float:
-            try:
-                return os.path.getmtime(os.path.join(images_dir, relfn))
-            except Exception:
-                return 0.0
+            try:    return os.path.getmtime(os.path.join(images_dir, relfn))
+            except: return 0.0
         files.sort(key=_mtime, reverse=True)
     else:
         files.sort()
     return files
 
+def _list_all_images_in_folder(subdir: str, order: str = "new") -> List[Dict[str, str]]:
+    """フォルダ内の“全画像”（派生も含む）。subdir='' なら IMAGES_DIR 直下。"""
+    images_dir = _get_images_dir()
+    rel = _secure_subdir(subdir)
+    base = os.path.join(images_dir, rel) if rel else images_dir
+    out: List[Dict[str,str]] = []
+    if not os.path.isdir(base):
+        return out
+
+    for fn in os.listdir(base):
+        if fn.startswith("."): continue
+        root, ext = os.path.splitext(fn)
+        if ext.lower() not in _IMG_EXTS: continue
+        path = os.path.join(base, fn)
+        try:
+            mt = os.path.getmtime(path)
+        except Exception:
+            mt = 0.0
+        v = int(mt) if mt else 0
+        relfn = f"{rel}/{fn}" if rel else fn
+        out.append({
+            "name": fn,
+            "rel": relfn,                   # ← 相対パス（folder 無し判定用にも使う）
+            "ts": _fmt_ts(mt),
+            "v": str(v),
+        })
+
+    # 新しい順
+    if (order or "").lower() == "new":
+        out.sort(key=lambda d: int(d.get("v","0")), reverse=True)
+    else:
+        out.sort(key=lambda d: d["name"])
+    return out
+
 # ---------------------------
 # 透かし生成（内部委譲）
 # ---------------------------
 def _generate_variants(abs_path: str, *, force: bool, kinds: Iterable[str]) -> Dict[str, str]:
-    """
-    app.py 側の関数に委譲：
-      - _wm_variants_for_path_selected(abs_path, force=bool, kinds=list[str]) があればそれを使う
-      - なければ _wm_variants_for_path(abs_path, force=bool) を使う（従来互換）
-    """
     appmod = importlib.import_module("app")
     fn_sel = getattr(appmod, "_wm_variants_for_path_selected", None)
     if callable(fn_sel):
@@ -256,7 +279,6 @@ def view_admin_media_delete():
     if session.get("role") not in {"admin","shop"}:
         abort(403)
 
-    # 削除対象 + “戻り先パラメータ”
     name   = (request.form.get("filename") or "").strip().strip("/")
     order  = (request.form.get("order") or "").strip().lower()
     picker = (request.form.get("picker") or "").strip()
@@ -369,7 +391,7 @@ def view_admin_watermark_one_regen():
     return redirect(url_for("admin_watermark_one", src=src))
 
 # ---------------------------
-# ★ /admin/media/folders （フォルダ一覧）
+# /admin/media/folders （フォルダ一覧 or 画像一覧）
 # ---------------------------
 def view_admin_media_folders():
     need = _require_login()
@@ -377,19 +399,32 @@ def view_admin_media_folders():
     if session.get("role") not in {"admin","shop"}:
         abort(403)
 
+    entry_id = (request.args.get("entry_id") or "").strip()
+    next_url = (request.args.get("next") or "").strip()
+    folder   = _secure_subdir(request.args.get("folder"))
+    order    = (request.args.get("order") or "new").strip().lower()
+
     folders, counts = _list_folders()
-    # admin_media_folders.html は folders / folder_counts を参照
+
+    # 1) folder=指定 → そのフォルダの画像一覧を表示
+    # 2) フォルダが一つも無い → IMAGES_DIR 直下の画像一覧を表示
+    if folder or not folders:
+        images = _list_all_images_in_folder(folder or "", order=order)
+        # サムネ用 URL（キャッシュバスター v 付き）はテンプレ側で組み立て
+        return render_template("admin_media_folders.html",
+                               folder=(folder or ""), images=images,
+                               entry_id=entry_id, next=next_url)
+
+    # それ以外はフォルダ一覧を表示
     return render_template("admin_media_folders.html",
-                           folders=folders, folder_counts=counts)
+                           folders=folders, folder_counts=counts,
+                           entry_id=entry_id, next=next_url)
 
 # ---------------------------
 # ルート登録
 # ---------------------------
 def init_watermark_ext(app):
-    # 一覧の置換
     app.view_functions["admin_watermark"] = view_admin_watermark
-
-    # 追加ルート
     if "admin_media_delete" not in app.view_functions:
         app.add_url_rule("/admin/media/delete", endpoint="admin_media_delete",
                          view_func=view_admin_media_delete, methods=["POST"])
