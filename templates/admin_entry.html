@@ -46,7 +46,7 @@
             .filterbar input[type=text], .filterbar select {min-width:130px}
         }
 
-        /* === 追加：透かし生成済みから選ぶ専用UI（必要時のみ出現） === */
+        /* === 透かし生成済みから選ぶ専用UI（必要時のみ出現） === */
         .wm-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0 8px}
         .wm-toolbar .grow{flex:1}
         .wm-search{width:100%;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
@@ -398,7 +398,9 @@
     function _setSelectedImage(fn, kind){
         const sel = document.getElementById('selected_image');
         const master = document.getElementById('wm_choice_master');
+        const baseHidden = document.getElementById('image_basename'); // ★ 追加：サーバ保存用(hidden name="image")
         if(sel) sel.value = fn;
+        if(baseHidden) baseHidden.value = fn; // ★ ベース名を常に同期
         if(master) master.value = kind;
 
         const img = document.getElementById('admin-image-preview-t');
@@ -476,7 +478,7 @@
     <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
     <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
     <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
-    <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
+    <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
     <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
     <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
@@ -521,6 +523,7 @@
         else ('gotocity' if _wm_raw_init == 'city'
         else ('fullygoto' if _wm_on_init else 'none')))
     ) %}
+    {% set _imgname_edit = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
 
     <!-- ===== 登録フォーム ===== -->
     <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
@@ -528,8 +531,10 @@
 
         <!-- 代表（サーバに送る唯一の値） -->
         <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_init }}">
-        <!-- 新UIで選んだ元画像ファイル名を送る（ギャラリー利用時） -->
+        <!-- 新UIで選んだ元画像ファイル名（ギャラリー利用時の補助） -->
         <input type="hidden" name="selected_image" id="selected_image" value="">
+        <!-- ★ サーバ保存用：選んだベース名を必ずここに入れる（admin_entry() が拾う） -->
+        <input type="hidden" name="image" id="image_basename" value="{{ _imgname_edit }}">
 
         <label>カテゴリー</label><br>
         <select name="category" id="category_select" onchange="onCategoryChange()">
@@ -1040,6 +1045,9 @@
   async function setPreviewAndHidden(target, filename, preferredWm, rawUrl){
     const master = document.getElementById('wm_choice_master');
     const wm = preferredWm || (master ? (master.value || 'none') : 'none');
+    const baseHidden = document.getElementById('image_basename'); // ★ サーバ保存用(hidden name="image")
+
+    if(baseHidden) baseHidden.value = filename; // ★ 常に同期
 
     if(target === 't'){
       const hImg = document.getElementById('image_existing_t');
@@ -1113,7 +1121,9 @@
       const name = d.filename;
       const kind = d.kind || 'none';
       const master = document.getElementById('wm_choice_master');
+      const baseHidden = document.getElementById('image_basename');
       if(master) master.value = kind;
+      if(baseHidden && name) baseHidden.value = name; // ★ 同期
       if(name){
         setPreviewAndHidden(target, name, kind, null);
       }
