@@ -49,7 +49,7 @@
 
     {% if picker %}
       <div class="row flex" style="justify-content:space-between">
-        <div class="muted">ピッカー表示中：チェックした画像を呼び出し元へ返せます。</div>
+        <div class="muted">ピッカー表示中：チェックした画像を呼び出し元へ返せます。作成結果カードの「この画像を選ぶ」でも即反映できます。</div>
         <div class="flex">
           <button id="applyPick" class="btn">選択を反映して閉じる</button>
           <button type="button" class="btn ghost" onclick="window.close()">閉じる</button>
@@ -96,6 +96,13 @@
         <h2 style="margin:0 0 8px">作成結果</h2>
         <div class="grid">
           {% for r in results %}
+            {# 変換しやすいよう拡張子・ベース名を算出 #}
+            {% set __ext = '.' ~ (r.src.split('.')[-1]) %}
+            {% set __base = r.src[:-(__ext|length)] %}
+            {% set __name_none = __base ~ '__none' ~ __ext %}
+            {% set __name_goto = __base ~ '__goto' ~ __ext %}
+            {% set __name_fully = __base ~ '__fullygoto' ~ __ext %}
+
             <div class="card">
               <div class="small muted">元画像</div>
               <a href="{{ r.url_src }}" target="_blank" rel="noopener"><img src="{{ r.url_src }}" loading="lazy" alt="src"></a>
@@ -104,14 +111,28 @@
               {% if r.url_none %}
                 <div class="small muted" style="margin-top:10px">透かし：なし（__none）</div>
                 <a href="{{ r.url_none }}" target="_blank" rel="noopener"><img src="{{ r.url_none }}" loading="lazy" alt="none"></a>
+                <div class="card-actions">
+                  <button class="btn small pick" type="button"
+                          data-filename="{{ __name_none }}" data-kind="none">この画像を選ぶ</button>
+                </div>
               {% endif %}
+
               {% if r.url_goto %}
                 <div class="small muted" style="margin-top:10px">透かし：＠Goto City（__goto）</div>
                 <a href="{{ r.url_goto }}" target="_blank" rel="noopener"><img src="{{ r.url_goto }}" loading="lazy" alt="goto"></a>
+                <div class="card-actions">
+                  <button class="btn small pick" type="button"
+                          data-filename="{{ __name_goto }}" data-kind="gotocity">この画像を選ぶ</button>
+                </div>
               {% endif %}
+
               {% if r.url_fully %}
                 <div class="small muted" style="margin-top:10px">透かし：＠fullyGOTO（__fullygoto）</div>
                 <a href="{{ r.url_fully }}" target="_blank" rel="noopener"><img src="{{ r.url_fully }}" loading="lazy" alt="fully"></a>
+                <div class="card-actions">
+                  <button class="btn small pick" type="button"
+                          data-filename="{{ __name_fully }}" data-kind="fullygoto">この画像を選ぶ</button>
+                </div>
               {% endif %}
             </div>
           {% endfor %}
@@ -355,6 +376,18 @@
         delQ.value      = (q && q.value) ? q.value : (delQ.value || '');
 
         delForm.submit();
+      });
+
+      // ===== 作成結果カード：この画像を選ぶ（picker=1 なら即反映＆閉じる） =====
+      document.addEventListener('click', (e)=>{
+        const pick = e.target.closest('.btn.pick[data-filename][data-kind]');
+        if(!pick) return;
+        const filename = pick.getAttribute('data-filename');
+        const kind = pick.getAttribute('data-kind'); // none / gotocity / fullygoto
+        try{
+          window.opener && window.opener.postMessage({ type:'wm-pick', filename, kind }, location.origin);
+        }catch(_){}
+        if(picker){ window.close(); }
       });
 
       filter();

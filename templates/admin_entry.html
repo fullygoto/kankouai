@@ -1062,7 +1062,7 @@
 </div>
 
 <script>
-/* ======== Media Picker Bridge（フォルダから選ぶ／ギャラリー共通） ======== */
+/* ======== Media Picker Bridge（フォルダから選ぶ／ギャラリー／透かし一括） ======== */
 (function(){
   let _pickerWin = null;
   let _pickerTarget = null; // 't' or 's'
@@ -1073,36 +1073,53 @@
     return base + suffix + ext;
   }
 
-  // 署名付き serve_image のURLテンプレ置換（安全に生成）
+  // __goto / __fullygoto / __none を検出して [元名, 種類] を返す
+  function parseVariantName(name){
+    const m = (name||'').match(/^(.*)(__fullygoto|__goto|__none)(\.[^.]+)$/i);
+    if(!m) return { base:name, kind:null };
+    const base = m[1] + m[3];
+    const kind = (m[2] === '__fullygoto') ? 'fullygoto' : (m[2] === '__goto' ? 'gotocity' : 'none');
+    return { base, kind };
+  }
+
+  // 署名付き serve_image のURLテンプレ置換
   function _serveUrl(fn){
     const base = "{{ safe_url_for('serve_image', filename='', _sign=True) }}";
-    // base は /media/img/?_sign=1 のような形になる可能性があるため、無理に結合せずサーバ署名を基本利用
     return base + encodeURIComponent(fn);
   }
 
-  // 反映：hidden値 + 旧プレビュー + 追加プレビュー（写真/名前/透かし）
-  async function setPreviewAndHidden(target, filename, preferredWm, rawUrl){
+  async function setPreviewAndHidden(target, filenameBase, preferredWm, rawUrl){
     const master = document.getElementById('wm_choice_master');
     const wm = preferredWm || (master ? (master.value || 'none') : 'none');
+    if(master && preferredWm) master.value = preferredWm; // 代表を確実に同期
 
-    // hidden 更新（両方更新してもサーバ側で解釈OK）
-    document.getElementById('selected_image')?.setAttribute('value', filename);
+    // 新規選択の元画像名を hidden に必ず .value で入れる（送信されるのは value）
+    const sel = document.getElementById('selected_image');
+    if(sel) sel.value = filenameBase;
+
     if(target === 't'){
-      document.getElementById('image_existing_t')?.setAttribute('value', filename);
-      const blk = document.getElementById('wm-block-t');
-      if(blk) blk.dataset.filename = filename;
+      const hImg = document.getElementById('image_existing_t');
+      const blk  = document.getElementById('wm-block-t');
+      if(hImg) hImg.value = filenameBase;
+      if(blk) blk.dataset.filename = filenameBase;
     }else{
-      document.getElementById('image_existing_s')?.setAttribute('value', filename);
-      const blk = document.getElementById('wm-block-s');
-      if(blk) blk.dataset.filename = filename;
+      const hImg = document.getElementById('image_existing_s');
+      const blk  = document.getElementById('wm-block-s');
+      if(hImg) hImg.value = filenameBase;
+      if(blk) blk.dataset.filename = filenameBase;
     }
 
-    // URL: 署名API → フォールバック
+    // 署名URL（失敗時はフォールバック）
     let url = null;
-    try{ url = await _signPreview(filename, wm); }catch(_){}
-    if(!url) url = rawUrl || _serveUrl(variantFilename(filename, 'none'));
+    try{
+      const qs = new URLSearchParams({ filename: filenameBase, wm });
+      const res = await fetch(`/admin/_sign_image?${qs.toString()}`, { credentials: 'same-origin' });
+      const j = await res.json();
+      if(j && j.ok && j.url) url = j.url;
+    }catch(_){}
+    if(!url) url = rawUrl || _serveUrl(variantFilename(filenameBase, 'none'));
 
-    // 旧プレビュー（存在時）
+    // 既存の小プレビュー更新
     const oldImg = document.getElementById(target === 't' ? 'admin-image-preview-t' : 'admin-image-preview-s');
     if(oldImg && url){
       oldImg.src = url;
@@ -1110,12 +1127,11 @@
       if(oldImg.complete) annotateImageMeta(oldImg); else oldImg.onload = ()=> annotateImageMeta(oldImg);
     }
 
-    // 新プレビュー（このテンプレで追加したボックス）
+    // 追加の「選択中プレビュー」更新（テンプレにある場合）
     const pickImg = document.getElementById(target === 't' ? 'picker-preview-t' : 'picker-preview-s');
     const pickName= document.getElementById(target === 't' ? 'picker-name-t'   : 'picker-name-s');
     const pickWm  = document.getElementById(target === 't' ? 'picker-wm-t'     : 'picker-wm-s');
-
-    if(pickName) pickName.textContent = filename || '（未選択）';
+    if(pickName) pickName.textContent = filenameBase || '（未選択）';
     if(pickWm)   pickWm.textContent   = wm || '-';
     if(pickImg && url){
       pickImg.style.display = '';
@@ -1132,46 +1148,45 @@
     _pickerWin = window.open(url, 'mediaPicker', 'width=1100,height=800');
     if(_pickerWin) _pickerWin.focus();
   }
-
   document.getElementById('btn_open_folder_picker_t')?.addEventListener('click', function(){ openPicker(this); });
   document.getElementById('btn_open_folder_picker_s')?.addEventListener('click', function(){ openPicker(this); });
 
-  // 受信：フォルダピッカー / 透かしギャラリー
+  // メッセージ受信
   window.addEventListener('message', (ev)=>{
     if(ev.origin !== location.origin) return;
     const d = ev.data || {};
 
-    // 1) フォルダピッカー
+    // 1) フォルダピッカー（/admin/media/folders）
     if(d.type === 'media-pick'){
       const fallbackTarget = (document.getElementById('category_select')?.value === '観光') ? 't' : 's';
       const target = _pickerTarget || fallbackTarget;
 
-      const name = (d.files && d.files[0]) || '';
-      const url  = (d.urls  && d.urls[0])  || '';
-      if(name){ setPreviewAndHidden(target, name, null, url); }
+      const picked = (d.files && d.files[0]) || '';
+      const { base, kind } = parseVariantName(picked);
+      const raw = kind ? null : ((d.urls && d.urls[0]) || '');
+      if(base){ setPreviewAndHidden(target, base, kind, raw); }
 
       try{ if(_pickerWin && !_pickerWin.closed) _pickerWin.close(); }catch(_){}
-      _pickerWin = null;
-      _pickerTarget = null;
+      _pickerWin = null; _pickerTarget = null;
       return;
     }
 
-    // 2) 透かしギャラリー（kind: none/fullygoto/gotocity）
+    // 2) 透かし一括（/admin/watermark?picker=1） … filename が派生名でもOK
     if(d.type === 'wm-pick'){
       const cat = document.getElementById('category_select')?.value || '観光';
       const target = (cat === '観光') ? 't' : 's';
-      const name = d.filename;
-      const kind = d.kind || 'none';
-      const master = document.getElementById('wm_choice_master');
-      if(master) master.value = kind;
-      if(name){ setPreviewAndHidden(target, name, kind, null); }
+      const fname = d.filename || '';
+      const pv = parseVariantName(fname);
+      const kind = d.kind || pv.kind || 'none';
+      const base = pv.base || fname;
+      if(base){ setPreviewAndHidden(target, base, kind, null); }
       return;
     }
   }, false);
 
-  // 初期表示時：既存画像のプレビュー欄へも反映（見失い防止）
+  // 初期表示時：既存を「選択中プレビュー」にも反映
   function initSelectedBox(target){
-    const master = document.getElementById('wm_choice_master')?.value || 'none';
+    const masterVal = document.getElementById('wm_choice_master')?.value || 'none';
     const blk = document.getElementById(target==='t' ? 'wm-block-t' : 'wm-block-s');
     const hid = document.getElementById(target==='t' ? 'image_existing_t' : 'image_existing_s');
     const fname = (blk && blk.dataset.filename) || (hid && hid.value) || '';
@@ -1182,8 +1197,7 @@
 
     if(fname){
       if(pickName) pickName.textContent = fname;
-      if(pickWm)   pickWm.textContent   = master || '-';
-      // img があるならその src を採用、無ければ署名取得
+      if(pickWm)   pickWm.textContent   = masterVal || '-';
       const currentSrc = img ? (img.getAttribute('data-fullsrc') || img.currentSrc || img.src) : null;
       if(pickImg){
         if(currentSrc){
@@ -1192,14 +1206,19 @@
           pickImg.setAttribute('data-fullsrc', currentSrc);
           if(pickImg.complete) annotateImageMeta(pickImg); else pickImg.onload = ()=> annotateImageMeta(pickImg);
         }else{
-          _signPreview(fname, master).then(url=>{
-            if(url){
-              pickImg.style.display = '';
-              pickImg.src = url;
-              pickImg.setAttribute('data-fullsrc', url);
-              if(pickImg.complete) annotateImageMeta(pickImg); else pickImg.onload = ()=> annotateImageMeta(pickImg);
-            }
-          });
+          (async ()=>{
+            try{
+              const qs = new URLSearchParams({ filename: fname, wm: masterVal });
+              const r = await fetch(`/admin/_sign_image?${qs.toString()}`, { credentials:'same-origin' });
+              const j = await r.json();
+              if(j && j.ok && j.url){
+                pickImg.style.display = '';
+                pickImg.src = j.url;
+                pickImg.setAttribute('data-fullsrc', j.url);
+                if(pickImg.complete) annotateImageMeta(pickImg); else pickImg.onload = ()=> annotateImageMeta(pickImg);
+              }
+            }catch(_){}
+          })();
         }
       }
     }
@@ -1209,13 +1228,6 @@
     initSelectedBox('s');
   });
 })();
-</script>
-
-<script>
-/* サーバの画像URLテンプレート（必要なら上書き）
-   例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
-   デフォルトは /admin/media/img/<filename>
-*/
 </script>
 </body>
 </html>
