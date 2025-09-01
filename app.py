@@ -379,18 +379,21 @@ def _wm_choice_from_entries(arg, *, fmt: str = "legacy") -> str | None:
     エントリ既定の透かしモードを返す。
     引数 arg: エントリ dict か 画像ファイル名(文字列)。
     fmt:
-      - "legacy"     -> "fullygoto" / "gotocity" / "none" / None   ← ★noneを消さない！
+      - "legacy"     -> "fullygoto" / "gotocity" / None（互換）
       - "canonical"  -> "fully" / "city" / "none" / None
+
+    返り値:
+      fmtに応じた文字列。見つからない/未設定時は None。
     """
     def _to_fmt(v: str | None) -> str | None:
-        # 既存の正規化関数を流用（'fullygoto' 等も 'fully'/'city' に正規化される前提）
-        canon = _wm_normalize(v)  # -> 'fully'/'city'/'none'/None
-        if canon is None:
+        # 既存の正規化関数を流用（'fullygoto'等も 'fully'/'city' に正規化される前提）
+        v = _wm_normalize(v)  # -> 'fully'/'city'/'none'/None
+        if v is None:
             return None
-        if fmt == "canonical":
-            return canon
-        # legacy 文字列に変換（none は None にしない！）
-        return {"fully": "fullygoto", "city": "gotocity", "none": "none"}[canon]
+        if fmt == "legacy":
+            return {"fully": "fullygoto", "city": "gotocity", "none": None}.get(v, None)
+        # canonical
+        return v  # 'fully'/'city'/'none'
 
     try:
         # 1) dict 直接
@@ -400,7 +403,7 @@ def _wm_choice_from_entries(arg, *, fmt: str = "legacy") -> str | None:
             if v is not None:
                 return v
 
-            # 旧互換のブール群（どれか真なら city 既定、偽なら none）
+            # 旧互換のブール群（どれか真なら city を既定、偽なら none）
             legacy_flag = (
                 arg.get("wm_external")
                 or arg.get("wm_ext_fully")
@@ -408,7 +411,7 @@ def _wm_choice_from_entries(arg, *, fmt: str = "legacy") -> str | None:
             )
             if isinstance(legacy_flag, bool):
                 return _to_fmt("city" if legacy_flag else "none")
-            if legacy_flag:  # 真偽値以外の真も city に寄せる
+            if legacy_flag:  # 真偽値以外の真も city 既定に寄せる
                 return _to_fmt("city")
 
             # さらに旧UIの 'wm_on'（真=city/偽=none）
@@ -526,57 +529,32 @@ def _infer_mimetype(path: str) -> tuple[str, str]:
     return "PNG", "image/png"
 
 
-
-# === Watermark normalize (UNIFIED) ==========================================
-# すべて「canonical」な 3値に正規化します: 'fully' / 'city' / 'none' / None
-WM_CANON_MAP = {
-    # canonical 直指定
-    "fully": "fully",
-    "city": "city",
-    "none": "none",
-
-    # legacy / 略記
-    "fullygoto": "fully",
-    "fg": "fully",
-    "gotocity": "city",
-    "gc": "city",
-
-    # 真偽系ゆらぎ
-    "1": "city",
-    "true": "city",
-    "on": "city",
-    "yes": "city",
-    "0": "none",
-    "false": "none",
-    "off": "none",
-    "no": "none",
-    "": "none",
-}
-
+# === Watermark helpers (ADD) ================================================
 def _wm_normalize(v) -> str | None:
     """
-    入力ゆらぎを 'fully' / 'city' / 'none' / None に正規化。
+    透かしモードの正規化:
+      入力: "fullygoto"/"gotocity"/"fully"/"city"/"1"/True/False/"none"... など
+      出力: "fullygoto" / "gotocity" / None
     """
     if v is None:
         return None
     if isinstance(v, bool):
-        return "city" if v else "none"
-    return WM_CANON_MAP.get(str(v).strip().lower(), None)
-
-def _wm_to_legacy(kind: str | None) -> str | None:
-    """
-    canonical -> legacy へ変換:
-      'fully' -> 'fullygoto'
-      'city'  -> 'gotocity'
-      'none'/None -> None
-    """
-    if kind == "fully":
+        return "gotocity" if v else None
+    s = str(v).strip().lower()
+    if s in {"fullygoto", "fully"}:
         return "fullygoto"
-    if kind == "city":
+    if s in {"gotocity", "city"}:
         return "gotocity"
-    if kind == "none" or kind is None:
+    if s in {"1", "true", "on", "yes"}:
+        return "gotocity"
+    if s in {"0", "false", "off", "none", ""}:
         return None
+    # 未知値は保守的に None
     return None
+
+
+# ============================================================================
+
 
 
 @app.route("/media/img/<path:filename>")
@@ -638,17 +616,25 @@ def serve_image(filename):
                 pass
         return True
 
-    # --- entriesから既定wmを引く（グローバル実装に委譲） ---
+    # --- entriesから既定wmを引く（外部があれば利用） ---
     def _wm_choice_from_entries_local(basename: str) -> str | None:
-        """
-        返り値は legacy 形式:
-        'fullygoto' / 'gotocity' / 'none' / None
-        """
+        if "_wm_choice_from_entries" in globals():
+            try:
+                return globals()["_wm_choice_from_entries"](basename)
+            except Exception:
+                pass
         try:
-            return _wm_choice_from_entries(basename, fmt="legacy")
+            entries = load_entries()
+            for e in entries:
+                img = (e.get("image_file") or e.get("image") or "").strip()
+                if img and os.path.basename(img) == basename:
+                    raw = e.get("wm_external_choice")
+                    if raw is None:
+                        raw = "fullygoto" if e.get("wm_on", True) else "none"
+                    return _normalize_wm_choice_local(raw, wm_on_default=True)
         except Exception:
-            app.logger.exception("wm choice lookup failed (local)")
-            return None
+            pass
+        return None
 
     # --- 透かし合成（内蔵。サムネ時は大きめ比率） ---
     def _compose_watermark_local(pil_image, mode: str):
@@ -3539,70 +3525,6 @@ def _img_sig(filename: str, exp: int) -> str:
         hmac.new(IMAGES_SIGNING_KEY, msg, hashlib.sha256).digest()
     ).rstrip(b"=").decode("ascii")
 
-# === Media URL 正規化＆署名付きURL生成 ===
-from flask import current_app
-
-def _extract_media_basename(val: str | None) -> str | None:
-    """
-    'https://.../media/img/abc.jpg?sig=...&exp=...' でも
-    '/media/img/abc.jpg' でも 'abc.jpg' でも -> 'abc.jpg' に正規化。
-    """
-    if not val:
-        return None
-    v = str(val).strip()
-    v = v.split("?", 1)[0]          # ?以降を落とす
-    v = v.rsplit("/", 1)[-1]        # パスを落としてベース名に
-    # 最低限の安全対策
-    if not v or ".." in v or "/" in v or "\\" in v:
-        return None
-    return v
-
-def _media_img_signed_url(name: str | None, *, ttl_seconds: int = 60 * 60 * 24 * 30) -> str | None:
-    """
-    保存している 'abc.jpg' → 表示用の署名付きURLを作る。
-    既存 _sign_url(path, ttl=...) or sign_media_url(path, expires=...) があれば使う。
-    """
-    if not name:
-        return None
-    path = f"/media/img/{name}"
-    signer = globals().get("_sign_url") or globals().get("sign_media_url")
-    if callable(signer):
-        try:
-            try:
-                return signer(path, ttl=ttl_seconds)
-            except TypeError:
-                import time
-                return signer(path, expires=int(time.time()) + ttl_seconds)
-        except Exception:
-            pass
-    return path  # 署名器が無い環境ではプレーンで返す
-
-def _media_root():
-    # 既に定義済みならそれを使う（あなたのコードに同名がある想定）
-    if "_media_root" in globals():
-        return globals()["_media_root"]()
-    # 無い場合のフォールバック
-    import os
-    return current_app.config.get("MEDIA_DIR") or os.path.join(current_app.root_path, "media")
-
-def _media_dir(folder="img"):
-    import os
-    return os.path.join(_media_root(), folder)
-
-def _list_media_images():
-    """
-    media/img 配下を列挙して [{'name': 'abc.jpg', 'thumb_url': '署名URL'}...] を返す
-    """
-    import os
-    exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-    img_dir = _media_dir("img")
-    out = []
-    if os.path.isdir(img_dir):
-        for fn in sorted(os.listdir(img_dir)):
-            if os.path.splitext(fn.lower())[1] in exts:
-                out.append({"name": fn, "thumb_url": _media_img_signed_url(fn)})
-    return out
-
 # ---- HTTPSの絶対URLを保証するヘルパ／url_forの安全版 ----
 def _force_https_abs(u: str) -> str:
     """
@@ -4712,6 +4634,18 @@ WM_CANON_MAP = {
     "gotocity": "city",
 }
 
+def _wm_normalize(v) -> str | None:
+    """
+    透かしモードの入力値を正規化して 'none' / 'fully' / 'city' のいずれかにする。
+    不明値は None を返す（呼び出し側で既定値を決める）。
+    """
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in {"true","false"}:
+        return "fully" if (s == "true") else "none"
+    return WM_CANON_MAP.get(s, None)
+
 # =========================
 #  重複統合（タイトル基準）
 # =========================
@@ -5651,20 +5585,6 @@ def _image_meta(img_name: str | None):
 # =========================
 #  管理画面: 観光データ登録・編集
 # =========================
-# POST 受信後、保存処理の直前に差し込み
-img_val = (
-    request.form.get("image")
-    or request.form.get("image_name")
-    or request.form.get("img_name")
-    or request.form.get("hero_img")
-    or request.form.get("cover_img")
-)
-img_basename = _extract_media_basename(img_val)
-if img_basename:
-    # ← DB/JSONなどあなたの実装の保存キーに合わせる
-    # 例: entry["image_main"] を使っているならそちらへ
-    entry["image"] = img_basename
-
 @app.route("/admin/entry", methods=["GET", "POST"])
 @login_required
 def admin_entry():
@@ -5674,21 +5594,6 @@ def admin_entry():
 
     if session.get("role") == "shop":
         return redirect(url_for("shop_entry"))
-
-    # ---- ★ 追加：メディアのベース名抽出（?sig=... や パスを除去） ----
-    def _extract_media_basename(val: str | None) -> str | None:
-        """
-        'https://.../media/img/abc.jpg?sig=...&exp=...' でも
-        '/media/img/abc.jpg' でも 'abc.jpg' でも -> 'abc.jpg' に正規化。
-        """
-        if not val:
-            return None
-        v = str(val).strip()
-        v = v.split("?", 1)[0]       # ?以降(署名/期限)を落とす
-        v = v.rsplit("/", 1)[-1]     # パス区切りを落としてベース名だけに
-        if not v or ".." in v or "/" in v or "\\" in v:
-            return None
-        return v
 
     # ---- 座標ユーティリティ（全角/URL/DMSなど何でも受ける）----
     def _zen2han(s: str) -> str:
@@ -5708,6 +5613,7 @@ def admin_entry():
         if _re.search(r'[S南]', s, _re.I): hemi = 'S'
         if _re.search(r'[E東]', s, _re.I): hemi = 'E'
         if _re.search(r'[W西]', s, _re.I): hemi = 'W'
+        # ★ ここを「ダブルクォートの raw 文字列」に修正
         m = _re.search(
             r"(\d+(?:\.\d+)?)\s*[°度]\s*(\d+(?:\.\d+)?)?\s*['’′分]?\s*(\d+(?:\.\d+)?)?\s*[\"”″秒]?",
             s
@@ -5753,7 +5659,7 @@ def admin_entry():
                 a, b = b, a
             return a, b
 
-        # 3) DMS ブロック×2
+        # 3) DMS ブロック×2（★ ここもダブルクォートの raw 文字列）
         dms_blocks = _re.findall(
             r"(\d+(?:\.\d+)?\s*[°度]\s*\d*(?:\.\d+)?\s*['’′分]?\s*\d*(?:\.\d+)?\s*[\"”″秒]?\s*[NSEW北南東西]?)",
             s, flags=_re.I
@@ -5922,18 +5828,6 @@ def admin_entry():
         }
         new_entry = _norm_entry(new_entry)
 
-        # === ★ 追加：既存画像の「選択」対応（hiddenの 'image' 等） ===
-        #   署名付きURLや /media/img/xxx.jpg を受けても、必ず 'xxx.jpg' に正規化して扱う
-        picked_img_val = (
-            request.form.get("image")
-            or request.form.get("image_name")
-            or request.form.get("img_name")
-            or request.form.get("hero_img")
-            or request.form.get("cover_img")
-            or ""
-        ).strip()
-        picked_img = _extract_media_basename(picked_img_val)
-
         # === 画像アップロード/削除（変更なしなら前画像を必ず維持） ===
         upload = request.files.get("image_file")
         delete_flag = (request.form.get("image_delete") == "1")
@@ -5949,16 +5843,12 @@ def admin_entry():
             result = None
             app.logger.exception("image handler failed")
 
-        # ★ 核心：アップロードも削除も無い場合に「既存画像の選択」があれば、それを採用
-        if (result is None) and picked_img and not delete_flag:
-            result = picked_img  # ← 以降のブランチで新規保存と同等に扱わせる
-
         if result is None:
             # 変更なし → 前画像を維持（削除指示がない限り）
             if prev_img and not delete_flag:
                 new_entry["image_file"] = prev_img
                 new_entry["image"] = prev_img
-                # ▼ 既存画像に派生ファイル（透かし3種）が無ければ作る
+                # ▼ ここを追加（既存画像に派生ファイルが無ければ作る）
                 try:
                     _ensure_wm_variants(prev_img)
                 except Exception:
@@ -5970,10 +5860,10 @@ def admin_entry():
             new_entry.pop("image", None)
 
         else:
-            # 置換/新規保存 または「既存ピック」（上の result=picked_img もここに入る）
+            # 置換/新規保存
             new_entry["image_file"] = result
             new_entry["image"] = result
-            # ▼ 新しい画像（または選択画像）の3種を事前生成
+            # ▼ ここを追加（新しい画像の3種を事前生成）
             try:
                 _ensure_wm_variants(result)
             except Exception:
@@ -5986,20 +5876,16 @@ def admin_entry():
             (request.form.get("lng") or "").strip(),
             prev_entry
         )
-        if (lat is not None) or (lng is not None):
-            # map_url からの補完は残しつつ二重に壊さない
-            if (lat is None or lng is None) and map_url:
-                a, b = _parse_latlng_any(map_url)
-                if lat is None: lat = a
-                if lng is None: lng = b
-            if lat is not None: new_entry["lat"] = lat
-            if lng is not None: new_entry["lng"] = lng
-        else:
-            # まったく入っていない場合のみ map_url から抽出
-            if map_url:
-                a, b = _parse_latlng_any(map_url)
-                if a is not None: new_entry["lat"] = a
-                if b is not None: new_entry["lng"] = b
+        if (lat is None or lng is None) and map_url:
+            a, b = _parse_latlng_any(map_url)
+            if lat is None: lat = a
+            if lng is None: lng = b
+
+        if lat is not None: new_entry["lat"] = lat
+        if lng is not None: new_entry["lng"] = lng
+
+        # （※ 旧UI互換 'wm_on' の**再代入はしない**。上の wm_choice を真にする）
+        # new_entry["wm_on"] = ('wm_on' in request.form)  # ← 上書きしない
 
         # === 保存 ===
         if (idx_edit is not None) and (0 <= idx_edit < len(entries)):
@@ -6202,21 +6088,6 @@ def delete_entry(idx):
         flash("指定された項目が見つかりません")
     return redirect(url_for("admin_entry"))
 
-@app.get("/admin/api/media-signed-url")
-@login_required
-def admin_api_media_signed_url():
-    from flask import request, abort
-    folder = request.args.get("folder") or "img"
-    name = _extract_media_basename(request.args.get("name"))
-    if not name:
-        abort(400)
-    # 今回は img 専用。将来拡張したければ folder を使ってもOK
-    if folder != "img":
-        abort(400)
-    url = _media_img_signed_url(name)
-    if not url:
-        abort(404)
-    return url
 
 
 def _wm_safe_basename(name: str) -> str:
@@ -6344,7 +6215,7 @@ def admin_watermark_generate():
         w, h = im.size
         r = min(MAXW / w, MAXH / h, 1.0)
         if r < 1.0:
-            im = im.resize((int(w * r), int(h * r)), Image.LANCZOS)
+            im = im.resize((int(w * r), int(h * r)), RESAMPLE_LANCZOS)
 
         buf = _io.BytesIO()
         # WEBP→JPEG など、LINE互換も考慮して JPEG/PNG に正規化
@@ -6404,20 +6275,20 @@ def shop_entry():
     user_id = session["user_id"]
 
     if request.method == "POST":
-        category    = request.form.get("category", "")
-        title       = request.form.get("title", "")
-        desc        = request.form.get("desc", "")
-        address     = request.form.get("address", "")
-        tel         = request.form.get("tel", "")
-        holiday     = request.form.get("holiday", "")
-        open_hours  = request.form.get("open_hours", "")
-        parking     = request.form.get("parking", "")
+        category = request.form.get("category", "")
+        title = request.form.get("title", "")
+        desc = request.form.get("desc", "")
+        address = request.form.get("address", "")
+        tel = request.form.get("tel", "")
+        holiday = request.form.get("holiday", "")
+        open_hours = request.form.get("open_hours", "")
+        parking = request.form.get("parking", "")
         parking_num = request.form.get("parking_num", "")
-        payment     = request.form.getlist("payment")
-        map_url     = request.form.get("map", "")
+        payment = request.form.getlist("payment")
+        map_url = request.form.get("map", "")
 
-        tags   = _split_lines_commas(request.form.get("tags", ""))
-        areas  = request.form.getlist("areas")
+        tags = _split_lines_commas(request.form.get("tags", ""))
+        areas = request.form.getlist("areas")
         remark = request.form.get("remark", "")
 
         links = _split_lines_commas(request.form.get("links", ""))
@@ -6450,7 +6321,6 @@ def shop_entry():
             "extras": extras
         }
         entry_data = _norm_entry(entry_data)
-
         # 画像アップロード（任意）
         up = request.files.get("image_file")
         if up and up.filename:
@@ -6459,21 +6329,18 @@ def shop_entry():
             prev_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
             prev_img = entries[prev_idx].get("image_file") if prev_idx is not None else None
 
-            res = _save_jpeg_1080_350kb(up, previous=prev_img, delete=False)
-            if res is None or res == "":
-                flash("画像アップロードに失敗しました")
-            else:
-                entry_data["image_file"] = res
-                # 3種の透かしを事前生成
-                try:
-                    _ensure_wm_variants(res)
-                except Exception:
-                    app.logger.exception("[wm] variants generation failed (shop) for %s", res)
+        res = _save_jpeg_1080_350kb(up, previous=prev_img, delete=False)
+        if res is None:
+            flash("画像アップロードに失敗しました")
         else:
-            # 画像アップロードが無い場合でも既存の entries は必要
-            entries = load_entries()
+            entry_data["image_file"] = res
+            # ▼【追記】3種を事前生成
+            try:
+                _ensure_wm_variants(res)
+            except Exception:
+                app.logger.exception("[wm] variants generation failed (shop) for %s", res)
 
-        # 既存エントリがあれば上書き、なければ追加
+        entries = load_entries()
         entry_idx = next((i for i, e in enumerate(entries) if e.get("user_id") == user_id), None)
         if entry_idx is not None:
             entries[entry_idx] = entry_data
@@ -7972,6 +7839,54 @@ def _wm_prep_image(path: str, max_size: int | None = 1080) -> Image.Image:
     return im
 
 
+# --- 透かしテキストを右下に描画 ---
+def _wm_draw(im, text, scale=0.05, opacity=180, margin_ratio=0.02):
+    from PIL import Image, ImageDraw, ImageFont
+    if not text:
+        return im
+
+    base = im.convert("RGBA")
+    W, H = base.size
+
+    size = max(18, int(W * float(scale)))
+    margin = max(6, int(W * float(margin_ratio)))
+    stroke_w = max(1, size // 12)
+
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except Exception:
+        font = ImageFont.load_default()
+
+    draw = ImageDraw.Draw(base)
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_w)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        tw, th = draw.textsize(text, font=font)
+
+    x = max(0, W - tw - margin * 2)
+    y = max(0, H - th - margin * 2)
+
+    # 半透明の下地
+    bg = Image.new("RGBA", (tw + margin * 2, th + margin * 2), (0, 0, 0, int(opacity * 0.45)))
+    base.alpha_composite(bg, (x, y))
+
+    # 本体文字（白＋黒縁）
+    try:
+        draw.text(
+            (x + margin, y + margin),
+            text,
+            fill=(255, 255, 255, int(opacity)),
+            font=font,
+            stroke_width=stroke_w,
+            stroke_fill=(0, 0, 0, min(255, int(opacity) + 50)),
+        )
+    except TypeError:
+        draw.text((x + margin, y + margin), text, fill=(255, 255, 255, int(opacity)), font=font)
+
+    return base.convert("RGB")
+
+
 # --- JPEG 保存ヘルパー（品質指定・最適化） ---
 def _wm_save_jpeg(im, out_path, quality=85):
     from pathlib import Path
@@ -9243,7 +9158,7 @@ def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
     for t in texts:
         if not t:
             continue
-        for ch in _split_for_line(t, limit=4900):
+        for ch in _split_for_line(t, max_len=4900):
             # 世代ガード：新しいユーザー発話が来て世代が進んでいれば以降は送らない
             if (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen):
                 app.logger.info("abort stale push uid=%s", target_id)
@@ -9339,7 +9254,7 @@ def admin_notices():
                     break
         else:
             notice = {
-                "id": (max((n.get("id") or 0) for n in notices) + 1) if notices else 1,
+                "id": notices[-1]["id"] + 1 if notices else 1,
                 "title": title,
                 "content": content,
                 "category": category,
