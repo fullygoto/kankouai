@@ -586,11 +586,12 @@
 
         <div class="pickbar">
         {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
-        <a class="btn"
-            href="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}"
-            target="_blank" rel="noopener">
+        <button type="button" class="btn"
+                id="btn_open_folder_picker_t"
+                data-target="t"
+                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
             フォルダから選ぶ
-        </a>
+        </button>
 
         <a class="btn ghost"
             href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
@@ -600,53 +601,6 @@
 
         <span class="mini-note">※「フォルダから選ぶ」＝ 既存フォルダを選択 → 中の画像（登録日の新しい順）からワンクリックで選択できます。</span>
         </div>
-
-        <script>
-            (function(){
-            const btn = document.getElementById('btn_open_folder_picker');
-            if(btn){
-                btn.addEventListener('click', ()=>{
-                    const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
-                    const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
-                    window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
-                });
-            }
-            function variantFilename(fn, kind){
-                const i = fn.lastIndexOf('.'), base = i>0 ? fn.slice(0, i) : fn, ext = i>0 ? fn.slice(i) : '';
-                const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
-                return base + suffix + ext;
-            }
-            async function applyPicked(fn, kind){
-                try{
-                    const hImg = document.getElementById('image_existing_t'); if(hImg) hImg.value = fn;
-                    const hWm  = document.getElementById('wm_choice_master'); if(hWm)  hWm.value  = kind;
-                    const img = document.getElementById('admin-image-preview-t');
-                    if(img){
-                        let url = null;
-                        if(typeof _signPreview === 'function'){ try{ url = await _signPreview(fn, kind); }catch(_e){} }
-                        if(!url){
-                            const vname = variantFilename(fn, kind);
-                            try{ url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname)); }
-                            catch(_e){ url = img.src; }
-                        }
-                        if(url){
-                            img.src = url; img.setAttribute('data-fullsrc', url);
-                            if(typeof annotateImageMeta === 'function'){ if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img); }
-                        }
-                    }
-                }catch(_e){}
-            }
-            window.addEventListener('message', (e)=>{
-                const d = e && e.data; if(!d || d.type!=='wm-pick') return;
-                applyPicked(d.filename, d.kind);
-            }, false);
-            const initImg = document.getElementById('admin-image-preview-t');
-            if(initImg){
-                initImg.setAttribute('data-fullsrc', initImg.currentSrc || initImg.src);
-                if(typeof annotateImageMeta==='function'){ if(initImg.complete) annotateImageMeta(initImg); else initImg.onload = ()=> annotateImageMeta(initImg); }
-            }
-            })();
-        </script>
 
         <label>住所</label><br>
         <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
@@ -772,11 +726,12 @@
 
         <div class="pickbar">
         {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
-        <a class="btn"
-            href="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}"
-            target="_blank" rel="noopener">
+        <button type="button" class="btn"
+                id="btn_open_folder_picker_s"
+                data-target="s"
+                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
             フォルダから選ぶ
-        </a>
+        </button>
 
         <a class="btn ghost"
             href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
@@ -786,53 +741,6 @@
 
         <span class="mini-note">※ 既存フォルダ → 画像（新しい順）から選べます。</span>
         </div>
-
-        <script>
-            (function(){
-            const openBtn = document.getElementById('btn_open_folder_picker_s');
-            if(openBtn){
-                openBtn.addEventListener('click', ()=>{
-                    const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
-                    const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
-                    window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
-                });
-            }
-            function variantFilename(fn, kind){
-                const i = fn.lastIndexOf('.'), base = i>0 ? fn.slice(0, i) : fn, ext  = i>0 ? fn.slice(i) : '';
-                const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
-                return base + suffix + ext;
-            }
-            async function applyPicked(fn, kind){
-                try{
-                    const hImg = document.getElementById('image_existing_s'); if(hImg) hImg.value = fn;
-                    const hWm  = document.getElementById('wm_choice_master'); if(hWm)  hWm.value  = kind;
-                    const img = document.getElementById('admin-image-preview-s');
-                    if(img){
-                        let url = null;
-                        if(typeof _signPreview === 'function'){ try{ url = await _signPreview(fn, kind); }catch(_e){} }
-                        if(!url){
-                            const vname = variantFilename(fn, kind);
-                            try{ url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname)); }
-                            catch(_e){ url = img.src; }
-                        }
-                        if(url){
-                            img.src = url; img.setAttribute('data-fullsrc', url);
-                            if(typeof annotateImageMeta==='function'){ if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img); }
-                        }
-                    }
-                }catch(_e){}
-            }
-            window.addEventListener('message', (e)=>{
-                const d = e && e.data; if(!d || d.type!=='wm-pick') return;
-                applyPicked(d.filename, d.kind);
-            }, false);
-            const initImg = document.getElementById('admin-image-preview-s');
-            if(initImg){
-                initImg.setAttribute('data-fullsrc', initImg.currentSrc || initImg.src);
-                if(typeof annotateImageMeta==='function'){ if(initImg.complete) annotateImageMeta(initImg); else initImg.onload = ()=> annotateImageMeta(initImg); }
-            }
-            })();
-        </script>
 
         <label>住所</label><br>
         <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
@@ -1116,6 +1024,104 @@
         <button type="button" class="btn last" onclick="gotoPage('last')">最後 ≫</button>
     </div>
 </div>
+
+<script>
+/* ======== Media Picker Bridge（フォルダから選ぶ／ギャラリー共通） ======== */
+(function(){
+  let _pickerWin = null;
+  let _pickerTarget = null; // 't' or 's'
+
+  function variantFilename(fn, kind){
+    const i = fn.lastIndexOf('.'); const base = i>0 ? fn.slice(0,i) : fn; const ext = i>0 ? fn.slice(i) : '';
+    const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
+    return base + suffix + ext;
+  }
+
+  async function setPreviewAndHidden(target, filename, preferredWm, rawUrl){
+    const master = document.getElementById('wm_choice_master');
+    const wm = preferredWm || (master ? (master.value || 'none') : 'none');
+
+    if(target === 't'){
+      const hImg = document.getElementById('image_existing_t');
+      const img  = document.getElementById('admin-image-preview-t');
+      const blk  = document.getElementById('wm-block-t');
+      if(hImg) hImg.value = filename;
+      if(blk) blk.dataset.filename = filename;
+
+      let url = await _signPreview(filename, wm);
+      if(!url) {
+        // サイン失敗時はフォールバック（無透かし）
+        url = rawUrl || (variantFilename(filename, 'none'));
+      }
+      if(img && url){
+        img.src = url;
+        img.setAttribute('data-fullsrc', url);
+        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+      }
+    }else{
+      const hImg = document.getElementById('image_existing_s');
+      const img  = document.getElementById('admin-image-preview-s');
+      const blk  = document.getElementById('wm-block-s');
+      if(hImg) hImg.value = filename;
+      if(blk) blk.dataset.filename = filename;
+
+      let url = await _signPreview(filename, wm);
+      if(!url) {
+        url = rawUrl || (variantFilename(filename, 'none'));
+      }
+      if(img && url){
+        img.src = url;
+        img.setAttribute('data-fullsrc', url);
+        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+      }
+    }
+  }
+
+  // フォルダピッカーを開く
+  function openPicker(btn){
+    const url = btn.getAttribute('data-url');
+    _pickerTarget = btn.getAttribute('data-target'); // 't' or 's'
+    _pickerWin = window.open(url, 'mediaPicker', 'width=1100,height=800');
+    if(_pickerWin) _pickerWin.focus();
+  }
+
+  document.getElementById('btn_open_folder_picker_t')?.addEventListener('click', function(){ openPicker(this); });
+  document.getElementById('btn_open_folder_picker_s')?.addEventListener('click', function(){ openPicker(this); });
+
+  // メッセージ受信（フォルダピッカー / 透かしギャラリー）
+  window.addEventListener('message', (ev)=>{
+    if(ev.origin !== location.origin) return;
+    const d = ev.data || {};
+
+    // 1) フォルダピッカー（/admin/media/folders）
+    if(d.type === 'media-pick' && _pickerTarget){
+      const name = (d.files && d.files[0]) || '';
+      const url  = (d.urls  && d.urls[0])  || '';
+      if(name){
+        setPreviewAndHidden(_pickerTarget, name, null, url);
+      }
+      try{ if(_pickerWin && !_pickerWin.closed) _pickerWin.close(); }catch(_){}
+      _pickerWin = null;
+      _pickerTarget = null;
+      return;
+    }
+
+    // 2) 透かしギャラリー（kind: none/fullygoto/gotocity）
+    if(d.type === 'wm-pick'){
+      const cat = document.getElementById('category_select')?.value || '観光';
+      const target = (cat === '観光') ? 't' : 's';
+      const name = d.filename;
+      const kind = d.kind || 'none';
+      const master = document.getElementById('wm_choice_master');
+      if(master) master.value = kind;
+      if(name){
+        setPreviewAndHidden(target, name, kind, null);
+      }
+      return;
+    }
+  }, false);
+})();
+</script>
 
 <script>
 /* サーバの画像URLテンプレート（必要なら上書き）

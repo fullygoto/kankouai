@@ -32,9 +32,7 @@
     width:100%;font-size:13px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff
   }
   textarea{min-height:72px;resize:vertical;line-height:1.5}
-  /* 説明カラムは読みやすく少し大きめ文字 */
   textarea[name="desc[]"]{font-size:14px}
-
   .row-actions{display:flex;gap:6px}
   .savebar{position:sticky;bottom:0;background:var(--bg);padding:10px 0;margin-top:10px;display:flex;gap:10px}
 
@@ -115,7 +113,6 @@ function escapeHtml(s){
 <body>
 {% include '_back_to_data.html' %}
 <div class="wrap">
-  {# 既存 + fullyGOTO をマージ（重複除去＆順序維持） #}
   {% set _base_cats = ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"] %}
   {% set _fg_cats = ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"] %}
   {% set _ns = namespace(cats=_base_cats[:]) %}
@@ -129,7 +126,6 @@ function escapeHtml(s){
     <a class="btn secondary" href="{{ url_for('admin_entry') }}">← 登録フォームへ戻る</a>
   </div>
 
-  <!-- ▼ フラッシュ表示 -->
   {% with messages = get_flashed_messages() %}
     {% if messages %}
       {% for m in messages %}
@@ -138,7 +134,6 @@ function escapeHtml(s){
     {% endif %}
   {% endwith %}
 
-  <!-- ▼ タイトル重複のAI最適化統合（プレビュー＆実行） -->
   <div class="card">
     <h2>タイトル重複の統合（AI最適化）</h2>
     <div class="row" style="margin-bottom:8px">
@@ -152,7 +147,6 @@ function escapeHtml(s){
     <div id="dedupe_preview" class="preview">（プレビュー未取得）</div>
   </div>
 
-  <!-- ▼ CSV 取り込み（既存に追加） -->
   <form class="csvbar" method="post" action="{{ url_for('admin_entries_import_csv') }}" enctype="multipart/form-data">
     <input type="file" name="csv_file" accept=".csv">
     <button class="btn" type="submit">CSVを取り込む（既存に追加）</button>
@@ -160,7 +154,6 @@ function escapeHtml(s){
     <a class="btn ghost" href="{{ url_for('admin_entries_edit') }}">最新の内容を再読込</a>
   </form>
 
-  <!-- ▼ JSON 全文上書き（上級者向け・任意） -->
   <details class="jsonbox">
     <summary>JSON全文上書き（上級者向け）を開く</summary>
     <div class="panel">
@@ -177,7 +170,6 @@ function escapeHtml(s){
     </div>
   </details>
 
-  <!-- ▼ 既存データの編集フォーム -->
   <form method="post" action="{{ url_for('admin_entries_edit') }}">
     <div class="table-wrap">
       <table>
@@ -262,7 +254,6 @@ function escapeHtml(s){
       <button class="btn" type="submit">💾 保存する</button>
     </div>
 
-    <!-- 追加用テンプレート -->
     <template id="row-template">
       <tr>
         <td>
