@@ -700,10 +700,9 @@
 
         <!-- ▼ 画像ピッカー連携バー（フォルダ→画像一覧→選択） -->
         <div class="pickbar">
-        {# フォルダ一覧へのルートがあるならそちらへ。なければピッカー直行 #}
-        {% set _folders = safe_url_for('admin_media_folders') %}
+        {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
         <a class="btn"
-            href="{{ _folders if _folders != '#' else (safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new')) }}"
+            href="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}"
             target="_blank" rel="noopener">
             フォルダから選ぶ
         </a>
@@ -917,9 +916,9 @@
 
         <!-- 画像ピッカーへ -->
         <div class="pickbar">
-        {% set _folders = safe_url_for('admin_media_folders') %}
+        {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
         <a class="btn"
-            href="{{ _folders if _folders != '#' else (safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new')) }}"
+            href="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}"
             target="_blank" rel="noopener">
             フォルダから選ぶ
         </a>
