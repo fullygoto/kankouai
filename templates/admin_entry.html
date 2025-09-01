@@ -700,12 +700,14 @@
 
         <!-- ▼ 画像ピッカー連携バー（フォルダ→画像一覧→選択） -->
         <div class="pickbar">
-        <!-- フォルダ一覧 → ピッカーへ（新規タブ） -->
-        <a class="btn" href="{{ url_for('admin_media_folders') }}" target="_blank" rel="noopener">
+        {# フォルダ一覧へのルートがあるならそちらへ。なければピッカー直行 #}
+        {% set _folders = safe_url_for('admin_media_folders') %}
+        <a class="btn"
+            href="{{ _folders if _folders != '#' else (safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new')) }}"
+            target="_blank" rel="noopener">
             フォルダから選ぶ
         </a>
 
-        <!-- 透かし一括生成（ピッカー直行：新しい順） -->
         <a class="btn ghost"
             href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
             target="_blank" rel="noopener">
@@ -915,7 +917,10 @@
 
         <!-- 画像ピッカーへ -->
         <div class="pickbar">
-        <a class="btn" href="{{ url_for('admin_media_folders') }}" target="_blank" rel="noopener">
+        {% set _folders = safe_url_for('admin_media_folders') %}
+        <a class="btn"
+            href="{{ _folders if _folders != '#' else (safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new')) }}"
+            target="_blank" rel="noopener">
             フォルダから選ぶ
         </a>
 
