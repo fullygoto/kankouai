@@ -59,6 +59,12 @@
         .wm-variant button.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
         .wm-preview{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
         .wm-counts{font-size:.9em;color:#567}
+
+        /* === 追加：選択中プレビュー（ピッカー反映用） === */
+        .selected-box{display:flex;gap:10px;align-items:flex-start;margin:8px 0;padding:10px;border:1px dashed #cbd5e1;border-radius:10px;background:#fafcff}
+        .selected-box .thumb{width:150px;height:110px;object-fit:cover;border:1px solid #e2e8f0;border-radius:8px;background:#fff}
+        .selected-box .sel-text{font-size:.92em;color:#345}
+        .selected-box .label{font-size:.92em;color:#567;margin-bottom:4px}
     </style>
 
     <script>
@@ -167,7 +173,7 @@
     function haversine(lat1, lon1, lat2, lon2){
         const R = 6371, toRad = d => d * Math.PI / 180;
         const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
-        const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*sin(dLon/2)**2;
+        const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
         return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
@@ -510,7 +516,7 @@
       {% endif %}
     {% endwith %}
 
-    {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is not defined or entry_edit.areas is not string else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
+    {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is not defined or (entry_edit and entry_edit.areas is defined and entry_edit.areas is not string) else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
 
     {# === 透かし 初期値（保存済みの値→正規化） === #}
     {% set _wm_on_init = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
@@ -528,7 +534,7 @@
 
         <!-- 代表（サーバに送る唯一の値） -->
         <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_init }}">
-        <!-- 新UIで選んだ元画像ファイル名を送る（ギャラリー利用時） -->
+        <!-- 新UIで選んだ元画像ファイル名を送る（ギャラリー/ピッカー利用時） -->
         <input type="hidden" name="selected_image" id="selected_image" value="">
 
         <label>カテゴリー</label><br>
@@ -566,6 +572,21 @@
             else ('gotocity' if _wm_raw_t == 'city'
             else ('fullygoto' if _wm_on_t else 'none')))
         ) %}
+
+        {# 追加：選択中プレビュー（観光） #}
+        <div class="selected-box" id="selected-box-t">
+          <div>
+            <div class="label">現在選択中の画像（下のボタンで選ぶと即ここに反映）</div>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <img id="picker-preview-t" class="thumb" alt="未選択" style="display:none;">
+              <div class="sel-text">
+                <div>ファイル名：<span id="picker-name-t">（未選択）</span></div>
+                <div>透かし：<span id="picker-wm-t">-</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {% if _imgname_t %}
             <div class="mt-2" id="wm-block-t" data-filename="{{ _imgname_t }}">
             <div>現在の画像:</div>
@@ -692,6 +713,21 @@
             else ('gotocity' if _wm_raw_s == 'city'
             else ('fullygoto' if _wm_on_s else 'none')))
         ) %}
+
+        {# 追加：選択中プレビュー（店舗） #}
+        <div class="selected-box" id="selected-box-s">
+          <div>
+            <div class="label">現在選択中の画像（下のボタンで選ぶと即ここに反映）</div>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <img id="picker-preview-s" class="thumb" alt="未選択" style="display:none;">
+              <div class="sel-text">
+                <div>ファイル名：<span id="picker-name-s">（未選択）</span></div>
+                <div>透かし：<span id="picker-wm-s">-</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {% if _imgname_s %}
             <div class="mt-2" id="wm-block-s" data-filename="{{ _imgname_s }}">
             <div>現在の画像:</div>
@@ -889,10 +925,10 @@
 
     <div id="cards">
     {% for e in entries %}
-        {% set _tags  = e.tags  if e.tags  is not string else (e.tags  | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
-        {% set _areas = e.areas if e.areas is not string else (e.areas.split(',') if e.areas else []) %}
-        {% set _links = e.links if e.links is not string else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
-        {% set _pay   = e.payment if e.payment is not string else (e.payment.split(',') if e.payment else []) %}
+        {% set _tags  = e.tags  if e.tags  is defined and e.tags  is not string else (e.tags  | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _areas = e.areas if e.areas is defined and e.areas is not string else (e.areas.split(',') if e.areas else []) %}
+        {% set _links = e.links if e.links is defined and e.links is not string else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _pay   = e.payment if e.payment is defined and e.payment is not string else (e.payment.split(',') if e.payment else []) %}
         {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ (_links | join(' ')) ~ ' ' ~ (e.extras | tojson) ~ ' ' ~ (e.source or '') ~ ' ' ~ (e.source_url or '')) | lower %}
 
         <div class="entry-card"
@@ -1037,53 +1073,59 @@
     return base + suffix + ext;
   }
 
-  // ✅ serve_image の署名付きURLを確実に生成（テンプレ置換方式）
+  // 署名付き serve_image のURLテンプレ置換（安全に生成）
   function _serveUrl(fn){
-    const tmpl = "{{ safe_url_for('serve_image', filename='__NAME__', _sign=True) }}";
-    return tmpl.replace('__NAME__', encodeURIComponent(fn));
+    const base = "{{ safe_url_for('serve_image', filename='', _sign=True) }}";
+    // base は /media/img/?_sign=1 のような形になる可能性があるため、無理に結合せずサーバ署名を基本利用
+    return base + encodeURIComponent(fn);
   }
 
+  // 反映：hidden値 + 旧プレビュー + 追加プレビュー（写真/名前/透かし）
   async function setPreviewAndHidden(target, filename, preferredWm, rawUrl){
     const master = document.getElementById('wm_choice_master');
     const wm = preferredWm || (master ? (master.value || 'none') : 'none');
 
+    // hidden 更新（両方更新してもサーバ側で解釈OK）
+    document.getElementById('selected_image')?.setAttribute('value', filename);
     if(target === 't'){
-      const hImg = document.getElementById('image_existing_t');
-      const img  = document.getElementById('admin-image-preview-t');
-      const blk  = document.getElementById('wm-block-t');
-      if(hImg) hImg.value = filename;
+      document.getElementById('image_existing_t')?.setAttribute('value', filename);
+      const blk = document.getElementById('wm-block-t');
       if(blk) blk.dataset.filename = filename;
-
-      let url = await _signPreview(filename, wm);
-      if(!url) {
-        // ✅ フォールバックも必ず serve_image を使う
-        url = rawUrl || _serveUrl(variantFilename(filename, 'none'));
-      }
-      if(img && url){
-        img.src = url;
-        img.setAttribute('data-fullsrc', url);
-        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
-      }
     }else{
-      const hImg = document.getElementById('image_existing_s');
-      const img  = document.getElementById('admin-image-preview-s');
-      const blk  = document.getElementById('wm-block-s');
-      if(hImg) hImg.value = filename;
+      document.getElementById('image_existing_s')?.setAttribute('value', filename);
+      const blk = document.getElementById('wm-block-s');
       if(blk) blk.dataset.filename = filename;
+    }
 
-      let url = await _signPreview(filename, wm);
-      if(!url) {
-        url = rawUrl || _serveUrl(variantFilename(filename, 'none'));
-      }
-      if(img && url){
-        img.src = url;
-        img.setAttribute('data-fullsrc', url);
-        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
-      }
+    // URL: 署名API → フォールバック
+    let url = null;
+    try{ url = await _signPreview(filename, wm); }catch(_){}
+    if(!url) url = rawUrl || _serveUrl(variantFilename(filename, 'none'));
+
+    // 旧プレビュー（存在時）
+    const oldImg = document.getElementById(target === 't' ? 'admin-image-preview-t' : 'admin-image-preview-s');
+    if(oldImg && url){
+      oldImg.src = url;
+      oldImg.setAttribute('data-fullsrc', url);
+      if(oldImg.complete) annotateImageMeta(oldImg); else oldImg.onload = ()=> annotateImageMeta(oldImg);
+    }
+
+    // 新プレビュー（このテンプレで追加したボックス）
+    const pickImg = document.getElementById(target === 't' ? 'picker-preview-t' : 'picker-preview-s');
+    const pickName= document.getElementById(target === 't' ? 'picker-name-t'   : 'picker-name-s');
+    const pickWm  = document.getElementById(target === 't' ? 'picker-wm-t'     : 'picker-wm-s');
+
+    if(pickName) pickName.textContent = filename || '（未選択）';
+    if(pickWm)   pickWm.textContent   = wm || '-';
+    if(pickImg && url){
+      pickImg.style.display = '';
+      pickImg.src = url;
+      pickImg.setAttribute('data-fullsrc', url);
+      if(pickImg.complete) annotateImageMeta(pickImg); else pickImg.onload = ()=> annotateImageMeta(pickImg);
     }
   }
 
-  // フォルダピッカーを開く
+  // フォルダピッカー起動
   function openPicker(btn){
     const url = btn.getAttribute('data-url');
     _pickerTarget = btn.getAttribute('data-target'); // 't' or 's'
@@ -1094,22 +1136,20 @@
   document.getElementById('btn_open_folder_picker_t')?.addEventListener('click', function(){ openPicker(this); });
   document.getElementById('btn_open_folder_picker_s')?.addEventListener('click', function(){ openPicker(this); });
 
-  // メッセージ受信（フォルダピッカー / 透かしギャラリー）
+  // 受信：フォルダピッカー / 透かしギャラリー
   window.addEventListener('message', (ev)=>{
     if(ev.origin !== location.origin) return;
     const d = ev.data || {};
 
-    // 1) フォルダピッカー（/admin/media/folders）
+    // 1) フォルダピッカー
     if(d.type === 'media-pick'){
-      // ✅ _pickerTarget が無い場合でもカテゴリから推定して動く
       const fallbackTarget = (document.getElementById('category_select')?.value === '観光') ? 't' : 's';
       const target = _pickerTarget || fallbackTarget;
 
       const name = (d.files && d.files[0]) || '';
       const url  = (d.urls  && d.urls[0])  || '';
-      if(name){
-        setPreviewAndHidden(target, name, null, url);
-      }
+      if(name){ setPreviewAndHidden(target, name, null, url); }
+
       try{ if(_pickerWin && !_pickerWin.closed) _pickerWin.close(); }catch(_){}
       _pickerWin = null;
       _pickerTarget = null;
@@ -1124,12 +1164,50 @@
       const kind = d.kind || 'none';
       const master = document.getElementById('wm_choice_master');
       if(master) master.value = kind;
-      if(name){
-        setPreviewAndHidden(target, name, kind, null);
-      }
+      if(name){ setPreviewAndHidden(target, name, kind, null); }
       return;
     }
   }, false);
+
+  // 初期表示時：既存画像のプレビュー欄へも反映（見失い防止）
+  function initSelectedBox(target){
+    const master = document.getElementById('wm_choice_master')?.value || 'none';
+    const blk = document.getElementById(target==='t' ? 'wm-block-t' : 'wm-block-s');
+    const hid = document.getElementById(target==='t' ? 'image_existing_t' : 'image_existing_s');
+    const fname = (blk && blk.dataset.filename) || (hid && hid.value) || '';
+    const img = document.getElementById(target==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s');
+    const pickImg = document.getElementById(target==='t' ? 'picker-preview-t' : 'picker-preview-s');
+    const pickName= document.getElementById(target==='t' ? 'picker-name-t'   : 'picker-name-s');
+    const pickWm  = document.getElementById(target==='t' ? 'picker-wm-t'     : 'picker-wm-s');
+
+    if(fname){
+      if(pickName) pickName.textContent = fname;
+      if(pickWm)   pickWm.textContent   = master || '-';
+      // img があるならその src を採用、無ければ署名取得
+      const currentSrc = img ? (img.getAttribute('data-fullsrc') || img.currentSrc || img.src) : null;
+      if(pickImg){
+        if(currentSrc){
+          pickImg.style.display = '';
+          pickImg.src = currentSrc;
+          pickImg.setAttribute('data-fullsrc', currentSrc);
+          if(pickImg.complete) annotateImageMeta(pickImg); else pickImg.onload = ()=> annotateImageMeta(pickImg);
+        }else{
+          _signPreview(fname, master).then(url=>{
+            if(url){
+              pickImg.style.display = '';
+              pickImg.src = url;
+              pickImg.setAttribute('data-fullsrc', url);
+              if(pickImg.complete) annotateImageMeta(pickImg); else pickImg.onload = ()=> annotateImageMeta(pickImg);
+            }
+          });
+        }
+      }
+    }
+  }
+  window.addEventListener('load', function(){
+    initSelectedBox('t');
+    initSelectedBox('s');
+  });
 })();
 </script>
 
