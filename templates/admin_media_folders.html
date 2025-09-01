@@ -1,149 +1,129 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<title>画像フォルダ / 画像を選択</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root{--bg:#f6faf9;--card:#fff;--line:#e7eef5;--brand:#2a8ed8;--muted:#567}
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
-  .container{background:var(--card);max-width:1000px;margin:0 auto;padding:18px 20px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
-  h1{margin:0 0 10px}
-  .tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
-  .input{flex:1;min-width:220px;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:10px}
-  .card{border:1px solid #e5eef5;border-radius:10px;padding:12px;background:#fbfdff}
-  .name{font-weight:600;color:#234;word-break:break-all}
-  .muted{color:var(--muted);font-size:.92em}
-  .btn{display:inline-block;padding:7px 12px;border-radius:8px;background:var(--brand);color:#fff;text-decoration:none;border:0;cursor:pointer}
-  .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
-  .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
-  .thumb{width:100%;height:140px;background:#eef3f7;border:1px solid #e6edf3;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden}
-  .thumb img{max-width:100%;max-height:100%;display:block}
-</style>
+  <meta charset="utf-8">
+  <title>画像を選択</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{ --bg:#f6faf9; --card:#fff; --muted:#567; --line:#e7eef5; --brand:#2a8ed8; }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Noto Sans JP','Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);margin:0;padding:18px}
+    .wrap{max-width:1100px;margin:0 auto;background:#fff;border-radius:14px;box-shadow:0 4px 18px #b7d3e033;padding:16px}
+    h1{margin:0 0 10px}
+    .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:space-between}
+    .muted{color:var(--muted);font-size:.92em}
+    .input{width:320px;max-width:60vw;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px}
+    .btn{display:inline-block;padding:8px 12px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer;text-decoration:none}
+    .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
+    .btn.small{padding:6px 10px;font-size:.92em}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:12px}
+    .card{border:1px solid var(--line);border-radius:12px;background:#fbfdff;padding:10px;display:flex;flex-direction:column}
+    .fname{font-size:.92em;color:#234;word-break:break-all}
+    .thumbbox{position:relative;border:1px solid #e5eef5;border-radius:10px;background:#fff;height:150px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin:8px 0}
+    .thumb{max-width:100%;max-height:100%;display:block}
+    .placeholder{font-size:.9em;color:#789}
+    .meta{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+    .counts{font-size:.92em;color:var(--muted)}
+    .crumb{color:#567;font-size:.92em;margin-bottom:6px}
+    .toplinks{display:flex;gap:8px;flex-wrap:wrap}
+  </style>
 </head>
 <body>
-<div class="container">
-  <div class="topbar">
+  <div class="wrap">
     <h1>画像を選択</h1>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <a class="btn ghost" href="{{ url_for('admin_entry', edit=entry_id) if entry_id else url_for('admin_entry') }}">データ管理に戻る</a>
-      <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new') }}" target="_blank" rel="noopener">全体から選ぶ（ピッカー）</a>
+    {% if folder %}
+      <div class="crumb">フォルダ: <strong>{{ folder }}</strong></div>
+    {% endif %}
+
+    <div class="bar">
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input id="q" class="input" type="search" placeholder="名前で絞り込み（例: 2024, summer, beach, xxx.jpg）" autocomplete="off">
+        <span class="counts"><span id="shown">0</span> / <span id="total">0</span> 表示</span>
+      </div>
+      <div class="toplinks">
+        <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+        <a class="btn ghost" href="{{ url_for('admin_watermark', picker=1, order='new') }}">全体から選ぶ（ピッカー）</a>
+      </div>
     </div>
-  </div>
 
-  <div class="tools">
-    <input id="q" class="input" type="search" placeholder="名前で絞り込み（例: 2024, summer, beach, xxx.jpg）" autocomplete="off">
-    <span class="muted"><span id="shown">0</span> / <span id="total">0</span> 表示</span>
-  </div>
+    <div id="grid" class="grid">
+      {% for it in images %}
+        {# --- it は dict/obj/文字列 いずれでも動くように頑丈に取得 --- #}
+        {% set name = (it.name if it is mapping or it is not string and it.name is defined else (it['name'] if it['name'] is defined else (it|string))) %}
+        {% set rel  = (it.rel  if it is mapping and it.rel  is defined else (it['rel']  if it['rel']  is defined else name)) %}
+        {% set ts   = (it.ts   if it is mapping and it.ts   is defined else (it['ts']   if it['ts']   is defined else '')) %}
+        {% set v    = (it.v    if it is mapping and it.v    is defined else (it['v']    if it['v']    is defined else '')) %}
 
-  {# =========================
-     1) フォルダ一覧（folders が渡っている場合）
-     ========================= #}
-  {% if folders %}
-    <div id="grid" class="grid" data-mode="folders">
-      {% for f in folders %}
-        <div class="card" data-name="{{ f|lower }}">
-          <div class="name">{{ f }}</div>
-          <div class="muted">{{ (folder_counts[f] ~ ' 枚') if folder_counts is defined and f in folder_counts else '' }}</div>
-          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-            <!-- ピッカーを別タブで開く（サムネ付きで選べる既存機能） -->
-            <a class="btn" href="{{ url_for('admin_watermark', picker=1, order='new', subdir=f) }}" target="_blank" rel="noopener">
-              このフォルダから選ぶ（ピッカー）
-            </a>
-            <!-- このページ内で画像一覧へ -->
-            <a class="btn ghost" href="{{ url_for('admin_media_folders', folder=f, entry_id=entry_id, next=next) }}">
-              一覧をこのページで表示
-            </a>
+        {# サイン付きで確実に出るサムネ（wm=1=thumb）。ts/v があればキャッシュ避け用に付加 #}
+        {% set thumb = safe_url_for('serve_image', filename=name, _sign=True, wm=1) ~ (('&_ts=' ~ v)|string if v else '') %}
+        {% set view  = safe_url_for('serve_image', filename=name, _sign=True) %}
+        {% set more  = url_for('admin_watermark_one', src=name) if has_endpoint('admin_watermark_one') else url_for('admin_watermark', picker=1, order='new') %}
+
+        <div class="card" data-name="{{ name|lower }}">
+          <div class="meta">
+            <span class="fname">{{ name }}</span>
+            {% if ts %}<span class="muted">{{ ts }}</span>{% endif %}
+          </div>
+
+          <a class="thumbbox" href="{{ view }}" target="_blank" rel="noopener">
+            <img class="thumb" src="{{ thumb }}" loading="lazy" referrerpolicy="no-referrer" alt="{{ name }}"
+                 onerror="this.style.display='none'; this.parentElement.innerHTML='<div class=&quot;placeholder&quot;>プレビューなし</div>';">
+          </a>
+
+          <div class="actions">
+            <button class="btn small" data-pick="{{ name }}">この画像を選ぶ</button>
+            <a class="btn ghost small" href="{{ more }}" target="_blank" rel="noopener">詳細/透かし</a>
           </div>
         </div>
       {% endfor %}
+      {% if not images or images|length == 0 %}
+        <div class="muted">画像が見つかりません。</div>
+      {% endif %}
     </div>
+  </div>
 
-  {# =========================
-     2) 画像一覧（images が渡っている場合）
-     ========================= #}
-  {% elif images %}
-    <!-- 選択して戻る： next に GET で src を渡す -->
-    <form id="backForm" method="get" action="{{ next or url_for('admin_entry', edit=entry_id) }}">
-      {% if entry_id %}<input type="hidden" name="edit" value="{{ entry_id }}">{% endif %}
-      <input type="hidden" name="src" id="srcInput">
-    </form>
+  <script>
+    (function(){
+      const grid = document.getElementById('grid');
+      const q    = document.getElementById('q');
+      const shown= document.getElementById('shown');
+      const total= document.getElementById('total');
 
-    <div id="grid" class="grid" data-mode="images">
-      {% for img in images %}
-        {# img が辞書 or 文字列、どちらでも動くように #}
-        {% set filename = (img.filename if (img is mapping and 'filename' in img) else img) %}
-        {% set display = filename %}
-        <div class="card" data-name="{{ display|lower }}">
-          <div class="name">{{ display }}</div>
-          <div class="thumb">
-            {# サムネURLが分からない環境もあるため、推測パスとフォールバックの両対応 #}
-            {% set thumb = (img.url if (img is mapping and 'url' in img) else None) %}
-            {% if thumb %}
-              <img src="{{ thumb }}" alt="{{ display }}">
-            {% else %}
-              <span class="muted">プレビューなし</span>
-            {% endif %}
-          </div>
-          <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn" data-pick="{{ filename }}">この画像を選ぶ</button>
-            <a class="btn ghost"
-              href="{{ url_for('admin_watermark_one', src=filename) if has_endpoint('admin_watermark_one') else url_for('admin_watermark', picker=1, order='new') }}"
-              target="_blank" rel="noopener">詳細/透かし</a>
-          </div>
-        </div>
-      {% endfor %}
-    </div>
+      function cards(){ return Array.from(grid.querySelectorAll('.card')); }
+      function updateCounts(){
+        total.textContent = cards().length;
+        shown.textContent = cards().filter(c => c.style.display !== 'none').length;
+      }
+      function filter(){
+        const t = (q.value||'').trim().toLowerCase();
+        cards().forEach(c=>{
+          const name = c.dataset.name || '';
+          c.style.display = (!t || name.includes(t)) ? '' : 'none';
+        });
+        updateCounts();
+      }
+      q.addEventListener('input', filter);
+      updateCounts();
 
-  {% else %}
-    <p class="muted">表示できるフォルダ/画像がありません。</p>
-  {% endif %}
-</div>
+      // ピッカー（このウィンドウがサブで開かれている前提）
+      grid.addEventListener('click', (e)=>{
+        const btn = e.target.closest('[data-pick]');
+        if(!btn) return;
+        const name = btn.getAttribute('data-pick');
+        const base = "{{ safe_url_for('serve_image', filename='', _sign=True) }}";
+        const url  = base + encodeURIComponent(name);
+        try{
+          window.opener && window.opener.postMessage({ type:'media-pick', files:[name], urls:[url] }, '*');
+        }catch(_){}
+        // ピッカー用途なら閉じる（通常は閉じない）
+        if(new URLSearchParams(location.search).get('picker') === '1'){
+          window.close();
+        }
+      });
 
-<script>
-(function(){
-  const q = document.getElementById('q');
-  const grid = document.getElementById('grid');
-  const shown = document.getElementById('shown');
-  const total = document.getElementById('total');
-
-  function recount(){
-    if(!grid){ shown.textContent = 0; total.textContent = 0; return; }
-    const cards = grid.querySelectorAll('.card');
-    let vis = 0;
-    cards.forEach(c => { if(c.style.display !== 'none') vis++; });
-    shown.textContent = vis;
-    total.textContent = cards.length;
-  }
-
-  function update(){
-    const term = (q.value||'').trim().toLowerCase();
-    if(!grid) return;
-    grid.querySelectorAll('.card').forEach(card=>{
-      const ok = !term || (card.dataset.name||'').includes(term);
-      card.style.display = ok ? '' : 'none';
-    });
-    recount();
-  }
-
-  // 画像の「この画像を選ぶ」→ next へ GET 送信
-  if(grid && grid.dataset.mode === 'images'){
-    const form = document.getElementById('backForm');
-    const srcInput = document.getElementById('srcInput');
-    grid.addEventListener('click', (e)=>{
-      const btn = e.target.closest('button[data-pick]');
-      if(!btn) return;
-      e.preventDefault();
-      const src = btn.getAttribute('data-pick');
-      srcInput.value = src;
-      form.submit();
-    });
-  }
-
-  if(q) q.addEventListener('input', update);
-  update();
-})();
-</script>
+      // 初期フィルタ（空でカウント反映）
+      filter();
+    })();
+  </script>
 </body>
 </html>
