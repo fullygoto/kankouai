@@ -46,7 +46,7 @@
             .filterbar input[type=text], .filterbar select {min-width:130px}
         }
 
-        /* === 追加：透かし生成済みから選ぶ専用UI === */
+        /* === 追加：透かし生成済みから選ぶ専用UI（必要時のみ出現） === */
         .wm-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0 8px}
         .wm-toolbar .grow{flex:1}
         .wm-search{width:100%;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
@@ -67,9 +67,7 @@
         const sec = document.getElementById(id);
         if(!sec) return;
         sec.style.display = enable ? 'block' : 'none';
-        sec.querySelectorAll('input,select,textarea').forEach(el => {
-            el.disabled = !enable;
-        });
+        sec.querySelectorAll('input,select,textarea').forEach(el => { el.disabled = !enable; });
     }
 
     function addExtraRow(targetId) {
@@ -87,10 +85,7 @@
     function validateAreas(formId) {
         const form = document.getElementById(formId);
         const checks = form.querySelectorAll('input[name="areas"]:checked');
-        if (checks.length === 0) {
-            alert('エリアは1つ以上選択してください。');
-            return false;
-        }
+        if (checks.length === 0) { alert('エリアは1つ以上選択してください。'); return false; }
         return true;
     }
 
@@ -99,9 +94,7 @@
         if(!isFinite(bytes) || bytes <= 0) return '';
         const units = ['B','KB','MB','GB','TB'];
         let i = 0, n = bytes;
-        while(n >= 1024 && i < units.length - 1){
-            n /= 1024; i++;
-        }
+        while(n >= 1024 && i < units.length - 1){ n /= 1024; i++; }
         return (n >= 100 ? Math.round(n) : (n >= 10 ? n.toFixed(1) : n.toFixed(2))) + ' ' + units[i];
     }
 
@@ -128,14 +121,11 @@
         if(!img) return;
         const host = _ensureMetaHost(img);
         host.textContent = '画像情報を取得中…';
-
         const fullUrl = img.getAttribute('data-fullsrc') || img.currentSrc || img.src;
 
-        // 1) 容量（HEAD）
         const contentLength = await _fetchContentLength(fullUrl);
         const sizeText = contentLength ? _formatBytes(contentLength) : '';
 
-        // 2) ピクセルサイズ
         let w = img.naturalWidth, h = img.naturalHeight;
         if((!w || !h) || img.getAttribute('data-use-full') === '1'){
             try{
@@ -143,29 +133,21 @@
                     const probe = new Image();
                     probe.decoding = 'async';
                     probe.referrerPolicy = 'no-referrer';
-                    probe.onload = ()=>{
-                        w = probe.naturalWidth; h = probe.naturalHeight;
-                        resolve();
-                    };
+                    probe.onload = ()=>{ w = probe.naturalWidth; h = probe.naturalHeight; resolve(); };
                     probe.onerror = reject;
                     probe.src = fullUrl + (fullUrl.includes('?') ? '&' : '?') + '_ts=' + Date.now();
                 });
             }catch(_e){}
         }
         const dimsText = (w && h) ? (w + '×' + h + ' px') : '';
-
-        // 3) 表示
-        const out = [dimsText, sizeText].filter(Boolean).join(' ・ ');
-        host.textContent = out || '画像情報なし';
+        host.textContent = [dimsText, sizeText].filter(Boolean).join(' ・ ') || '画像情報なし';
     }
 
     function annotateAllImages(){
-        // フォームプレビュー
         document.querySelectorAll('#admin-image-preview-t, #admin-image-preview-s').forEach(img=>{
             if(!img.getAttribute('data-fullsrc')) img.setAttribute('data-fullsrc', img.currentSrc || img.src);
             annotateImageMeta(img);
         });
-        // 一覧カードのサムネ
         document.querySelectorAll('.entry-card a[target="_blank"] > img.thumb, .entry-card a[target="_blank"] > img').forEach(img=>{
             const anchor = (img.parentElement && img.parentElement.tagName === 'A') ? img.parentElement : null;
             if(anchor){
@@ -180,17 +162,13 @@
     // ====== フィルタ & ソート & ページネーション ======
     let PAGING = {page:1, size:20, totalFiltered:0, totalAll:0};
     let GEO = {active:false, lat:null, lng:null, radiusKm:3};
-
-    function _norm(s){ return (s||'').toString().toLowerCase(); }
+    const _norm = s => (s||'').toString().toLowerCase();
 
     function haversine(lat1, lon1, lat2, lon2){
-        const R = 6371;
-        const toRad = d => d * Math.PI / 180;
-        const dLat = toRad(lat2 - lat1);
-        const dLon = toRad(lon2 - lon1);
+        const R = 6371, toRad = d => d * Math.PI / 180;
+        const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
         const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-        return R * c;
+        return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
     }
 
     function formatDistance(km){
@@ -201,22 +179,14 @@
     }
 
     function startNearby(){
-        if(!navigator.geolocation){
-            alert('この端末は位置情報に対応していません。');
-            return;
-        }
+        if(!navigator.geolocation){ alert('この端末は位置情報に対応していません。'); return; }
         const r = parseFloat(document.getElementById('near_radius').value || '3');
         navigator.geolocation.getCurrentPosition(pos=>{
-            GEO.active = true;
-            GEO.lat = pos.coords.latitude;
-            GEO.lng = pos.coords.longitude;
-            GEO.radiusKm = r;
-            filterCards(); // 現在地で即絞り込み
-        }, err=>{
-            alert('現在地を取得できませんでした: ' + err.message);
-        }, {enableHighAccuracy:true, timeout:10000, maximumAge:30000});
+            GEO = {active:true, lat:pos.coords.latitude, lng:pos.coords.longitude, radiusKm:r};
+            filterCards();
+        }, err=>{ alert('現在地を取得できませんでした: ' + err.message); },
+        {enableHighAccuracy:true, timeout:10000, maximumAge:30000});
     }
-
     function clearNearby(){
         GEO = {active:false, lat:null, lng:null, radiusKm:3};
         document.querySelectorAll('.dist-badge').forEach(n=>n.remove());
@@ -224,21 +194,17 @@
     }
 
     function updateDistanceBadges(){
-        const cards = Array.from(document.querySelectorAll('.entry-card'));
-        cards.forEach(card=>{
-            const old = card.querySelector('.dist-badge');
-            if(old) old.remove();
+        Array.from(document.querySelectorAll('.entry-card')).forEach(card=>{
+            const old = card.querySelector('.dist-badge'); if(old) old.remove();
             if(!(GEO.active && card.style.display !== 'none')) return;
-            const d = parseFloat(card.dataset.distance || 'NaN');
-            if(!isFinite(d)) return;
+            const d = parseFloat(card.dataset.distance || 'NaN'); if(!isFinite(d)) return;
             const host = card.querySelector('.entry-actions')?.parentNode || card;
             const badge = document.createElement('div');
             badge.className = 'muted dist-badge';
             badge.style.margin = '6px 0';
             badge.textContent = '現在地から約 ' + formatDistance(d);
             const actions = card.querySelector('.entry-actions');
-            if(actions) host.insertBefore(badge, actions);
-            else host.appendChild(badge);
+            if(actions) host.insertBefore(badge, actions); else host.appendChild(badge);
         });
     }
 
@@ -252,7 +218,6 @@
         const list = Array.from(document.querySelectorAll('.entry-card'));
         let filtered = [];
 
-        // 絞り込み
         list.forEach(card=>{
             const txt = card.dataset.text;
             const dcat = card.dataset.category;
@@ -262,16 +227,11 @@
             if(q && !txt.includes(q)) ok = false;
             if(cat && dcat !== cat) ok = false;
             if(area && !dareas.includes(area)) ok = false;
-            if(requireTags.length){
-                for(const t of requireTags){
-                    if(!dtags.includes(t)){ ok = false; break; }
-                }
-            }
+            if(requireTags.length){ for(const t of requireTags){ if(!dtags.includes(t)){ ok = false; break; } } }
             card.style.display = 'none';
             if(ok) filtered.push(card);
         });
 
-        // 現在地フィルタ
         if(GEO.active && GEO.lat!=null && GEO.lng!=null){
             const picked = [];
             filtered.forEach(card=>{
@@ -287,29 +247,15 @@
             filtered.forEach(card=>{ delete card.dataset.distance; });
         }
 
-        // 並び替え
         filtered.sort((a,b)=>{
             if(sort==='title_asc') return a.dataset.title.localeCompare(b.dataset.title, 'ja');
             if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
-            if(sort==='cat_asc'){
-                const c = a.dataset.category.localeCompare(b.dataset.category, 'ja');
-                if(c!==0) return c;
-                return a.dataset.title.localeCompare(b.dataset.title, 'ja');
-            }
-            if(sort==='cat_desc'){
-                const c = b.dataset.category.localeCompare(a.dataset.category, 'ja');
-                if(c!==0) return c;
-                return a.dataset.title.localeCompare(b.dataset.title, 'ja');
-            }
-            if(sort==='dist_asc'){
-                const da = parseFloat(a.dataset.distance || '1e9');
-                const db = parseFloat(b.dataset.distance || '1e9');
-                return da - db;
-            }
+            if(sort==='cat_asc'){ const c = a.dataset.category.localeCompare(b.dataset.category, 'ja'); return c!==0?c:a.dataset.title.localeCompare(b.dataset.title, 'ja'); }
+            if(sort==='cat_desc'){ const c = b.dataset.category.localeCompare(a.dataset.category, 'ja'); return c!==0?c:a.dataset.title.localeCompare(b.dataset.title, 'ja'); }
+            if(sort==='dist_asc'){ return parseFloat(a.dataset.distance || '1e9') - parseFloat(b.dataset.distance || '1e9'); }
             return 0;
         });
 
-        // 件数更新
         PAGING.totalFiltered = filtered.length;
         PAGING.totalAll = list.length;
         if(resetPage) PAGING.page = 1;
@@ -317,7 +263,6 @@
         applyPagination(filtered);
         updateDistanceBadges();
 
-        // 見えているカードのサムネを再注釈
         document.querySelectorAll('.entry-card').forEach(card=>{
             if(card.style.display !== 'none'){
                 const img = card.querySelector('a[target="_blank"] > img.thumb, a[target="_blank"] > img');
@@ -333,9 +278,7 @@
         if(PAGING.page < 1) PAGING.page = 1;
         const start = (PAGING.page - 1) * size;
         const end = Math.min(start + size, filtered.length);
-        for(let i=0;i<filtered.length;i++){
-            filtered[i].style.display = (i>=start && i<end) ? '' : 'none';
-        }
+        for(let i=0;i<filtered.length;i++){ filtered[i].style.display = (i>=start && i<end) ? '' : 'none'; }
         document.getElementById('f_count').textContent = PAGING.totalFiltered;
         document.getElementById('f_total').textContent = PAGING.totalAll;
         const info = `ページ ${PAGING.page} / ${totalPages}（1ページ ${size}件）`;
@@ -349,31 +292,17 @@
     }
 
     function resetFilters(){
-        document.getElementById('f_q').value='';
-        document.getElementById('f_cat').value='';
-        document.getElementById('f_area').value='';
-        document.getElementById('f_tag').value='';
+        document.getElementById('f_q').value=''; document.getElementById('f_cat').value='';
+        document.getElementById('f_area').value=''; document.getElementById('f_tag').value='';
         document.getElementById('f_sort').value='title_asc';
-        clearNearby();
-        PAGING.page = 1;
-        filterCards(false);
+        clearNearby(); PAGING.page = 1; filterCards(false);
     }
-
-    function onChangePageSize(sel){
-        PAGING.size = parseInt(sel.value || '20', 10);
-        PAGING.page = 1;
-        filterCards(false);
-    }
-
+    function onChangePageSize(sel){ PAGING.size = parseInt(sel.value || '20', 10); PAGING.page = 1; filterCards(false); }
     function gotoPage(which){
         if(which==='first') PAGING.page = 1;
         else if(which==='prev') PAGING.page -= 1;
         else if(which==='next') PAGING.page += 1;
-        else if(which==='last'){
-            const size = PAGING.size;
-            const totalPages = Math.max(1, Math.ceil(PAGING.totalFiltered / size));
-            PAGING.page = totalPages;
-        }
+        else if(which==='last'){ const size = PAGING.size; const totalPages = Math.max(1, Math.ceil(PAGING.totalFiltered / size)); PAGING.page = totalPages; }
         filterCards(false);
     }
 
@@ -385,15 +314,12 @@
             const res = await fetch(`/admin/_sign_image?${qs.toString()}`, { credentials: 'same-origin' });
             const data = await res.json();
             if(data && data.ok && data.url) return data.url;
-        }catch(e){
-            console.warn('sign error', e);
-        }
+        }catch(e){ console.warn('sign error', e); }
         return null;
     }
 
     // ラジオ名分離 + hidden 同期（観光=t, 店舗=s）
     function _bindWmRadios(section){
-        // （観光側は下で差し替え済みのため、店舗側のみ動作）
         const rootId = section==='t' ? 'form_tourism' : 'form_shop';
         const blockId = section==='t' ? 'wm-block-t' : 'wm-block-s';
         const imgId = section==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s';
@@ -416,10 +342,8 @@
                     if(filename && img){
                         const url = await _signPreview(filename, choice);
                         if(url){
-                            img.src = url;
-                            img.setAttribute('data-fullsrc', url);
-                            if(img.complete) annotateImageMeta(img);
-                            else img.onload = ()=> annotateImageMeta(img);
+                            img.src = url; img.setAttribute('data-fullsrc', url);
+                            if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
                         }
                     }
                 }
@@ -432,16 +356,13 @@
             if(filename && img){
                 _signPreview(filename, init.value || 'none').then(url => {
                     if(url){
-                        img.src = url;
-                        img.setAttribute('data-fullsrc', url);
-                        if(img.complete) annotateImageMeta(img);
-                        else img.onload = ()=> annotateImageMeta(img);
+                        img.src = url; img.setAttribute('data-fullsrc', url);
+                        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
                     }
                 });
             }else if(img){
                 img.setAttribute('data-fullsrc', img.currentSrc || img.src);
-                if(img.complete) annotateImageMeta(img);
-                else img.onload = ()=> annotateImageMeta(img);
+                if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
             }
         }
     }
@@ -451,7 +372,7 @@
         const master = document.getElementById('wm_choice_master');
         if(!master) return;
         if(cat === '観光'){
-            // 観光側はギャラリー選択で master を更新するためここでは何もしない
+            // 観光側はギャラリー/ピッカーで master を更新
         }else{
             const p = document.querySelector('#form_shop input[name="wm_choice_s"]:checked');
             if(p) master.value = p.value;
@@ -466,40 +387,28 @@
     }
 
     /* ========= 観光フォーム：透かし生成済みギャラリー選択 ========= */
-
     function _wmBuildVariantName(fn, kind){
-        // kind: 'none' | 'fullygoto' | 'gotocity'（ファイルは __none / __fullygoto / __goto）
-        const dot = fn.lastIndexOf('.');
-        const base = dot >= 0 ? fn.slice(0, dot) : fn;
-        const ext  = dot >= 0 ? fn.slice(dot) : '';
+        const dot = fn.lastIndexOf('.'); const base = dot >= 0 ? fn.slice(0, dot) : fn; const ext  = dot >= 0 ? fn.slice(dot) : '';
         const suf  = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
         return base + suf + ext;
     }
-    function _wmVariantUrl(fn, kind){
-        // 透かしバリアントの静的プレビュー（サーバ側の admin_media_img で配信）
-        const vname = _wmBuildVariantName(fn, kind);
-        return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(vname);
-    }
-    function _wmSrcUrl(fn){
-        return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(fn);
-    }
+    function _wmVariantUrl(fn, kind){ const vname = _wmBuildVariantName(fn, kind); return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(vname); }
+    function _wmSrcUrl(fn){ return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(fn); }
+
     function _setSelectedImage(fn, kind){
-        // hidden へ反映（従来の保存仕様を維持）
         const sel = document.getElementById('selected_image');
         const master = document.getElementById('wm_choice_master');
-        if(sel) sel.value = fn;                 // 元画像ファイル名
-        if(master) master.value = kind;         // none/fullygoto/gotocity
+        if(sel) sel.value = fn;
+        if(master) master.value = kind;
 
-        // 上部の現在画像プレビューも更新（実体はバリアントを見せる）
         const img = document.getElementById('admin-image-preview-t');
         if(img){
             const url = _wmVariantUrl(fn, kind);
-            img.src = url;
-            img.setAttribute('data-fullsrc', url);
-            if(img.complete) annotateImageMeta(img);
-            else img.onload = ()=> annotateImageMeta(img);
+            img.src = url; img.setAttribute('data-fullsrc', url);
+            if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
         }
     }
+
     function bindWmGallery(){
         const q = document.getElementById('wm_q');
         const grid = document.getElementById('wm_grid');
@@ -510,11 +419,7 @@
 
         function updateCounts(){
             if(totalCount) totalCount.textContent = cards.length;
-            if(shownCount){
-                let shown = 0;
-                for(const c of cards){ if(c.style.display !== 'none') shown++; }
-                shownCount.textContent = shown;
-            }
+            if(shownCount){ let shown = 0; for(const c of cards){ if(c.style.display !== 'none') shown++; } shownCount.textContent = shown; }
         }
         function filter(){
             const term = (q?.value || '').trim().toLowerCase();
@@ -530,7 +435,6 @@
                 const fn = btn.getAttribute('data-fn');
                 const kind = btn.getAttribute('data-kind');
                 _setSelectedImage(fn, kind);
-                // 選択の視覚フィードバック
                 grid.querySelectorAll('button[data-fn][data-kind]').forEach(b=>b.classList.remove('ghost'));
                 btn.classList.add('ghost');
             }
@@ -542,10 +446,10 @@
     window.onload = function(){
         onCategoryChange();
         filterCards();
-        _bindWmRadios('t'); // 観光側は実質無視（店舗側のみ使用）
-        _bindWmRadios('s');
+        _bindWmRadios('t'); // 観光側はギャラリー/ピッカー運用のため実質無視
+        _bindWmRadios('s'); // 店舗側はラジオで同期
         _syncWmFromVisible();
-        annotateAllImages(); // 画像メタの初期表示
+        annotateAllImages();
         bindWmGallery();
     };
     </script>
@@ -557,33 +461,23 @@
     {% set _base_cats = (cat_list if cat_list is defined else ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"]) %}
     {% set _fg_cats = (fg_cat_list if fg_cat_list is defined else ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"]) %}
     {% set _ns = namespace(cats=_base_cats[:]) %}
-    {% for c in _fg_cats %}
-      {% if c not in _ns.cats %}
-        {% set _ = _ns.cats.append(c) %}
-      {% endif %}
-    {% endfor %}
+    {% for c in _fg_cats %}{% if c not in _ns.cats %}{% set _ = _ns.cats.append(c) %}{% endif %}{% endfor %}
     {% set cat_list = _ns.cats %}
 
-    {% if area_opts is not defined %}
-      {% set area_opts = ["五島市","新上五島町","宇久町","小値賀町"] %}
-    {% endif %}
-    {% if entries is not defined %}
-      {% set entries = [] %}
-    {% endif %}
+    {% if area_opts is not defined %}{% set area_opts = ["五島市","新上五島町","宇久町","小値賀町"] %}{% endif %}
+    {% if entries is not defined %}{% set entries = [] %}{% endif %}
 
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
     <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
     <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
     <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-    <!-- ▼ 復活：全体バックアップ -->
     <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-    <!-- ▲ 復活ここまで -->
     <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
     <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
     <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
     <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
-    <a href="{{ safe_url_for('admin_watermark') or '/amin_watermark.html' }}">[透かし一括生成]</a>
+    <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
     <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
     <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
@@ -630,13 +524,11 @@
 
     <!-- ===== 登録フォーム ===== -->
     <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
-        {% if edit_id %}
-          <input type="hidden" name="edit_id" value="{{ edit_id }}">
-        {% endif %}
+        {% if edit_id %}<input type="hidden" name="edit_id" value="{{ edit_id }}">{% endif %}
 
         <!-- 代表（サーバに送る唯一の値） -->
         <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_init }}">
-        <!-- 新UIで選んだ元画像ファイル名を送る -->
+        <!-- 新UIで選んだ元画像ファイル名を送る（ギャラリー利用時） -->
         <input type="hidden" name="selected_image" id="selected_image" value="">
 
         <label>カテゴリー</label><br>
@@ -652,7 +544,6 @@
         <div id="form_tourism" style="display:none;">
 
         <style>
-            /* ▼ 画像ピッカー連携の軽量スタイル（他と衝突しないプリフィクス） */
             .pickbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
             .pickbar .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
             .pickbar .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
@@ -666,7 +557,6 @@
         <label>説明</label><br>
         <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
 
-        {# ===== 現在の画像プレビュー（従来どおり保持） ===== #}
         {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
         {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
         {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
@@ -692,13 +582,8 @@
             </div>
         {% endif %}
 
-        <!-- サーバに渡す：選択した「元画像」ファイル名（拡張子そのまま） -->
         <input type="hidden" name="image_existing" id="image_existing_t" value="{{ _imgname_t }}">
 
-        <!-- 代表の透かし選択値（ページ上部に既存 hidden がある想定）。無ければ以下を有効化してください。 -->
-        <!-- <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_t }}"> -->
-
-        <!-- ▼ 画像ピッカー連携バー（フォルダ→画像一覧→選択） -->
         <div class="pickbar">
         {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
         <a class="btn"
@@ -718,103 +603,68 @@
 
         <script>
             (function(){
-            // フォルダ選択ページ（ピッカーモード）を開く
             const btn = document.getElementById('btn_open_folder_picker');
             if(btn){
                 btn.addEventListener('click', ()=>{
-                const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
-                const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
-                window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
+                    const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
+                    const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
+                    window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
                 });
             }
-
-            // バリアント名生成：元画像 + 透かし種別 → 派生ファイル
             function variantFilename(fn, kind){
-                const i = fn.lastIndexOf('.');
-                const base = i>0 ? fn.slice(0, i) : fn;
-                const ext  = i>0 ? fn.slice(i) : '';
-                const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto'); // gotocity→__goto
+                const i = fn.lastIndexOf('.'), base = i>0 ? fn.slice(0, i) : fn, ext = i>0 ? fn.slice(i) : '';
+                const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
                 return base + suffix + ext;
             }
-
-            // ピッカーからの postMessage を受け取り、hidden とプレビューに反映
             async function applyPicked(fn, kind){
                 try{
-                // hidden 更新
-                const hImg = document.getElementById('image_existing_t');
-                if(hImg) hImg.value = fn;
-
-                const hWm = document.getElementById('wm_choice_master');
-                if(hWm) hWm.value = kind;
-
-                // プレビュー更新（署名URLが使える場合はそれを優先）
-                const img = document.getElementById('admin-image-preview-t');
-                if(img){
-                    let url = null;
-                    if(typeof _signPreview === 'function'){
-                    try{ url = await _signPreview(fn, kind); }catch(_e){}
+                    const hImg = document.getElementById('image_existing_t'); if(hImg) hImg.value = fn;
+                    const hWm  = document.getElementById('wm_choice_master'); if(hWm)  hWm.value  = kind;
+                    const img = document.getElementById('admin-image-preview-t');
+                    if(img){
+                        let url = null;
+                        if(typeof _signPreview === 'function'){ try{ url = await _signPreview(fn, kind); }catch(_e){} }
+                        if(!url){
+                            const vname = variantFilename(fn, kind);
+                            try{ url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname)); }
+                            catch(_e){ url = img.src; }
+                        }
+                        if(url){
+                            img.src = url; img.setAttribute('data-fullsrc', url);
+                            if(typeof annotateImageMeta === 'function'){ if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img); }
+                        }
                     }
-                    if(!url){
-                    const vname = variantFilename(fn, kind);
-                    try{
-                        url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname));
-                    }catch(_e){
-                        url = img.src;
-                    }
-                    }
-                    if(url){
-                    img.src = url;
-                    img.setAttribute('data-fullsrc', url);
-                    if(typeof annotateImageMeta === 'function'){
-                        if(img.complete) annotateImageMeta(img);
-                        else img.onload = ()=> annotateImageMeta(img);
-                    }
-                    }
-                }
                 }catch(_e){}
             }
-
-            // postMessage 受信
             window.addEventListener('message', (e)=>{
-                const d = e && e.data;
-                if(!d || d.type!=='wm-pick') return;
-                // d = {type:'wm-pick', filename:'xxx.jpg', kind:'none|fullygoto|gotocity'}
+                const d = e && e.data; if(!d || d.type!=='wm-pick') return;
                 applyPicked(d.filename, d.kind);
             }, false);
-
-            // 初期プレビューのメタ注釈
             const initImg = document.getElementById('admin-image-preview-t');
             if(initImg){
                 initImg.setAttribute('data-fullsrc', initImg.currentSrc || initImg.src);
-                if(typeof annotateImageMeta==='function'){
-                if(initImg.complete) annotateImageMeta(initImg);
-                else initImg.onload = ()=> annotateImageMeta(initImg);
-                }
+                if(typeof annotateImageMeta==='function'){ if(initImg.complete) annotateImageMeta(initImg); else initImg.onload = ()=> annotateImageMeta(initImg); }
             }
             })();
         </script>
 
-        <!-- ▼ 以降は従来の入力群（住所・地図URL・出典・座標・タグ・エリア・リンク・追加情報） -->
         <label>住所</label><br>
         <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
 
         <label>地図URL</label><br>
         <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
 
-        <!-- ★ 出典 -->
         <label>出典</label><br>
         <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
 
         <label>出典URL</label><br>
-        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source if entry_edit else '' }}"><br>
+        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
         <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
 
-        <!-- ★ 座標コピペ欄（URL / 「緯度,経度」 / DMS 可） -->
         <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
         <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
         <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
 
-        <!-- 緯度・経度（小数、任意） -->
         <label>緯度・経度（任意）</label><br>
         <div class="row" style="display:flex; gap:10px; align-items:center;">
             <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
@@ -828,13 +678,10 @@
         <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
         <div class="row">
             {% for area in area_opts %}
-            <label style="min-width:unset;">
-            <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
-            </label>
+            <label style="min-width:unset;"><input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}</label>
             {% endfor %}
         </div>
 
-        <!-- ▼ リンク（複数） -->
         <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
         <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
         {% if entry_edit and entry_edit.links %}
@@ -842,24 +689,23 @@
         {% endif %}
         </textarea><br>
 
-        <!-- ▼ 追加情報（項目＝内容） -->
         <label>追加情報（項目＝内容）</label>
         <div id="extras-list-tourism">
             {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
             {% if _extras.items is defined %}
-            {% for k, v in _extras.items() %}
-            <div class="extra-row">
-                <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
-                <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                <button type="button" onclick="this.parentNode.remove()">－</button>
-            </div>
-            {% endfor %}
+                {% for k, v in _extras.items() %}
+                <div class="extra-row">
+                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
+                {% endfor %}
             {% else %}
-            <div class="extra-row">
-                <input name="extras_key[]" placeholder="項目"> ＝
-                <input name="extras_val[]" placeholder="内容">
-                <button type="button" onclick="this.parentNode.remove()">－</button>
-            </div>
+                <div class="extra-row">
+                    <input name="extras_key[]" placeholder="項目"> ＝
+                    <input name="extras_val[]" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
             {% endif %}
         </div>
         <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-tourism')">＋ 行を追加</button>
@@ -883,7 +729,6 @@
         <label>説明</label><br>
         <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
 
-        {# 現在の画像プレビュー保持 #}
         {% set _imgname_s = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
         {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
         {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
@@ -909,12 +754,22 @@
             </div>
         {% endif %}
 
-        <!-- サーバに渡す：選択した「元画像」ファイル名 -->
-        <input type="hidden" name="image_existing" id="image_existing_s" value="{{ _imgname_s }}">
-        <!-- 必要なら代表の hidden を追加 -->
-        <!-- <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_s }}"> -->
+        <!-- ★ 店舗側：透かし選択（ラジオで master に同期） -->
+        <div class="row" style="margin-top:8px;">
+            <label style="min-width:unset;">透かし</label><br>
+            <label style="min-width:unset;margin-right:10px;">
+                <input type="radio" name="wm_choice_s" value="none" {% if _wm_choice_s == 'none' %}checked{% endif %}> なし
+            </label>
+            <label style="min-width:unset;margin-right:10px;">
+                <input type="radio" name="wm_choice_s" value="fullygoto" {% if _wm_choice_s == 'fullygoto' %}checked{% endif %}> GOTO全面
+            </label>
+            <label style="min-width:unset;">
+                <input type="radio" name="wm_choice_s" value="gotocity" {% if _wm_choice_s == 'gotocity' %}checked{% endif %}> GOTO市名
+            </label>
+        </div>
 
-        <!-- 画像ピッカーへ -->
+        <input type="hidden" name="image_existing" id="image_existing_s" value="{{ _imgname_s }}">
+
         <div class="pickbar">
         {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
         <a class="btn"
@@ -937,72 +792,48 @@
             const openBtn = document.getElementById('btn_open_folder_picker_s');
             if(openBtn){
                 openBtn.addEventListener('click', ()=>{
-                const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
-                const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
-                window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
+                    const base = "{{ safe_url_for('admin_media_folders') or '/admin/media/folders' }}";
+                    const url = base + (base.includes('?') ? '&' : '?') + 'picker=1';
+                    window.open(url, 'wmPicker', 'width=1100,height=800,noopener');
                 });
             }
-
             function variantFilename(fn, kind){
-                const i = fn.lastIndexOf('.');
-                const base = i>0 ? fn.slice(0, i) : fn;
-                const ext  = i>0 ? fn.slice(i) : '';
+                const i = fn.lastIndexOf('.'), base = i>0 ? fn.slice(0, i) : fn, ext  = i>0 ? fn.slice(i) : '';
                 const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
                 return base + suffix + ext;
             }
-
             async function applyPicked(fn, kind){
                 try{
-                const hImg = document.getElementById('image_existing_s');
-                if(hImg) hImg.value = fn;
-
-                const hWm = document.getElementById('wm_choice_master');
-                if(hWm) hWm.value = kind;
-
-                const img = document.getElementById('admin-image-preview-s');
-                if(img){
-                    let url = null;
-                    if(typeof _signPreview === 'function'){
-                    try{ url = await _signPreview(fn, kind); }catch(_e){}
+                    const hImg = document.getElementById('image_existing_s'); if(hImg) hImg.value = fn;
+                    const hWm  = document.getElementById('wm_choice_master'); if(hWm)  hWm.value  = kind;
+                    const img = document.getElementById('admin-image-preview-s');
+                    if(img){
+                        let url = null;
+                        if(typeof _signPreview === 'function'){ try{ url = await _signPreview(fn, kind); }catch(_e){} }
+                        if(!url){
+                            const vname = variantFilename(fn, kind);
+                            try{ url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname)); }
+                            catch(_e){ url = img.src; }
+                        }
+                        if(url){
+                            img.src = url; img.setAttribute('data-fullsrc', url);
+                            if(typeof annotateImageMeta==='function'){ if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img); }
+                        }
                     }
-                    if(!url){
-                    const vname = variantFilename(fn, kind);
-                    try{
-                        url = "{{ url_for('admin_media_img', filename='__REPL__') }}".replace('__REPL__', encodeURIComponent(vname));
-                    }catch(_e){
-                        url = img.src;
-                    }
-                    }
-                    if(url){
-                    img.src = url;
-                    img.setAttribute('data-fullsrc', url);
-                    if(typeof annotateImageMeta==='function'){
-                        if(img.complete) annotateImageMeta(img);
-                        else img.onload = ()=> annotateImageMeta(img);
-                    }
-                    }
-                }
                 }catch(_e){}
             }
-
             window.addEventListener('message', (e)=>{
-                const d = e && e.data;
-                if(!d || d.type!=='wm-pick') return;
+                const d = e && e.data; if(!d || d.type!=='wm-pick') return;
                 applyPicked(d.filename, d.kind);
             }, false);
-
             const initImg = document.getElementById('admin-image-preview-s');
             if(initImg){
                 initImg.setAttribute('data-fullsrc', initImg.currentSrc || initImg.src);
-                if(typeof annotateImageMeta==='function'){
-                if(initImg.complete) annotateImageMeta(initImg);
-                else initImg.onload = ()=> annotateImageMeta(initImg);
-                }
+                if(typeof annotateImageMeta==='function'){ if(initImg.complete) annotateImageMeta(initImg); else initImg.onload = ()=> annotateImageMeta(initImg); }
             }
             })();
         </script>
 
-        <!-- ▼ 以下、従来の店舗入力項目（住所/電話/休み/営業時間/駐車場/支払方法/備考/タグ/エリア/地図/出典/座標/リンク/追加情報）をそのまま残してください -->
         <label>住所</label><br>
         <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
 
@@ -1037,9 +868,7 @@
         <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
         <div class="row">
             {% for area in area_opts %}
-            <label style="min-width:unset;">
-            <input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}
-            </label>
+            <label style="min-width:unset;"><input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}</label>
             {% endfor %}
         </div>
 
@@ -1050,7 +879,7 @@
         <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
 
         <label>出典URL</label><br>
-        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source if entry_edit else '' }}"><br>
+        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
         <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
 
         <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
@@ -1075,19 +904,19 @@
         <div id="extras-list-shop">
             {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
             {% if _extras2.items is defined %}
-            {% for k, v in _extras2.items() %}
-            <div class="extra-row">
-                <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
-                <input name="extras_val[]" value="{{ v }}" placeholder="内容">
-                <button type="button" onclick="this.parentNode.remove()">－</button>
-            </div>
-            {% endfor %}
+                {% for k, v in _extras2.items() %}
+                <div class="extra-row">
+                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
+                {% endfor %}
             {% else %}
-            <div class="extra-row">
-                <input name="extras_key[]" placeholder="項目"> ＝
-                <input name="extras_val[]" placeholder="内容">
-                <button type="button" onclick="this.parentNode.remove()">－</button>
-            </div>
+                <div class="extra-row">
+                    <input name="extras_key[]" placeholder="項目"> ＝
+                    <input name="extras_val[]" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
             {% endif %}
         </div>
         <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-shop')">＋ 行を追加</button>
@@ -1097,7 +926,6 @@
         <button class="add-btn" type="submit">{{ '編集' if edit_id else '登録' }}</button>
     </form>
 
-    <!-- ===== 登録済みデータ（検索・絞り込み・並び替え・ページネーション対応） ===== -->
     <hr>
     <h2 style="margin-bottom:8px;">登録済みデータ</h2>
 
@@ -1127,7 +955,6 @@
             <option value="50">1ページ 50件</option>
         </select>
 
-        <!-- 現在地コントロール -->
         <div class="nearby-ctl">
             <button class="btn" type="button" onclick="startNearby()">現在地から</button>
             <select id="near_radius">
@@ -1293,7 +1120,7 @@
 <script>
 /* サーバの画像URLテンプレート（必要なら上書き）
    例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
-   今回はデフォルトで /admin/media/img/<filename> を想定
+   デフォルトは /admin/media/img/<filename>
 */
 </script>
 </body>
