@@ -72,6 +72,54 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+def safe_url_for(endpoint: str, **values) -> str:
+    """
+    url_for の安全版：リクエストが無いときに落ちない。
+    - 通常: request がある時は普通に url_for
+    - request が無い時: application context で解決を試みる
+    - それも無理なら、よく使う画像系は手動でパスを生成、その他は雑に '/endpoint'
+    """
+    # 1) 通常（リクエストあり）
+    if has_request_context():
+        try:
+            return url_for(endpoint, **values)
+        except Exception:
+            pass
+
+    # 2) リクエストが無くてもアプリコンテキストなら解決（起動時など）
+    try:
+        # app 変数がこの関数より上で定義されている前提
+        from flask import current_app
+        with current_app.app_context():
+            return url_for(endpoint, **values)
+    except Exception:
+        pass
+
+    # 3) 最後のフォールバック（起動時など）
+    if endpoint in ("serve_image", "admin_media_img"):
+        fn = values.get("filename", "")
+        return f"/admin/media/img/{fn}"
+    return "/" + endpoint.replace(".", "/")
+
+def safe_session_get(key, default=None):
+    """request が無い場面では常に default を返す。"""
+    return session.get(key, default) if has_request_context() else default
+
+def safe_request_args():
+    """request.args を安全に返す（無いときは空 dict）。"""
+    return request.args if has_request_context() else {}
+
+def safe_request_form():
+    """request.form を安全に返す（無いときは空 dict）。"""
+    return request.form if has_request_context() else {}
+
+# Jinja から呼べるように登録（テンプレは {{ safe_url_for(...) }} を使えば安全）
+@app.context_processor
+def _inject_safe():
+    return dict(safe_url_for=safe_url_for)
+# ==== /Context-safe helpers ====
+
+
 
 @app.context_processor
 def _inject_template_helpers():
