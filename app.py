@@ -379,21 +379,18 @@ def _wm_choice_from_entries(arg, *, fmt: str = "legacy") -> str | None:
     エントリ既定の透かしモードを返す。
     引数 arg: エントリ dict か 画像ファイル名(文字列)。
     fmt:
-      - "legacy"     -> "fullygoto" / "gotocity" / None（互換）
+      - "legacy"     -> "fullygoto" / "gotocity" / "none" / None   ← ★noneを消さない！
       - "canonical"  -> "fully" / "city" / "none" / None
-
-    返り値:
-      fmtに応じた文字列。見つからない/未設定時は None。
     """
     def _to_fmt(v: str | None) -> str | None:
-        # 既存の正規化関数を流用（'fullygoto'等も 'fully'/'city' に正規化される前提）
-        v = _wm_normalize(v)  # -> 'fully'/'city'/'none'/None
-        if v is None:
+        # 既存の正規化関数を流用（'fullygoto' 等も 'fully'/'city' に正規化される前提）
+        canon = _wm_normalize(v)  # -> 'fully'/'city'/'none'/None
+        if canon is None:
             return None
-        if fmt == "legacy":
-            return {"fully": "fullygoto", "city": "gotocity", "none": None}.get(v, None)
-        # canonical
-        return v  # 'fully'/'city'/'none'
+        if fmt == "canonical":
+            return canon
+        # legacy 文字列に変換（none は None にしない！）
+        return {"fully": "fullygoto", "city": "gotocity", "none": "none"}[canon]
 
     try:
         # 1) dict 直接
@@ -403,7 +400,7 @@ def _wm_choice_from_entries(arg, *, fmt: str = "legacy") -> str | None:
             if v is not None:
                 return v
 
-            # 旧互換のブール群（どれか真なら city を既定、偽なら none）
+            # 旧互換のブール群（どれか真なら city 既定、偽なら none）
             legacy_flag = (
                 arg.get("wm_external")
                 or arg.get("wm_ext_fully")
@@ -411,7 +408,7 @@ def _wm_choice_from_entries(arg, *, fmt: str = "legacy") -> str | None:
             )
             if isinstance(legacy_flag, bool):
                 return _to_fmt("city" if legacy_flag else "none")
-            if legacy_flag:  # 真偽値以外の真も city 既定に寄せる
+            if legacy_flag:  # 真偽値以外の真も city に寄せる
                 return _to_fmt("city")
 
             # さらに旧UIの 'wm_on'（真=city/偽=none）
@@ -529,32 +526,57 @@ def _infer_mimetype(path: str) -> tuple[str, str]:
     return "PNG", "image/png"
 
 
-# === Watermark helpers (ADD) ================================================
+
+# === Watermark normalize (UNIFIED) ==========================================
+# すべて「canonical」な 3値に正規化します: 'fully' / 'city' / 'none' / None
+WM_CANON_MAP = {
+    # canonical 直指定
+    "fully": "fully",
+    "city": "city",
+    "none": "none",
+
+    # legacy / 略記
+    "fullygoto": "fully",
+    "fg": "fully",
+    "gotocity": "city",
+    "gc": "city",
+
+    # 真偽系ゆらぎ
+    "1": "city",
+    "true": "city",
+    "on": "city",
+    "yes": "city",
+    "0": "none",
+    "false": "none",
+    "off": "none",
+    "no": "none",
+    "": "none",
+}
+
 def _wm_normalize(v) -> str | None:
     """
-    透かしモードの正規化:
-      入力: "fullygoto"/"gotocity"/"fully"/"city"/"1"/True/False/"none"... など
-      出力: "fullygoto" / "gotocity" / None
+    入力ゆらぎを 'fully' / 'city' / 'none' / None に正規化。
     """
     if v is None:
         return None
     if isinstance(v, bool):
-        return "gotocity" if v else None
-    s = str(v).strip().lower()
-    if s in {"fullygoto", "fully"}:
+        return "city" if v else "none"
+    return WM_CANON_MAP.get(str(v).strip().lower(), None)
+
+def _wm_to_legacy(kind: str | None) -> str | None:
+    """
+    canonical -> legacy へ変換:
+      'fully' -> 'fullygoto'
+      'city'  -> 'gotocity'
+      'none'/None -> None
+    """
+    if kind == "fully":
         return "fullygoto"
-    if s in {"gotocity", "city"}:
+    if kind == "city":
         return "gotocity"
-    if s in {"1", "true", "on", "yes"}:
-        return "gotocity"
-    if s in {"0", "false", "off", "none", ""}:
+    if kind == "none" or kind is None:
         return None
-    # 未知値は保守的に None
     return None
-
-
-# ============================================================================
-
 
 
 @app.route("/media/img/<path:filename>")
@@ -616,25 +638,17 @@ def serve_image(filename):
                 pass
         return True
 
-    # --- entriesから既定wmを引く（外部があれば利用） ---
+    # --- entriesから既定wmを引く（グローバル実装に委譲） ---
     def _wm_choice_from_entries_local(basename: str) -> str | None:
-        if "_wm_choice_from_entries" in globals():
-            try:
-                return globals()["_wm_choice_from_entries"](basename)
-            except Exception:
-                pass
+        """
+        返り値は legacy 形式:
+        'fullygoto' / 'gotocity' / 'none' / None
+        """
         try:
-            entries = load_entries()
-            for e in entries:
-                img = (e.get("image_file") or e.get("image") or "").strip()
-                if img and os.path.basename(img) == basename:
-                    raw = e.get("wm_external_choice")
-                    if raw is None:
-                        raw = "fullygoto" if e.get("wm_on", True) else "none"
-                    return _normalize_wm_choice_local(raw, wm_on_default=True)
+            return _wm_choice_from_entries(basename, fmt="legacy")
         except Exception:
-            pass
-        return None
+            app.logger.exception("wm choice lookup failed (local)")
+            return None
 
     # --- 透かし合成（内蔵。サムネ時は大きめ比率） ---
     def _compose_watermark_local(pil_image, mode: str):
@@ -4697,18 +4711,6 @@ WM_CANON_MAP = {
     "fullygoto": "fully",
     "gotocity": "city",
 }
-
-def _wm_normalize(v) -> str | None:
-    """
-    透かしモードの入力値を正規化して 'none' / 'fully' / 'city' のいずれかにする。
-    不明値は None を返す（呼び出し側で既定値を決める）。
-    """
-    if v is None:
-        return None
-    s = str(v).strip().lower()
-    if s in {"true","false"}:
-        return "fully" if (s == "true") else "none"
-    return WM_CANON_MAP.get(s, None)
 
 # =========================
 #  重複統合（タイトル基準）
