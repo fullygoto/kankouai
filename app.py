@@ -279,6 +279,39 @@ def _list_existing_files(order: str = "new") -> list[dict]:
     items.sort(key=lambda x: x["mtime"], reverse=(order == "new"))
     return items
 
+
+# ===== 既存ファイル一覧（派生も含める） ======================================
+_DERIV_SUFFIX_RE = re.compile(r"__(?:none|goto|fullygoto|gotocity|src)\.[^.]+$", re.I)
+
+def list_media_for_grid(order: str = "new", include_derivatives: bool = True) -> list[str]:
+    """
+    /media/img 直下の画像ファイルを列挙して、テンプレートの 'existing' に渡すためのリストを返す。
+    - include_derivatives=True のとき __none / __goto / __fullygoto（__gotocity も許容）を含める
+      False のときはそれらを除外（=元画像だけ）
+    - order: 'new'（更新日時降順） or 'name'（名前昇順）
+    """
+    rows: list[tuple[str, float]] = []
+    for p in MEDIA_DIR.glob("*"):
+        if not p.is_file():
+            continue
+        name = p.name
+        # 画像だけ
+        if (p.suffix or "").lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+            continue
+        if not include_derivatives and _DERIV_SUFFIX_RE.search(name):
+            continue  # 元画像だけに絞る
+        try:
+            rows.append((name, p.stat().st_mtime))
+        except OSError:
+            continue
+
+    if order == "name":
+        rows.sort(key=lambda t: t[0].lower())
+    else:
+        rows.sort(key=lambda t: t[1], reverse=True)
+
+    return [n for n, _ in rows]
+
 def _save_bytes(dst: Path, data: bytes, *, bias_sec: int = 0) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(dst, "wb") as f:
@@ -806,6 +839,28 @@ def serve_image(filename):
         return resp
 
 # ==== /画像配信 =================================================
+
+# --- preview URL helper（admin_media_img が無い環境でも壊れないように） ---
+def _preferred_media_url(fn: str) -> str:
+    try:
+        # 既に admin_media_img があればそれを使う
+        return url_for("admin_media_img", filename=fn)
+    except Exception:
+        # 無い場合は /media/img (=serve_image) を使う
+        return safe_url_for("serve_image", filename=fn)
+
+# --- admin_media_img が未定義なら serve_image へ別名エンドポイントを張る ---
+try:
+    app.add_url_rule(
+        "/admin/media/img/<path:filename>",
+        endpoint="admin_media_img",
+        view_func=serve_image,
+        methods=["GET", "HEAD"]
+    )
+except AssertionError:
+    # 既にあるなら何もしない
+    pass
+
 
 # 別名プレフィックス（環境変数で差し替え可）
 MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img").rstrip("/")
@@ -6104,57 +6159,95 @@ def admin_media_img(filename):
     return send_from_directory(IMAGES_DIR, filename, as_attachment=False)
 
 
-# === 新規アップロード→透かし生成→保存（必ず既存ファイル群に残す） ===
+
+# === 新規アップロード→透かし生成→保存（統一版） ============================
 @app.post("/admin/_watermark_generate")
 @login_required
 def admin_watermark_generate():
     """
-    1) 新規アップロードされた画像を /media/img に保存（元画像も残す）
-    2) fullygoto / gotocity の透かし焼き込み画像を“実体として”保存
-    3) mtime を最新に調整（order=new で常に一番上に来る）
-    4) ダブル透かしを避けるため、返すURLは wm=none を付けて返す
+    フロントの「新規だけ即時生成」ボタン専用。
+    1) アップロード画像を回転補正・リサイズ・形式正規化して保存（md5名）
+    2) gotocity / fullygoto の派生を作って保存
+    3) 一覧へ即時差し込み用の saved を返す
+       ※ 返却URLは必ず wm=none を付け、ダブル透かしを防ぐ
+    返却: {"ok": true, "saved":[{"name":..., "kind":"src|gotocity|fullygoto","url":"..."}]}
     """
-    f = request.files.get("file")
-    if not f:
+    import io as _io
+    file = request.files.get("file")
+    if not file or not file.filename:
         return jsonify(ok=False, error="file required"), 400
 
-    safe = secure_filename(f.filename or "upload.jpg")
-    # かぶり防止にミリ秒タイムスタンプを付与
-    base_name = f"{int(time.time()*1000)}_{safe}"
-    src_path = MEDIA_DIR / base_name
+    # 入力拡張子チェック（任意：.jpeg を .jpg に寄せる）
+    ext_in = (os.path.splitext(file.filename)[1] or "").lower()
+    if ext_in == ".jpeg":
+        ext_in = ".jpg"
+    if ext_in not in {".jpg", ".png", ".webp"}:
+        return jsonify(ok=False, error="unsupported file type"), 400
 
-    # 1) 元画像を保存
-    f.stream.seek(0)
-    _save_bytes(src_path, f.stream.read(), bias_sec=0)
-
+    # 1) 正規化（回転補正＋長辺リサイズ＋形式統一）
     try:
-        # 2) 透かし画像（2種）を作って保存
-        bytes_fully, ext_fully = _render_watermark_bytes(src_path, "fullygoto")
-        bytes_city,  ext_city  = _render_watermark_bytes(src_path, "gotocity")
+        raw = file.read()
+        if not raw:
+            return jsonify(ok=False, error="empty file"), 400
 
-        fn_fully = _wm_variant_name(base_name, "fullygoto", out_ext=ext_fully)
-        fn_city  = _wm_variant_name(base_name, "gotocity",  out_ext=ext_city)
+        im = Image.open(_io.BytesIO(raw))
+        im = ImageOps.exif_transpose(im).convert("RGBA")
 
-        _save_bytes(MEDIA_DIR / fn_fully, bytes_fully, bias_sec=+1)
-        _save_bytes(MEDIA_DIR / fn_city,  bytes_city,  bias_sec=+2)
+        MAXW = int(os.getenv("UPLOAD_MAX_W", "2560"))
+        MAXH = int(os.getenv("UPLOAD_MAX_H", "2560"))
+        w, h = im.size
+        r = min(MAXW / w, MAXH / h, 1.0)
+        if r < 1.0:
+            im = im.resize((int(w * r), int(h * r)), RESAMPLE_LANCZOS)
 
+        buf = _io.BytesIO()
+        # WEBP→JPEG など、LINE互換も考慮して JPEG/PNG に正規化
+        if ext_in in {".jpg", ".webp"}:
+            im.convert("RGB").save(
+                buf, format="JPEG",
+                quality=int(os.getenv("WM_JPEG_QUALITY", "88")),
+                optimize=True, progressive=True, subsampling=2
+            )
+            out_ext = ".jpg"
+        else:
+            im.save(buf, format="PNG", optimize=True)
+            out_ext = ".png"
+
+        buf.seek(0)
+        normalized_bytes = buf.getvalue()
+    except UnidentifiedImageError:
+        return jsonify(ok=False, error="invalid image"), 400
     except Exception as e:
-        app.logger.exception("watermark render failed")
-        return jsonify(ok=False, error=f"render failed: {e}"), 500
+        app.logger.exception("upload normalize failed: %s", e)
+        return jsonify(ok=False, error="normalize failed"), 500
 
-    # 3) 返却（管理画面の即時prepend用）— 既に保存済みの実体URLを返す
-    #    ダブル透かし防止のため wm=none を明示
+    # 2) md5名で保存（先頭に来るよう mtime を少し進める）
+    md5 = hashlib.md5(normalized_bytes).hexdigest()
+    base_name = md5 + out_ext
+    base_path = MEDIA_DIR / base_name
+    if not base_path.exists():
+        _save_bytes(base_path, normalized_bytes, bias_sec=+1)
+
+    # 返すURLは常に wm=none（ダブル透かし防止）
     def _u(fn: str) -> str:
         try:
             return safe_url_for("serve_image", filename=fn, _external=True, _sign=True, wm="none")
         except Exception:
             return url_for("serve_image", filename=fn, _external=True) + "?wm=none"
 
-    return jsonify(ok=True, saved=[
-        {"name": base_name, "kind": "src",       "url": _u(base_name)},
-        {"name": fn_fully,  "kind": "fullygoto", "url": _u(fn_fully)},
-        {"name": fn_city,   "kind": "gotocity",  "url": _u(fn_city)},
-    ])
+    saved = [{"name": base_name, "kind": "src", "url": _u(base_name)}]
+
+    # 3) 派生（@Goto City / @fullyGOTO）も“実体ファイル”として作成・保存
+    for kind in ("gotocity", "fullygoto"):
+        try:
+            wm_bytes, out_ext2 = _render_watermark_bytes(base_path, kind)
+            deriv_name = _wm_variant_name(base_name, kind, out_ext=out_ext2)
+            _save_bytes(MEDIA_DIR / deriv_name, wm_bytes, bias_sec=+2)
+            saved.append({"name": deriv_name, "kind": kind, "url": _u(deriv_name)})
+        except Exception as e:
+            app.logger.exception("watermark build failed: kind=%s base=%s", kind, base_name)
+
+    return jsonify(ok=True, saved=saved)
 
 
 @app.route("/shop/entry", methods=["GET", "POST"])
