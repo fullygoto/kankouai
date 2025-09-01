@@ -5828,56 +5828,54 @@ def admin_entry():
         }
         new_entry = _norm_entry(new_entry)
 
-        # === 画像アップロード/削除（変更なしなら前画像を必ず維持） ===
+        # === 画像アップロード/削除（フォルダ選択の反映を最優先 + 変更なしなら前画像維持） ===
+        selected_image = (request.form.get("selected_image") or "").strip()  # フォルダ/ギャラリーで選んだ元画像名
+        wm_choice = _normalize_wm_choice(request.form.get("wm_external_choice"))
+        if wm_choice is not None:
+            new_entry["wm_external_choice"] = wm_choice  # 透かし種別を反映
+
         upload = request.files.get("image_file")
         delete_flag = (request.form.get("image_delete") == "1")
-        # ★ 追加：ピッカー／ギャラリーで選んだ既存ファイル名（フォールバック用）
-        selected_from_ui = (request.form.get("selected_image") or request.form.get("image_existing") or "").strip()
+
         try:
             result = _save_jpeg_1080_350kb(upload, previous=prev_img, delete=delete_flag)
         except RequestEntityTooLarge:
-            flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
-            # ★ エラー時も編集中行を維持
-            if idx_edit is not None:
-                return redirect(url_for("admin_entry", edit=idx_edit))
-            return redirect(url_for("admin_entry"))
-        except Exception:
+            flash("画像が大きすぎます（10MB以内にしてください）")
             result = None
-            app.logger.exception("image handler failed")
+        except Exception:
+            app.logger.exception("image save failed on /admin/entry")
+            result = None
 
         if result is None:
-            # ★ アップロードなし → ピッカーで選んだファイル名があればそれを優先採用
-            if selected_from_ui:
-                new_entry["image_file"] = selected_from_ui
-                new_entry["image"] = selected_from_ui
+            # アップロード無し
+            if selected_image:
+                # ← フォルダ/ギャラリーで選択された画像を採用
+                new_entry["image_file"] = selected_image
+                new_entry["image"]      = selected_image
                 try:
-                    _ensure_wm_variants(selected_from_ui)
+                    _ensure_wm_variants(selected_image)
                 except Exception:
-                    app.logger.exception("[wm] backfill variants failed for %s", selected_from_ui)
-
-            # ★ 何も選んでいなければ前の画像を維持（削除指示がない限り）
+                    app.logger.exception("[wm] ensure variants failed for selected %s", selected_image)
             elif prev_img and not delete_flag:
+                # ← 何も変えていなければ以前の画像を維持
                 new_entry["image_file"] = prev_img
-                new_entry["image"] = prev_img
+                new_entry["image"]      = prev_img
                 try:
                     _ensure_wm_variants(prev_img)
                 except Exception:
-                    app.logger.exception("[wm] backfill variants failed for %s", prev_img)
-
+                    app.logger.exception("[wm] ensure variants failed for prev %s", prev_img)
         elif result == "":
-            # 明示削除
+            # 削除ボタン
             new_entry.pop("image_file", None)
             new_entry.pop("image", None)
-
         else:
-            # 置換/新規保存
+            # 新規アップロード成功
             new_entry["image_file"] = result
-            new_entry["image"] = result
-            # ▼ ここを追加（新しい画像の3種を事前生成）
+            new_entry["image"]      = result
             try:
                 _ensure_wm_variants(result)
             except Exception:
-                app.logger.exception("[wm] variants generation failed for %s", result)
+                app.logger.exception("[wm] ensure variants failed for uploaded %s", result)
 
         # === 緯度・経度（raw/lat/lng/map を総合して決定、片側空は前回値を継承） ===
         lat, lng = _normalize_latlng(
@@ -6167,10 +6165,10 @@ def _wm_save_jpeg(im: Image.Image, out_path: str, quality: int = 90):
 def _admin_media_img_impl(filename: str):
     # 派生ファイルはダブル透かし防止で wm=none、元画像はプレビュー用に wm=1
     low = (filename or "").lower()
-    if ("__gotocity" in low) or ("__fullygoto" in low) or ("__none" in low):
+    if any(s in low for s in ("__goto", "__gotocity", "__fullygoto", "__none")):
         wm = "none"
     else:
-        wm = "1"  # 一覧サムネは簡易透かし付き
+        wm = "1"
     # 署名付きURLに 302 リダイレクト（実体配信は serve_image が担当）
     return redirect(
         safe_url_for("serve_image", filename=filename, _sign=True, wm=wm)
