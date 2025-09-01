@@ -74,35 +74,35 @@ app = Flask(__name__)
 
 def safe_url_for(endpoint: str, **values) -> str:
     """
-    url_for の安全版：リクエストが無いときに落ちない。
-    - 通常: request がある時は普通に url_for
-    - request が無い時: application context で解決を試みる
-    - それも無理なら、よく使う画像系は手動でパスを生成、その他は雑に '/endpoint'
+    url_for の安全版：リクエストが無い場面でも落ちない。
+    1) リクエスト中 → 普通に url_for
+    2) リクエスト外 → app.app_context() で解決
+    3) それでも無理 → 代表的エンドポイントは手組み、それ以外は /endpoint
     """
-    # 1) 通常（リクエストあり）
+    # 1) リクエスト中
     if has_request_context():
         try:
             return url_for(endpoint, **values)
         except Exception:
             pass
 
-    # 2) リクエストが無くてもアプリコンテキストなら解決（起動時など）
+    # 2) リクエスト外（起動直後など）
     try:
-        # app 変数がこの関数より上で定義されている前提
-        from flask import current_app
-        with current_app.app_context():
+        # モジュールグローバルの app を使ってアプリコンテキストを開く
+        with app.app_context():
             return url_for(endpoint, **values)
     except Exception:
         pass
 
-    # 3) 最後のフォールバック（起動時など）
+    # 3) 最後のフォールバック
     if endpoint in ("serve_image", "admin_media_img"):
         fn = values.get("filename", "")
+        # どちらでも動くように admin 側URLを優先（存在しない環境でも 404 にならない相対形式）
         return f"/admin/media/img/{fn}"
     return "/" + endpoint.replace(".", "/")
 
 def safe_session_get(key, default=None):
-    """request が無い場面では常に default を返す。"""
+    """リクエスト外では default を返す。"""
     return session.get(key, default) if has_request_context() else default
 
 def safe_request_args():
@@ -113,13 +113,20 @@ def safe_request_form():
     """request.form を安全に返す（無いときは空 dict）。"""
     return request.form if has_request_context() else {}
 
-# Jinja から呼べるように登録（テンプレは {{ safe_url_for(...) }} を使えば安全）
+# Jinja から使えるように注入（テンプレで {{ safe_url_for(...) }} が使えます）
 @app.context_processor
-def _inject_safe():
-    return dict(safe_url_for=safe_url_for)
+def _inject_safe_helpers():
+    def has_endpoint(name: str) -> bool:
+        try:
+            return name in app.view_functions
+        except Exception:
+            return False
+    return {
+        "safe_url_for": safe_url_for,
+        "has_endpoint": has_endpoint,
+        "current_app": app,  # 既存テンプレ互換
+    }
 # ==== /Context-safe helpers ====
-
-
 
 @app.context_processor
 def _inject_template_helpers():
@@ -147,14 +154,14 @@ def handle_file_too_large(e):
 # 既に前の回答で入れていれば流用されます
 MYMAP_MID = os.getenv("MYMAP_MID", "")
 
+# これで既存呼び出し元（Flex 生成など）から起動時に呼ばれても安全
 def build_wm_image_urls(filename: str, mode: str | None = None) -> dict:
-    wm_mode = (mode or "fullygoto")  # 既定
+    wm_mode = (mode or "fullygoto")
     ts = str(int(time.time()))
-    base = dict(_external=True, _scheme="https", _sign=True)
-    return {
-        "original": url_for("serve_image", filename=filename, wm=wm_mode, **base) + f"&_ts={ts}",
-        "preview":  url_for("serve_image", filename=filename, wm="thumb",   **base) + f"&_ts={ts}",
-    }
+    # NOTE: _external/_scheme は request が無いと決められないので使わない
+    orig = safe_url_for("serve_image", filename=filename, wm=wm_mode) + f"&_ts={ts}"
+    prev = safe_url_for("serve_image", filename=filename, wm="thumb") + f"&_ts={ts}"
+    return {"original": orig, "preview": prev}
 
 def gmaps_url(*, name:str="", address:str="", lat:float|None=None, lng:float|None=None, place_id:str|None=None) -> str:
     base = "https://www.google.com/maps/search/?api=1"
