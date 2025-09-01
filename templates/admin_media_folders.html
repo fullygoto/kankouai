@@ -105,15 +105,18 @@
       q.addEventListener('input', filter);
       updateCounts();
 
-      // ピッカー（このウィンドウがサブで開かれている前提）
+      // ✅ ピッカー（親へ返すURLはプレースホルダ置換で正しく生成）
       grid.addEventListener('click', (e)=>{
         const btn = e.target.closest('[data-pick]');
         if(!btn) return;
         const name = btn.getAttribute('data-pick');
-        const base = "{{ safe_url_for('serve_image', filename='', _sign=True) }}";
-        const url  = base + encodeURIComponent(name);
+
+        // 署名付き serve_image のテンプレ（__NAME__ を置換）
+        const tmpl = "{{ safe_url_for('serve_image', filename='__NAME__', _sign=True) }}";
+        const url  = tmpl.replace('__NAME__', encodeURIComponent(name));
+
         try{
-          window.opener && window.opener.postMessage({ type:'media-pick', files:[name], urls:[url] }, '*');
+          window.opener && window.opener.postMessage({ type:'media-pick', files:[name], urls:[url] }, location.origin);
         }catch(_){}
         // ピッカー用途なら閉じる（通常は閉じない）
         if(new URLSearchParams(location.search).get('picker') === '1'){
