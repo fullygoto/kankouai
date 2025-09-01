@@ -83,9 +83,11 @@
         </label>
       </div>
 
-      <div class="row">
+      <div class="row flex">
         <button class="btn" type="submit">生成する</button>
-        <span class="muted">※ 下の「既存ファイルにチェック」＋「新規アップロード」の両方を同時に処理できます。</span>
+        <button class="btn ghost" type="button" id="btnUploadOnly">新規だけ即時生成</button>
+        <span id="upStatus" class="muted"></span>
+        <span class="muted">※ 「新規だけ即時生成」はアップロード分を保存→一覧の先頭に即時追加します（既存のチェック処理は行いません）。</span>
       </div>
 
       <hr>
@@ -177,7 +179,7 @@
       const q = document.getElementById('q');
       const orderSel = document.getElementById('order');
       const grid = document.getElementById('grid');
-      const cards = Array.from(grid.querySelectorAll('.card'));
+      function getCards(){ return Array.from(grid.querySelectorAll('.card')); }
       const totalCount = document.getElementById('totalCount');
       const shownCount = document.getElementById('shownCount');
       const selectedCount = document.getElementById('selectedCount');
@@ -186,17 +188,96 @@
       const picker = {{ 1 if picker else 0 }};
       const subdir = "{{ _subdir }}";
 
+      // ===== 追加: 即時生成の設定 =====
+      const endpointUpload = "/admin/_watermark_generate"; // サーバ側の新API
+      const upBtn = document.getElementById('btnUploadOnly');
+      const upStatus = document.getElementById('upStatus');
+      const imgBase  = "{{ url_for('admin_media_img', filename='') }}";
+      const editBase = "{{ url_for('admin_watermark_one') }}"; // ?src=... を付ける
+
+      function buildCard(name, previewUrl){
+        const div = document.createElement('div');
+        div.className = 'card';
+        div.dataset.name = (name || '').toLowerCase();
+        const editHref = editBase + (editBase.includes('?') ? '&' : '?') + 'src=' + encodeURIComponent(name);
+        div.innerHTML = `
+          <label class="sel">
+            <input type="checkbox" name="selected_existing" value="${name}">
+            <span class="name">${name}</span>
+          </label>
+          <div class="small muted">プレビュー</div>
+          <img class="thumb" src="${previewUrl}" loading="lazy" alt="${name}">
+          <div class="card-actions">
+            <a class="btn small" href="${editHref}">編集</a>
+            <button class="btn ghost small" type="button" data-del="${name}">削除</button>
+          </div>
+        `;
+        return div;
+      }
+
+      function prependSaved(list){
+        const order = { "gotocity": 0, "fullygoto": 1, "src": 2 };
+        (list || []).sort((a,b)=> (order[a.kind] ?? 9) - (order[b.kind] ?? 9));
+        for(const it of list){
+          const preview = it.url || (imgBase + encodeURIComponent(it.name));
+          grid.prepend(buildCard(it.name, preview));
+        }
+        // 件数/表示更新
+        updateCounts();
+        filter();
+        // 一番上までスクロール（任意）
+        // window.scrollTo({top:0, behavior:'smooth'});
+      }
+
+      async function uploadOne(file){
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await fetch(endpointUpload, { method:'POST', body: fd, credentials: 'same-origin' });
+        if(!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+        if(!j.ok) throw new Error(j.error || 'upload failed');
+        return j; // {ok:true, saved:[{name,kind,url},...]}
+      }
+
+      if(upBtn){
+        upBtn.addEventListener('click', async ()=>{
+          const input = document.querySelector('input[name="files"]');
+          const files = Array.from((input && input.files) || []);
+          if(!files.length){ if(upStatus) upStatus.textContent = 'ファイルを選んでください'; return; }
+
+          upBtn.disabled = true;
+          if(upStatus) upStatus.textContent = 'アップロード中…';
+
+          let ok = 0, ng = 0;
+          for(const f of files){
+            try{
+              const j = await uploadOne(f);
+              prependSaved(j.saved || []);
+              ok++;
+            }catch(e){
+              console.error(e);
+              ng++;
+            }
+          }
+          if(upStatus) upStatus.textContent = ng ? `完了（成功 ${ok} / 失敗 ${ng}）` : `完了（${ok}件）`;
+          if(input) input.value = '';
+          setTimeout(()=>{ if(upStatus) upStatus.textContent=''; upBtn.disabled=false; }, 1200);
+        });
+      }
+      // ===== /追加: 即時生成 =====
+
       function updateCounts(){
-        if(totalCount) totalCount.textContent = cards.length;
+        const all = getCards();
+        if(totalCount) totalCount.textContent = all.length;
         let shown = 0;
-        for(const c of cards){ if(c.style.display !== 'none'){ shown++; } }
+        for(const c of all){ if(c.style.display !== 'none'){ shown++; } }
         if(shownCount) shownCount.textContent = shown;
         if(selectedCount) selectedCount.textContent = grid.querySelectorAll('input[name="selected_existing"]:checked').length;
       }
 
       function filter(){
         const term = (q && q.value || '').trim().toLowerCase();
-        for(const c of cards){
+        for(const c of getCards()){
           const name = c.dataset.name || '';
           const match = !term || name.includes(term);
           c.style.display = match ? '' : 'none';
@@ -205,7 +286,7 @@
       }
 
       function selectVisible(v=true){
-        for(const c of cards){
+        for(const c of getCards()){
           if(c.style.display !== 'none'){
             const cb = c.querySelector('input[name="selected_existing"]');
             if(cb) cb.checked = v;
