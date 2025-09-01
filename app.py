@@ -25,7 +25,8 @@ load_dotenv()
 
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session,
-    jsonify, send_file, abort, send_from_directory, render_template_string, Response
+    jsonify, send_file, abort, send_from_directory, render_template_string, Response,
+    current_app as _flask_current_app,  # ← これを追加
 )
 
 from werkzeug.exceptions import RequestEntityTooLarge, NotFound
@@ -71,6 +72,19 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+
+@app.context_processor
+def _inject_template_helpers():
+    def has_endpoint(name: str) -> bool:
+        try:
+            return name in app.view_functions
+        except Exception:
+            return False
+    # current_app も使えるように入れておく（既存テンプレ互換）
+    return {
+        "current_app": _flask_current_app,
+        "has_endpoint": has_endpoint,
+    }
 
 # 10MB上限（Flaskがリクエストボディで制御）
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB
