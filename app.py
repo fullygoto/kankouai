@@ -849,18 +849,6 @@ def _preferred_media_url(fn: str) -> str:
         # 無い場合は /media/img (=serve_image) を使う
         return safe_url_for("serve_image", filename=fn)
 
-# --- admin_media_img が未定義なら serve_image へ別名エンドポイントを張る ---
-try:
-    app.add_url_rule(
-        "/admin/media/img/<path:filename>",
-        endpoint="admin_media_img",
-        view_func=serve_image,
-        methods=["GET", "HEAD"]
-    )
-except AssertionError:
-    # 既にあるなら何もしない
-    pass
-
 
 # 別名プレフィックス（環境変数で差し替え可）
 MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img").rstrip("/")
@@ -6151,12 +6139,27 @@ def _wm_save_jpeg(im: Image.Image, out_path: str, quality: int = 90):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     im.save(out_path, format="JPEG", quality=quality, optimize=True)
 
-@app.route("/admin/_media_img/<path:filename>")
-@login_required
-def admin_media_img(filename):
-    """IMAGES_DIR 配下の生成物をそのまま配信（管理者/関係者向けプレビュー用）"""
-    # IMAGES_DIR は既存の画像保存ディレクトリを想定
-    return send_from_directory(IMAGES_DIR, filename, as_attachment=False)
+# === 管理プレビュー用 admin_media_img（重複安全・ダブル透かし防止） ===
+def _admin_media_img_impl(filename: str):
+    # 派生ファイルはダブル透かし防止で wm=none、元画像はプレビュー用に wm=1
+    low = (filename or "").lower()
+    if ("__gotocity" in low) or ("__fullygoto" in low) or ("__none" in low):
+        wm = "none"
+    else:
+        wm = "1"  # 一覧サムネは簡易透かし付き
+    # 署名付きURLに 302 リダイレクト（実体配信は serve_image が担当）
+    return redirect(
+        safe_url_for("serve_image", filename=filename, _sign=True, wm=wm)
+    )
+
+# 既に登録済みなら追加しない（重複エラー回避）
+if "admin_media_img" not in app.view_functions:
+    app.add_url_rule(
+        "/admin/_media_img/<path:filename>",
+        endpoint="admin_media_img",
+        view_func=login_required(_admin_media_img_impl),
+        methods=["GET"]
+    )
 
 
 
