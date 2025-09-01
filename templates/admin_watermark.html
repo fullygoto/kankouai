@@ -90,6 +90,35 @@
         <span class="muted">※ 「新規だけ即時生成」はアップロード分を保存→一覧の先頭に即時追加します（既存のチェック処理は行いません）。</span>
       </div>
 
+      <!-- ▼▼▼ 既存一覧より上：作成結果 ▼▼▼ -->
+      {% if results and results|length %}
+        <hr>
+        <h2 style="margin:0 0 8px">作成結果</h2>
+        <div class="grid">
+          {% for r in results %}
+            <div class="card">
+              <div class="small muted">元画像</div>
+              <a href="{{ r.url_src }}" target="_blank" rel="noopener"><img src="{{ r.url_src }}" loading="lazy" alt="src"></a>
+              <div class="name">{{ r.src }}</div>
+
+              {% if r.url_none %}
+                <div class="small muted" style="margin-top:10px">透かし：なし（__none）</div>
+                <a href="{{ r.url_none }}" target="_blank" rel="noopener"><img src="{{ r.url_none }}" loading="lazy" alt="none"></a>
+              {% endif %}
+              {% if r.url_goto %}
+                <div class="small muted" style="margin-top:10px">透かし：＠Goto City（__goto）</div>
+                <a href="{{ r.url_goto }}" target="_blank" rel="noopener"><img src="{{ r.url_goto }}" loading="lazy" alt="goto"></a>
+              {% endif %}
+              {% if r.url_fully %}
+                <div class="small muted" style="margin-top:10px">透かし：＠fullyGOTO（__fullygoto）</div>
+                <a href="{{ r.url_fully }}" target="_blank" rel="noopener"><img src="{{ r.url_fully }}" loading="lazy" alt="fully"></a>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+      <!-- ▲▲▲ 作成結果ここまで ▲▲▲ -->
+
       <hr>
 
       <h2 style="margin:0 0 8px">既存ファイルから選ぶ</h2>
@@ -142,33 +171,6 @@
       <input type="hidden" name="q"        id="delQ"      value="{{ q|e }}">
     </form>
 
-    {% if results and results|length %}
-      <hr>
-      <h2 style="margin:0 0 8px">作成結果</h2>
-      <div class="grid">
-        {% for r in results %}
-          <div class="card">
-            <div class="small muted">元画像</div>
-            <a href="{{ r.url_src }}" target="_blank" rel="noopener"><img src="{{ r.url_src }}" loading="lazy" alt="src"></a>
-            <div class="name">{{ r.src }}</div>
-
-            {% if r.url_none %}
-              <div class="small muted" style="margin-top:10px">透かし：なし（__none）</div>
-              <a href="{{ r.url_none }}" target="_blank" rel="noopener"><img src="{{ r.url_none }}" loading="lazy" alt="none"></a>
-            {% endif %}
-            {% if r.url_goto %}
-              <div class="small muted" style="margin-top:10px">透かし：＠Goto City（__goto）</div>
-              <a href="{{ r.url_goto }}" target="_blank" rel="noopener"><img src="{{ r.url_goto }}" loading="lazy" alt="goto"></a>
-            {% endif %}
-            {% if r.url_fully %}
-              <div class="small muted" style="margin-top:10px">透かし：＠fullyGOTO（__fullygoto）</div>
-              <a href="{{ r.url_fully }}" target="_blank" rel="noopener"><img src="{{ r.url_fully }}" loading="lazy" alt="fully"></a>
-            {% endif %}
-          </div>
-        {% endfor %}
-      </div>
-    {% endif %}
-
     <div class="row" style="margin-top:18px">
       <a class="btn ghost" href="{{ url_for('admin_entry') }}">← 観光データ管理に戻る</a>
     </div>
@@ -179,7 +181,8 @@
       const q = document.getElementById('q');
       const orderSel = document.getElementById('order');
       const grid = document.getElementById('grid');
-      function getCards(){ return Array.from(grid.querySelectorAll('.card')); }
+      const getCards = ()=> Array.from(grid.querySelectorAll('.card'));
+
       const totalCount = document.getElementById('totalCount');
       const shownCount = document.getElementById('shownCount');
       const selectedCount = document.getElementById('selectedCount');
@@ -188,8 +191,8 @@
       const picker = {{ 1 if picker else 0 }};
       const subdir = "{{ _subdir }}";
 
-      // ===== 追加: 即時生成の設定 =====
-      const endpointUpload = "/admin/_watermark_generate"; // サーバ側の新API
+      // ===== 即時生成（新規だけ） =====
+      const endpointUpload = "/admin/_watermark_generate"; // サーバ側のAPI（既に実装済み想定）
       const upBtn = document.getElementById('btnUploadOnly');
       const upStatus = document.getElementById('upStatus');
       const imgBase  = "{{ url_for('admin_media_img', filename='') }}";
@@ -216,17 +219,14 @@
       }
 
       function prependSaved(list){
-        const order = { "gotocity": 0, "fullygoto": 1, "src": 2 };
-        (list || []).sort((a,b)=> (order[a.kind] ?? 9) - (order[b.kind] ?? 9));
-        for(const it of list){
+        // APIが返す saved: [{name, kind, url?}, ...] を想定
+        // 返ってきた順を保ったまま先頭に積む
+        for(const it of list || []){
           const preview = it.url || (imgBase + encodeURIComponent(it.name));
           grid.prepend(buildCard(it.name, preview));
         }
-        // 件数/表示更新
         updateCounts();
         filter();
-        // 一番上までスクロール（任意）
-        // window.scrollTo({top:0, behavior:'smooth'});
       }
 
       async function uploadOne(file){
@@ -236,7 +236,7 @@
         if(!res.ok) throw new Error('HTTP ' + res.status);
         const j = await res.json();
         if(!j.ok) throw new Error(j.error || 'upload failed');
-        return j; // {ok:true, saved:[{name,kind,url},...]}
+        return j; // {ok:true, saved:[{name,kind,url},...] }
       }
 
       if(upBtn){
@@ -264,20 +264,21 @@
           setTimeout(()=>{ if(upStatus) upStatus.textContent=''; upBtn.disabled=false; }, 1200);
         });
       }
-      // ===== /追加: 即時生成 =====
+      // ===== /即時生成 =====
 
       function updateCounts(){
-        const all = getCards();
-        if(totalCount) totalCount.textContent = all.length;
+        const cards = getCards();
+        if(totalCount) totalCount.textContent = cards.length;
         let shown = 0;
-        for(const c of all){ if(c.style.display !== 'none'){ shown++; } }
+        for(const c of cards){ if(c.style.display !== 'none'){ shown++; } }
         if(shownCount) shownCount.textContent = shown;
         if(selectedCount) selectedCount.textContent = grid.querySelectorAll('input[name="selected_existing"]:checked').length;
       }
 
       function filter(){
+        const cards = getCards();
         const term = (q && q.value || '').trim().toLowerCase();
-        for(const c of getCards()){
+        for(const c of cards){
           const name = c.dataset.name || '';
           const match = !term || name.includes(term);
           c.style.display = match ? '' : 'none';
@@ -286,7 +287,8 @@
       }
 
       function selectVisible(v=true){
-        for(const c of getCards()){
+        const cards = getCards();
+        for(const c of cards){
           if(c.style.display !== 'none'){
             const cb = c.querySelector('input[name="selected_existing"]');
             if(cb) cb.checked = v;
@@ -326,7 +328,7 @@
           const files = Array.from(document.querySelectorAll('input[name="selected_existing"]:checked')).map(cb=>cb.value);
           const base = '{{ url_for('admin_media_img', filename='') }}';
           const urls = files.map(fn => base + encodeURIComponent(fn));
-          try{ window.opener && window.opener.postMessage({ type:'media-pick', files, urls }, '*'); }catch(_){/* ignore */}
+          try{ window.opener && window.opener.postMessage({ type:'media-pick', files, urls }, '*'); }catch(_){/* ignore */ }
           window.close();
         });
       }
