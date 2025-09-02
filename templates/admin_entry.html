@@ -492,7 +492,9 @@
         <button class="btn ghost" type="submit">[再開]</button>
     </form>
     {% if global_paused %}
-        <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">LINE停止中</span>
+    <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">
+        LINE停止中{% if paused_by %}（{{ '管理者' if paused_by=='admin' else 'ユーザー' }}）{% endif %}
+    </span>
     {% endif %}
     </div>
     <h1 style="margin-bottom:20px;">観光データ（管理者モード） {{ '編集' if edit_id else '登録' }}</h1>
