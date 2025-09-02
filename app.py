@@ -223,6 +223,112 @@ def send_viewpoints_map(event):
     url = viewpoints_map_url() or "(展望所マップURLが未設定です)"
     _reply_or_push(event, f"展望所マップはこちら：\n{url}")
 
+
+
+# ======= LINE 応答 停止/再開 管理（管理者優先・利用者次点） =======
+# フラグを2系統に分離：管理者停止(admin) と 利用者停止(user)
+PAUSE_DIR = os.getenv("PAUSE_DIR") or os.path.dirname(__file__)
+PAUSE_FLAG_ADMIN = os.path.join(PAUSE_DIR, "line_paused.admin.flag")
+PAUSE_FLAG_USER  = os.path.join(PAUSE_DIR, "line_paused.user.flag")
+
+def _pause_set_admin(on: bool):
+    """管理者の停止フラグをON/OFF"""
+    try:
+        if on:
+            with open(PAUSE_FLAG_ADMIN, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+        else:
+            if os.path.exists(PAUSE_FLAG_ADMIN):
+                os.remove(PAUSE_FLAG_ADMIN)
+    except Exception:
+        app.logger.exception("pause_set_admin failed")
+
+def _pause_set_user(on: bool):
+    """利用者（メッセージ）の停止フラグをON/OFF（管理者停止が無い場合のみ有効）"""
+    try:
+        if on:
+            with open(PAUSE_FLAG_USER, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+        else:
+            if os.path.exists(PAUSE_FLAG_USER):
+                os.remove(PAUSE_FLAG_USER)
+    except Exception:
+        app.logger.exception("pause_set_user failed")
+
+def _pause_state():
+    """現在の停止状態を確認"""
+    s_admin = os.path.exists(PAUSE_FLAG_ADMIN)
+    s_user  = os.path.exists(PAUSE_FLAG_USER)
+    # 管理者が最優先
+    if s_admin:
+        return True, "admin"
+    if s_user:
+        return True, "user"
+    return False, None
+
+# ---- 利用者メッセージ判定（ゆるめの日本語/英語を網羅） ----
+def _is_pause_cmd(text: str) -> bool:
+    t = re.sub(r"\s+", "", (text or "")).lower()
+    # 代表パターン：「停止」「中止」「ストップ」「とめて」「mute」など
+    return (
+        ("停止" in t) or ("中止" in t) or ("止めて" in t) or ("とめて" in t)
+        or t in {"stop", "mute", "ちゅうし", "ストップ"}
+    )
+
+def _is_resume_cmd(text: str) -> bool:
+    t = re.sub(r"\s+", "", (text or "")).lower()
+    # 代表パターン：「再開」「解除」「続けて」「戻して」「resume」など
+    return (
+        ("再開" in t) or ("解除" in t) or ("続けて" in t) or ("戻して" in t)
+        or t in {"resume", "さいかい"}
+    )
+
+def _line_mute_gate(user_text: str):
+    """
+    LINE 受信時の共通ゲート。
+    戻り値: (is_muted: bool, system_message: Optional[str])
+    - True のときは通常応答をせず、system_message があればそれだけ返信。
+    - False のときは通常処理へ。
+    優先順位：管理者 > 利用者
+    """
+    paused, by = _pause_state()
+
+    # --- 1) 利用者の「再開」 ---
+    if _is_resume_cmd(user_text):
+        if paused and by == "admin":
+            # 管理者が止めている間は、利用者の再開は無効
+            return True, "現在、管理者によって応答が停止されています。管理者が再開するまでお待ちください。"
+        elif paused and by == "user":
+            # 利用者停止のみ → 再開を許可
+            _pause_set_user(False)
+            return False, "了解です。応答を再開します。"
+        else:
+            # もともと動作中
+            return False, None
+
+    # --- 2) 利用者の「停止」 ---
+    if _is_pause_cmd(user_text):
+        if paused and by == "admin":
+            # すでに管理者が停止中
+            return True, "現在、管理者によって応答が停止されています。"
+        else:
+            # 管理者が止めていない時だけ、ユーザー停止を有効化（= 全体停止）
+            _pause_set_user(True)
+            return True, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。"
+
+    # --- 3) 通常メッセージ ---
+    if paused:
+        if by == "admin":
+            # 管理者停止中は沈黙（必要ならワンショット通知に変更可）
+            return True, None
+        else:
+            # 利用者停止中は、案内だけ返して保持
+            return True, "（現在、応答を一時停止しています。「再開」と送ると再開します）"
+
+    return False, None
+# ======= /停止管理ここまで =======
+
+
 # === 透かしON/OFF（Render環境変数をまとめて判定） ===
 def _env_truthy(val: str | None) -> bool:
     if val is None:
@@ -5952,13 +6058,17 @@ def admin_entry():
         e2["__image"] = _image_meta(img_name) if img_name else None
         entries_view.append(e2)
 
+    # 最終表示直前に追加
+    paused, by = _pause_state()
+
     return render_template(
         "admin_entry.html",
         entries=entries_view,
         entry_edit=entry_edit,
         edit_id=edit_id if edit_id not in (None, "", "None") else None,
         role=session.get("role", ""),
-        global_paused=_is_global_paused(),
+        global_paused=paused,   # ← _is_global_paused() の代わりに _pause_state の結果
+        paused_by=by,           # ← 追加：誰が停止中か（'admin' / 'user' / None）
     )
 
 
@@ -6458,7 +6568,13 @@ def admin_entries_edit():
 
     # GET（またはPOSTエラー後の再表示）
     entries = [_norm_entry(x) for x in load_entries()]
-    return render_template("admin_entries_edit.html", entries=entries)
+    paused, by = _pause_state()  # ← 追加
+    return render_template(
+        "admin_entries_edit.html",
+        entries=entries,
+        global_paused=paused,     # ← 追加
+        paused_by=by,             # ← 追加
+    )
 
 
 @app.route("/admin/entries_dedupe", methods=["GET", "POST"])
@@ -7081,24 +7197,21 @@ def internal_backup():
     return jsonify({"ok": True, "saved": path})
 
 
-# LINE 一時停止（管理者のみ）
-@app.route("/admin/line/pause", methods=["POST"])
-@login_required
-def admin_line_pause():
-    _require_admin()  # 既存の管理者チェックを統一利用
-    _set_global_paused(True)
-    flash("LINE応答を一時停止しました（再開するまで完全サイレンス）")
-    return redirect(request.referrer or url_for("admin_entry"))
+# === 管理者ボタン：最優先で停止/再開 ==========================================
+@app.post("/admin/line/pause")
+def admin_line_pause():  # 既存の endpoint 名が admin_line_pause ならそちらに合わせて
+    _pause_set_admin(True)   # 管理者停止ON
+    # 利用者停止はそのままでもOK（残しておく）。必要なら同時に消すなら _pause_set_user(False)
+    flash("LINE応答を一時停止しました（管理者）")
+    return redirect(url_for("admin_entry"))
 
-# LINE 再開（管理者のみ）
-@app.route("/admin/line/resume", methods=["POST"])
-@login_required
-def admin_line_resume():
-    _require_admin()
-    _set_global_paused(False)
-    _clear_paused_notices()   # ★ ここを追加
-    flash("LINE応答を再開しました")
-    return redirect(request.referrer or url_for("admin_entry"))
+@app.post("/admin/line/resume")
+def admin_line_resume():  # 既存の endpoint 名が admin_line_resume ならそちらに合わせて
+    _pause_set_admin(False)  # 管理者停止OFF
+    _pause_set_user(False)   # ついでに利用者停止も全解除（“全ての返事を再開”）
+    flash("LINE応答を再開しました（管理者）")
+    return redirect(url_for("admin_entry"))
+# ============================================================================
 
 @app.route("/admin/line/mutes", methods=["GET","POST"])
 @login_required
