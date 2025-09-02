@@ -2618,6 +2618,12 @@ if 'openai_chat' not in globals():
 
 
 # LINE Bot
+# =========================
+#  LINE Webhook
+# =========================
+from linebot.models import TextSendMessage, LocationMessage, FlexSendMessage, LocationAction, PostbackEvent
+from linebot.exceptions import LineBotApiError
+
 
 # === LINE SDK init (safe) ===
 def _line_enabled() -> bool:
@@ -3296,7 +3302,7 @@ def on_postback(event):
         app.logger.exception(f"on_postback failed: {e}")
         _reply_or_push(event, "うまく処理できませんでした。もう一度お試しください。")
 
-        
+
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
 # === LINE 返信ユーティリティ（安全送信 + エラー計測 + force_push互換） ===
 def _reply_or_push(event, text: str, *, force_push: bool = False):
@@ -9167,13 +9173,6 @@ def admin_unhit_report():
         abort(403)
     report = generate_unhit_report(7)
     return render_template("admin_unhit_report.html", unhit_report=report)
-
-
-# =========================
-#  LINE Webhook
-# =========================
-from linebot.models import TextSendMessage, LocationMessage, FlexSendMessage, LocationAction, PostbackEvent
-from linebot.exceptions import LineBotApiError
 
 
 _LINE_THROTTLE = {}  # ループ暴走の最終安全弁（会話ごとの最短インターバル）
