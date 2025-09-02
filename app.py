@@ -2981,14 +2981,14 @@ def handle_message(event):
         w, ok = get_weather_reply(text)
         app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
         if ok and w:
-            _reply_or_push(event, w)
+            _reply_quick_no_dedupe(event, w)
             save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
             return
 
         tmsg, ok = get_transport_reply(text)
         app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
         if ok and tmsg:
-            _reply_or_push(event, tmsg)
+            _reply_quick_no_dedupe(event, tmsg)
             save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
             return
     except Exception as e:
@@ -3287,7 +3287,7 @@ def on_postback(event):
             q = "今日の天気"
             msg, ok = get_weather_reply(q)
             if ok and msg:
-                _reply_or_push(event, msg)
+                _reply_quick_no_dedupe(event, msg)
                 save_qa_log(q, msg, source="line", hit_db=False, extra={"kind":"weather", "via":"postback"})
                 return
 
@@ -3295,30 +3295,50 @@ def on_postback(event):
             q = "運行状況"
             tmsg, ok = get_transport_reply(q)
             if ok and tmsg:
-                _reply_or_push(event, tmsg)
+                _reply_quick_no_dedupe(event, tmsg)
                 save_qa_log(q, tmsg, source="line", hit_db=False, extra={"kind":"transport", "via":"postback"})
                 return
 
         # 3) 最後の砦：data そのものを投げて判定
         msg, ok = get_weather_reply(canon)
         if ok and msg:
-            _reply_or_push(event, msg)
+            _reply_quick_no_dedupe(event, msg)
             save_qa_log(canon, msg, source="line", hit_db=False, extra={"kind":"weather", "via":"postback-fallback"})
             return
 
         tmsg, ok = get_transport_reply(canon)
         if ok and tmsg:
-            _reply_or_push(event, tmsg)
+            _reply_quick_no_dedupe(event, tmsg)
             save_qa_log(canon, tmsg, source="line", hit_db=False, extra={"kind":"transport", "via":"postback-fallback"})
             return
 
         # 4) 何も該当しなければ軽い案内
-        _reply_or_push(event, "うまく処理できませんでした。もう一度お試しください。")
+        _reply_quick_no_dedupe(event, "うまく処理できませんでした。もう一度お試しください。")
 
     except Exception as e:
         app.logger.exception(f"on_postback failed: {e}")
-        _reply_or_push(event, "うまく処理できませんでした。もう一度お試しください。")
+        _reply_quick_no_dedupe(event, "うまく処理できませんでした。もう一度お試しください。")
 
+
+def _reply_quick_no_dedupe(event, text: str):
+    """重複抑止に引っかけず、とにかく1通返す（reply優先・失敗時push）。"""
+    if not text:
+        return
+    try:
+        if getattr(event, "reply_token", None):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
+        else:
+            tid = _line_target_id(event)
+            if tid:
+                line_bot_api.push_message(tid, TextSendMessage(text=text))
+    except Exception:
+        # 片方で失敗した時の保険
+        try:
+            tid = _line_target_id(event)
+            if tid:
+                line_bot_api.push_message(tid, TextSendMessage(text=text))
+        except Exception:
+            pass
 
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
 # === LINE 返信ユーティリティ（安全送信 + エラー計測 + force_push互換） ===
@@ -4669,7 +4689,7 @@ def _line_mute_gate(event, text: str) -> bool:
     if paused and by == "admin":
         if _is_pause_cmd(t) or _is_resume_cmd(t):
             try:
-                _reply_or_push(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
+                _reply_quick_no_dedupe(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
             except Exception:
                 pass
         return True
@@ -4686,7 +4706,7 @@ def _line_mute_gate(event, text: str) -> bool:
             pass
         _clear_pause_notice_cache(tid)  # “一度だけ案内”キャッシュを消す
         try:
-            _reply_or_push(event, "了解です。応答を再開します。")
+            _reply_quick_no_dedupe(event, "了解です。応答を再開します。")
         except Exception:
             pass
         return True
@@ -4702,7 +4722,7 @@ def _line_mute_gate(event, text: str) -> bool:
         except Exception:
             pass
         try:
-            _reply_or_push(event, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。")
+            _reply_quick_no_dedupe(event, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。")
         except Exception:
             pass
         return True
@@ -4710,7 +4730,7 @@ def _line_mute_gate(event, text: str) -> bool:
     # 4) ユーザー停止中は案内のみ返してミュート
     if paused and by == "user":
         try:
-            _reply_or_push(event, "（現在、応答を一時停止しています。「再開」と送ると再開します）")
+            _reply_quick_no_dedupe(event, "（現在、応答を一時停止しています。「再開」と送ると再開します）")
         except Exception:
             pass
         return True
@@ -4719,7 +4739,7 @@ def _line_mute_gate(event, text: str) -> bool:
     try:
         if "_is_muted_target" in globals() and _is_muted_target(tid):
             try:
-                _reply_or_push(event, "（この会話はミュート中です。「再開」と送ると再開します）")
+                _reply_quick_no_dedupe(event, "（この会話はミュート中です。「再開」と送ると再開します）")
             except Exception:
                 pass
             return True
@@ -9239,42 +9259,6 @@ def admin_unhit_report():
 
 
 _LINE_THROTTLE = {}  # ループ暴走の最終安全弁（会話ごとの最短インターバル）
-
-
-# === 返信ユーティリティ（重複抑止＋世代ガード版） ===========================
-def _reply_or_push(event, text: str, *, reqgen: int | None = None):
-    """
-    返信トークンがあれば reply、無ければ push。
-    - 同一本文の連投を10分間抑止
-    - reqgen 指定時は「ユーザー世代が変わっていたら送信中断」
-    """
-    if not text:
-        return
-    target_id = _line_target_id(event)
-
-    def stale() -> bool:
-        return (reqgen is not None) and (REQUEST_GENERATION.get(target_id, 0) != reqgen)
-
-    chunks = _split_for_line(text, limit=4900)
-    first = True
-    for ch in chunks:
-        if stale():
-            app.logger.info("drop stale reply/push (gen changed) uid=%s", target_id)
-            break
-        # 直近重複の抑止
-        if _was_sent_recent(target_id, ch, mark=False):
-            app.logger.info("skip dup message uid=%s", target_id)
-            continue
-        try:
-            if first and getattr(event, "reply_token", None):
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ch))
-            else:
-                line_bot_api.push_message(target_id, TextSendMessage(text=ch))
-            _was_sent_recent(target_id, ch, mark=True)
-        except LineBotApiError as e:
-            app.logger.warning("reply/push error: %s", e)
-        first = False
-# ========================================================================
 
 def _send_messages(event, messages):
     """テキスト/画像など複合メッセージ送信（出典フッターは line_bot_api のプロキシで付与されます）"""
