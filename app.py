@@ -300,52 +300,6 @@ def _is_resume_cmd(text: str) -> bool:
         or t in {"resume", "さいかい"}
     )
 
-def _line_mute_gate(user_text: str):
-    """
-    LINE 受信時の共通ゲート。
-    戻り値: (is_muted: bool, system_message: Optional[str])
-    - True のときは通常応答をせず、system_message があればそれだけ返信。
-    - False のときは通常処理へ。
-    優先順位：管理者 > 利用者
-    """
-    paused, by = _pause_state()
-
-    # --- 1) 利用者の「再開」 ---
-    if _is_resume_cmd(user_text):
-        if paused and by == "admin":
-            # 管理者が止めている間は、利用者の再開は無効
-            return True, "現在、管理者によって応答が停止されています。管理者が再開するまでお待ちください。"
-        elif paused and by == "user":
-            # 利用者停止のみ → 再開を許可
-            _pause_set_user(False)
-            return False, "了解です。応答を再開します。"
-        else:
-            # もともと動作中
-            return False, None
-
-    # --- 2) 利用者の「停止」 ---
-    if _is_pause_cmd(user_text):
-        if paused and by == "admin":
-            # すでに管理者が停止中
-            return True, "現在、管理者によって応答が停止されています。"
-        else:
-            # 管理者が止めていない時だけ、ユーザー停止を有効化（= 全体停止）
-            _pause_set_user(True)
-            return True, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。"
-
-    # --- 3) 通常メッセージ ---
-    if paused:
-        if by == "admin":
-            # 管理者停止中は沈黙（必要ならワンショット通知に変更可）
-            return True, None
-        else:
-            # 利用者停止中は、案内だけ返して保持
-            return True, "（現在、応答を一時停止しています。「再開」と送ると再開します）"
-
-    return False, None
-# ======= /停止管理ここまで =======
-
-
 # === 透かしON/OFF（Render環境変数をまとめて判定） ===
 def _env_truthy(val: str | None) -> bool:
     if val is None:
@@ -4571,50 +4525,36 @@ def _set_global_paused(paused: bool):
 
 def _line_mute_gate(event, text: str) -> bool:
     """
-    返り値:
-      True  -> ここで処理完了（以降の通常応答は行わない）
-      False -> 通常の応答処理を継続
-    ルール:
-      - 「再開」「解除」等は、全体一時停止中でも必ず処理して応答する
-      - ユーザーの停止/再開コマンドは先に判定
-      - 全体一時停止中は、それ以外は沈黙
+    True  -> ここで処理完了（以降の通常応答は行わない）
+    False -> 通常の応答処理を継続
+    優先順位: 管理者 > ユーザー
     """
-    tid = _line_target_id(event)
-    tnorm = _norm_cmd(text)
+    t = (text or "").strip()
+    paused, by = _pause_state()  # ← 管理者/ユーザーどちらの停止か
 
-    # ---- 先にユーザーの再開/停止コマンドを判定（全体停止中でも通す）----
-    if _is_resume_cmd(tnorm):
-        _set_muted_target(tid, False, who="user")
-        if _is_global_paused():
-            if ALLOW_RESUME_WHEN_PAUSED:
-                # 危険性を理解したうえで有効化する運用向け
-                _set_global_paused(False)
-                _reply_or_push(event, "了解です。応答を再開します。（全体一時停止も解除しました）")
-            else:
-                _reply_or_push(
-                    event,
-                    "了解です。この会話のミュートを解除しました。\n"
-                    "※ 現在は『全体一時停止』中のため、管理者が再開するまで返信は止まります。"
-                )
-        else:
-            _reply_or_push(event, "了解です。応答を再開します。")
+    # 1) 管理者停止が立っている間は、常にミュート（ユーザーの再開も無効）
+    if paused and by == "admin":
+        if _is_pause_cmd(t) or _is_resume_cmd(t):
+            _reply_or_push(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
         return True
 
-    if _is_stop_cmd(tnorm):
-        _set_muted_target(tid, True, who="user")
-        _reply_or_push(event, "了解しました。この会話での応答を停止します。\n再開したいときは「再開」と送ってください。")
+    # 2) ユーザーの再開/停止（管理者が止めていない時だけ有効）
+    if _is_resume_cmd(t):
+        _pause_set_user(False)  # ユーザー停止解除（全体）
+        _reply_or_push(event, "了解です。応答を再開します。")
         return True
 
-    # ---- ここから通常のガード ----
-    # 全体一時停止中は沈黙（ただし一度だけ案内は返す）
-    if _is_global_paused():
-        _notice_paused_once(event, tid)   # ★ これを追加
+    if _is_pause_cmd(t):
+        _pause_set_user(True)   # ユーザー停止ON（全体）
+        _reply_or_push(event, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。")
         return True
 
-    # 会話ミュート中は沈黙
-    if _is_muted_target(tid):
+    # 3) ユーザー停止中は通常メッセージをミュート（案内のみ）
+    if paused and by == "user":
+        _reply_or_push(event, "（現在、応答を一時停止しています。「再開」と送ると再開します）")
         return True
 
+    # 4) それ以外は通常処理へ
     return False
 
 # ==== 展望所マップ: コマンド検出（表記ゆれ対応） ====
