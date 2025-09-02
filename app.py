@@ -225,46 +225,63 @@ def send_viewpoints_map(event):
 
 
 
-# ======= LINE 応答 停止/再開 管理（管理者優先・利用者次点） =======
-# フラグを2系統に分離：管理者停止(admin) と 利用者停止(user)
+# ======= LINE 応答 停止/再開 管理（管理者優先・利用者次点・互換対応） =======
 PAUSE_DIR = os.getenv("PAUSE_DIR") or os.path.dirname(__file__)
 PAUSE_FLAG_ADMIN = os.path.join(PAUSE_DIR, "line_paused.admin.flag")
 PAUSE_FLAG_USER  = os.path.join(PAUSE_DIR, "line_paused.user.flag")
+# 旧実装で使っていた互換フラグ（残っていると再開できない要因になる）
+PAUSE_FLAG_LEGACY = os.path.join(PAUSE_DIR, "line_paused.flag")
 
 def _pause_set_admin(on: bool):
-    """管理者の停止フラグをON/OFF"""
+    """管理者の停止フラグをON/OFF（互換フラグも合わせて操作）"""
     try:
         if on:
+            # 管理者停止を最優先に立てる（旧フラグも立てておくと古いコード経路でも確実に止まる）
             with open(PAUSE_FLAG_ADMIN, "w", encoding="utf-8") as f:
-                f.write(str(int(time.time())))
+                f.write("admin\n")
+            with open(PAUSE_FLAG_LEGACY, "w", encoding="utf-8") as f:
+                f.write("admin\n")
         else:
-            if os.path.exists(PAUSE_FLAG_ADMIN):
-                os.remove(PAUSE_FLAG_ADMIN)
+            # 解除時は必ず両方消す（旧フラグの残骸で“止まりっぱなし”を防止）
+            for p in (PAUSE_FLAG_ADMIN, PAUSE_FLAG_LEGACY):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
     except Exception:
         app.logger.exception("pause_set_admin failed")
 
 def _pause_set_user(on: bool):
-    """利用者（メッセージ）の停止フラグをON/OFF（管理者停止が無い場合のみ有効）"""
+    """利用者（メッセージ）による停止フラグをON/OFF"""
     try:
         if on:
             with open(PAUSE_FLAG_USER, "w", encoding="utf-8") as f:
-                f.write(str(int(time.time())))
+                f.write("user\n")
         else:
-            if os.path.exists(PAUSE_FLAG_USER):
-                os.remove(PAUSE_FLAG_USER)
+            # 利用者停止解除。旧フラグも念のため掃除（古い経路でuser停止を書いたケースの保険）
+            for p in (PAUSE_FLAG_USER, ):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
     except Exception:
         app.logger.exception("pause_set_user failed")
 
 def _pause_state():
-    """現在の停止状態を確認"""
-    s_admin = os.path.exists(PAUSE_FLAG_ADMIN)
-    s_user  = os.path.exists(PAUSE_FLAG_USER)
-    # 管理者が最優先
+    """
+    現在の停止状態を判定。
+    優先順位: 管理者 > 利用者。旧フラグ(PAUSE_FLAG_LEGACY)も管理者扱いで尊重する。
+    """
+    s_admin = os.path.exists(PAUSE_FLAG_ADMIN) or os.path.exists(PAUSE_FLAG_LEGACY)
     if s_admin:
         return True, "admin"
+    s_user = os.path.exists(PAUSE_FLAG_USER)
     if s_user:
         return True, "user"
     return False, None
+# ======= /停止管理 =======
 
 # ---- 利用者メッセージ判定（ゆるめの日本語/英語を網羅） ----
 def _is_pause_cmd(text: str) -> bool:
