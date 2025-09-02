@@ -2888,8 +2888,7 @@ def handle_message(event):
     try:
         uid = None
         try:
-            # 既存のターゲットID関数があれば優先（個チャ/グループ両対応）
-            uid = _line_target_id(event)
+            uid = _line_target_id(event)  # 個チャ/グループ両対応
         except Exception:
             uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
@@ -3177,87 +3176,127 @@ def handle_message(event):
 # ==== ここまで：統合ハンドラ ====
 
 
-    # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
-    @handler.add(MessageEvent, message=LocationMessage)
-    def on_location(event):
+# === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
+@handler.add(MessageEvent, message=LocationMessage)
+def on_location(event):
+    # 0) ミュート／一時停止ゲート（先頭で早期return）
+    try:
+        if _line_mute_gate(event, "location"):
+            return
+    except Exception:
+        app.logger.exception("_line_mute_gate failed")
+
+    try:
+        uid = _line_target_id(event)
+        lat = float(event.message.latitude)
+        lng = float(event.message.longitude)
+
+        # 1) 直近位置を覚える（後半の機能）
         try:
-            # 0) ミュート／一時停止ゲート
-            if _line_mute_gate(event, "location"):
-                return
+            if "_LAST" in globals() and isinstance(_LAST, dict):
+                _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
+        except Exception:
+            pass
 
-            uid = _line_target_id(event)
-            lat = float(event.message.latitude)
-            lng = float(event.message.longitude)
+        # 2) ユーザーモード→カテゴリ
+        mode = (globals().get("_LAST", {}).get("mode", {}).get(uid)) or "all"
+        cats = _mode_to_cats(mode)
 
-            # 1) 直近位置を覚える（後半の機能）
-            try:
-                if "_LAST" in globals() and isinstance(_LAST, dict):
-                    _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
-            except Exception:
-                pass
+        # 3) “少しお待ちください…” は push（reply_token を結果用に温存）
+        try:
+            _reply_or_push(event, pick_wait_message(uid), force_push=True)
+        except Exception:
+            pass
 
-            # 2) ユーザーモード→カテゴリ
-            mode = (globals().get("_LAST", {}).get("mode", {}).get(uid)) or "all"
-            cats = _mode_to_cats(mode)
+        # 4) 検索（半径/件数は好みで調整）
+        radius_m = 2000
+        limit    = 10
+        rows = _nearby_core(lat, lng, radius_m=radius_m, cat_filter=cats, limit=limit)
 
-            # 3) “少しお待ちください…” は push（reply_token を結果用に温存）
-            try:
-                _reply_or_push(event, pick_wait_message(uid), force_push=True)
-            except Exception:
-                pass
-
-            # 4) 検索（半径/件数は好みで調整）
-            radius_m = 2000   # ← 前半(1500m)と後半(2000m)のうち、ここでは 2000m を採用
-            limit    = 10     # ← 後半(8件)より少し広めに
-            rows = _nearby_core(lat, lng, radius_m=radius_m, cat_filter=cats, limit=limit)
-
-            if not rows:
-                # 5) 結果なし：reply → 失敗時は push
-                try:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text="近くの候補が見つかりませんでした（半径を広げる/別のキーワードをお試しください）。")
-                    )
-                except Exception:
-                    _reply_or_push(
-                        event,
-                        "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）。",
-                        force_push=True
-                    )
-                return
-
-            # 6) Flex返信（失敗時はテキストにフォールバック）
-            flex = _nearby_flex(rows)
+        if not rows:
+            # 5) 結果なし：reply → 失敗時は push
             try:
                 line_bot_api.reply_message(
                     event.reply_token,
-                    FlexSendMessage(alt_text="近くのスポット", contents=flex)
+                    TextSendMessage(text="近くの候補が見つかりませんでした（半径を広げる/別のキーワードをお試しください）。")
                 )
             except Exception:
-                lines = [f"近くのスポット（上位{min(limit, len(rows))}件）:"]
-                for it in rows[:limit]:
-                    url = it.get("google_url", "")
-                    lines.append(f"- {it['title']}（{it['distance_m']}m） {url}")
-                _reply_or_push(event, "\n".join(lines), force_push=True)
-
-            # 7) ログ（後半の機能）
-            try:
-                save_qa_log(
-                    "LOCATION", "nearby-flex", source="line", hit_db=True,
-                    extra={"kind": "nearby", "mode": mode, "lat": lat, "lng": lng, "radius_m": radius_m, "limit": limit}
+                _reply_or_push(
+                    event,
+                    "近くの候補が見つかりませんでした（緯度・経度未登録の可能性）。",
+                    force_push=True
                 )
-            except Exception:
-                pass
+            return
 
-        except LineBotApiError as e:
-            globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-            globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-            app.logger.exception("LINE send failed in on_location")
-        except Exception as e:
-            app.logger.exception("on_location failed: %s", e)
-            _reply_or_push(event, "位置情報の処理でエラーが起きました。もう一度お試しください。", force_push=True)
+        # 6) Flex返信（失敗時はテキストにフォールバック）
+        flex = _nearby_flex(rows)
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(alt_text="近くのスポット", contents=flex)
+            )
+        except Exception:
+            lines = [f"近くのスポット（上位{min(limit, len(rows))}件）:"]
+            for it in rows[:limit]:
+                url = it.get("google_url", "")
+                lines.append(f"- {it['title']}（{it['distance_m']}m） {url}")
+            _reply_or_push(event, "\n".join(lines), force_push=True)
+
+        # 7) ログ（後半の機能）
+        try:
+            save_qa_log(
+                "LOCATION", "nearby-flex", source="line", hit_db=True,
+                extra={"kind": "nearby", "mode": mode, "lat": lat, "lng": lng, "radius_m": radius_m, "limit": limit}
+            )
+        except Exception:
+            pass
+
+    except LineBotApiError as e:
+        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
+        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE send failed in on_location")
+    except Exception as e:
+        app.logger.exception("on_location failed: %s", e)
+        _reply_or_push(event, "位置情報の処理でエラーが起きました。もう一度お試しください。", force_push=True)
 
 
+# === Postback（ボタン/クイックリプライの data）にもゲートを適用 ===
+@handler.add(PostbackEvent)
+def on_postback(event):
+    # 0) ミュート／一時停止ゲート（管理者最優先・ユーザー再開で会話ミュートも解除する版）
+    try:
+        if _line_mute_gate(event, "postback"):
+            return
+    except Exception:
+        app.logger.exception("_line_mute_gate failed in postback")
+
+    # 1) 既存の即答ルートに橋渡し（data をそのまま or 変換して渡す）
+    try:
+        data = getattr(getattr(event, "postback", None), "data", "") or ""
+        key  = (data or "").strip().lower()
+
+        # 例：ポストバックの data をそのまま weather/transport 判定に使う
+        msg, ok = get_weather_reply(key)
+        if ok and msg:
+            _reply_or_push(event, msg)
+            save_qa_log(key, msg, source="line", hit_db=False, extra={"kind":"weather", "via":"postback"})
+            return
+
+        tmsg, ok = get_transport_reply(key)
+        if ok and tmsg:
+            _reply_or_push(event, tmsg)
+            save_qa_log(key, tmsg, source="line", hit_db=False, extra={"kind":"transport", "via":"postback"})
+            return
+
+        # 必要なら他の postback もここで分岐
+        # if key.startswith("xxx:"):
+        #     ...
+
+    except Exception as e:
+        app.logger.exception(f"on_postback failed: {e}")
+        _reply_or_push(event, "うまく処理できませんでした。もう一度お試しください。")
+
+        
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
 # === LINE 返信ユーティリティ（安全送信 + エラー計測 + force_push互換） ===
 def _reply_or_push(event, text: str, *, force_push: bool = False):
@@ -4528,33 +4567,97 @@ def _line_mute_gate(event, text: str) -> bool:
     True  -> ここで処理完了（以降の通常応答は行わない）
     False -> 通常の応答処理を継続
     優先順位: 管理者 > ユーザー
+
+    互換メモ:
+    - _pause_state() が (paused: bool, by: 'admin'|'user'|None) を返す前提。
+      無い/例外時は _is_global_paused() をフォールバック（byは admin 扱い）。
+    - 会話別ミュートの旧API (_set_muted_target/_is_muted_target) が無くても動くよう try/except 保護。
+    - 「停止/再開」判定は _is_pause_cmd/_is_resume_cmd が無ければ
+      _is_stop_cmd（旧名）をフォールバックします。
     """
+    # --- 互換: コマンド判定関数を拾う（無ければダミー） ---
+    _is_pause = globals().get("_is_pause_cmd") or globals().get("_is_stop_cmd") or (lambda _t: False)
+    _is_resume = globals().get("_is_resume_cmd") or (lambda _t: False)
+
     t = (text or "").strip()
-    paused, by = _pause_state()  # ← 管理者/ユーザーどちらの停止か
+
+    # --- 停止状態の取得（新実装が無ければ旧実装をフォールバック） ---
+    try:
+        paused, by = _pause_state()  # 期待: (bool, 'admin'|'user'|None)
+    except Exception:
+        try:
+            paused = bool(_is_global_paused())
+        except Exception:
+            paused = False
+        by = "admin" if paused else None
+
+    # --- ターゲットID（個チャ/グループ両対応） ---
+    try:
+        tid = _line_target_id(event)
+    except Exception:
+        tid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
     # 1) 管理者停止が立っている間は、常にミュート（ユーザーの再開も無効）
     if paused and by == "admin":
-        if _is_pause_cmd(t) or _is_resume_cmd(t):
-            _reply_or_push(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
+        if _is_pause(t) or _is_resume(t):
+            try:
+                _reply_or_push(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
+            except Exception:
+                pass
         return True
 
-    # 2) ユーザーの再開/停止（管理者が止めていない時だけ有効）
-    if _is_resume_cmd(t):
-        _pause_set_user(False)  # ユーザー停止解除（全体）
-        _reply_or_push(event, "了解です。応答を再開します。")
+    # 2) ユーザーの「再開」：会話ミュートもグローバルも両方解除
+    if _is_resume(t):
+        try:
+            _pause_set_user(False)  # 全体（ユーザー）停止フラグを解除
+        except Exception:
+            pass
+        try:
+            _set_muted_target(tid, False, who="user")  # 旧・会話ミュートも確実に解除（無ければ無視）
+        except Exception:
+            pass
+        try:
+            _reply_or_push(event, "了解です。応答を再開します。")
+        except Exception:
+            pass
         return True
 
-    if _is_pause_cmd(t):
-        _pause_set_user(True)   # ユーザー停止ON（全体）
-        _reply_or_push(event, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。")
+    # 3) ユーザーの「停止」：両方ON（互換のため）
+    if _is_pause(t):
+        try:
+            _pause_set_user(True)  # 全体（ユーザー）停止ON
+        except Exception:
+            pass
+        try:
+            _set_muted_target(tid, True, who="user")  # 旧・会話ミュートもON（無ければ無視）
+        except Exception:
+            pass
+        try:
+            _reply_or_push(event, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。")
+        except Exception:
+            pass
         return True
 
-    # 3) ユーザー停止中は通常メッセージをミュート（案内のみ）
+    # 4) ユーザー停止中は案内のみ返してミュート
     if paused and by == "user":
-        _reply_or_push(event, "（現在、応答を一時停止しています。「再開」と送ると再開します）")
+        try:
+            _reply_or_push(event, "（現在、応答を一時停止しています。「再開」と送ると再開します）")
+        except Exception:
+            pass
         return True
 
-    # 4) それ以外は通常処理へ
+    # 5) 念のため：旧・会話ミュートが残っていたら同様に案内
+    try:
+        if "_is_muted_target" in globals() and _is_muted_target(tid):
+            try:
+                _reply_or_push(event, "（この会話はミュート中です。「再開」と送ると再開します）")
+            except Exception:
+                pass
+            return True
+    except Exception:
+        pass
+
+    # 6) 通常処理へ
     return False
 
 # ==== 展望所マップ: コマンド検出（表記ゆれ対応） ====
@@ -9069,7 +9172,7 @@ def admin_unhit_report():
 # =========================
 #  LINE Webhook
 # =========================
-from linebot.models import TextSendMessage, LocationMessage, FlexSendMessage, LocationAction
+from linebot.models import TextSendMessage, LocationMessage, FlexSendMessage, LocationAction, PostbackEvent
 from linebot.exceptions import LineBotApiError
 
 
