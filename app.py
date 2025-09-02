@@ -5828,54 +5828,71 @@ def admin_entry():
         }
         new_entry = _norm_entry(new_entry)
 
-        # === 画像アップロード/削除（フォルダ選択の反映を最優先 + 変更なしなら前画像維持） ===
-        selected_image = (request.form.get("selected_image") or "").strip()  # フォルダ/ギャラリーで選んだ元画像名
-        wm_choice = _normalize_wm_choice(request.form.get("wm_external_choice"))
-        if wm_choice is not None:
-            new_entry["wm_external_choice"] = wm_choice  # 透かし種別を反映
-
-        upload = request.files.get("image_file")
-        delete_flag = (request.form.get("image_delete") == "1")
-
-        try:
-            result = _save_jpeg_1080_350kb(upload, previous=prev_img, delete=delete_flag)
-        except RequestEntityTooLarge:
-            flash("画像が大きすぎます（10MB以内にしてください）")
-            result = None
-        except Exception:
-            app.logger.exception("image save failed on /admin/entry")
-            result = None
-
-        if result is None:
-            # アップロード無し
-            if selected_image:
-                # ← フォルダ/ギャラリーで選択された画像を採用
-                new_entry["image_file"] = selected_image
-                new_entry["image"]      = selected_image
-                try:
-                    _ensure_wm_variants(selected_image)
-                except Exception:
-                    app.logger.exception("[wm] ensure variants failed for selected %s", selected_image)
-            elif prev_img and not delete_flag:
-                # ← 何も変えていなければ以前の画像を維持
-                new_entry["image_file"] = prev_img
-                new_entry["image"]      = prev_img
-                try:
-                    _ensure_wm_variants(prev_img)
-                except Exception:
-                    app.logger.exception("[wm] ensure variants failed for prev %s", prev_img)
-        elif result == "":
-            # 削除ボタン
-            new_entry.pop("image_file", None)
-            new_entry.pop("image", None)
-        else:
-            # 新規アップロード成功
-            new_entry["image_file"] = result
-            new_entry["image"]      = result
+        # === 画像アップロード系（完成済みアップロードを最優先） =======================
+        # 1) ローカルで“透かし済み”の完成画像：最適化のみで登録（透かしは重ねない）
+        result_final = None
+        upload_final = request.files.get("image_file_final")
+        if upload_final and upload_final.filename:
             try:
-                _ensure_wm_variants(result)
+                # 既存画像があれば置換できるよう previous を渡す
+                result_final = _save_jpeg_1080_350kb(upload_final, previous=prev_img, delete=False)
+            except RequestEntityTooLarge:
+                flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
+                if idx_edit is not None:
+                    return redirect(url_for("admin_entry", edit=idx_edit))
+                return redirect(url_for("admin_entry"))
             except Exception:
-                app.logger.exception("[wm] ensure variants failed for uploaded %s", result)
+                result_final = None
+                app.logger.exception("image handler (final) failed")
+
+        if result_final:
+            # 完成済み（透かし込み）をそのまま使う：透かしは「none」に固定
+            new_entry["image_file"] = result_final
+            new_entry["image"] = result_final
+            new_entry["wm_external_choice"] = "none"   # ここで固定
+            new_entry["wm_on"] = False                 # 互換ブールも下げる
+            # ※ 完成品なので __none/__goto/__fullygoto の派生は作らない（ダブル透かし防止）
+
+        else:
+            # 2) 従来のアップロード/削除（フォルダ選択や前画像維持の流れ）
+            upload = request.files.get("image_file")
+            delete_flag = (request.form.get("image_delete") == "1")
+            try:
+                result = _save_jpeg_1080_350kb(upload, previous=prev_img, delete=delete_flag)
+            except RequestEntityTooLarge:
+                flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
+                if idx_edit is not None:
+                    return redirect(url_for("admin_entry", edit=idx_edit))
+                return redirect(url_for("admin_entry"))
+            except Exception:
+                result = None
+                app.logger.exception("image handler failed")
+
+            if result is None:
+                # 変更なし → 前画像を維持（削除指示がない限り）
+                if prev_img and not delete_flag:
+                    new_entry["image_file"] = prev_img
+                    new_entry["image"] = prev_img
+                    # 既存画像に派生ファイルが無ければ作る（従来どおり）
+                    try:
+                        _ensure_wm_variants(prev_img)
+                    except Exception:
+                        app.logger.exception("[wm] backfill variants failed for %s", prev_img)
+
+            elif result == "":
+                # 明示削除
+                new_entry.pop("image_file", None)
+                new_entry.pop("image", None)
+
+            else:
+                # 置換/新規保存（従来どおり派生3種を事前生成）
+                new_entry["image_file"] = result
+                new_entry["image"] = result
+                try:
+                    _ensure_wm_variants(result)
+                except Exception:
+                    app.logger.exception("[wm] variants generation failed for %s", result)
+        # === /画像アップロード系 =======================================================
 
         # === 緯度・経度（raw/lat/lng/map を総合して決定、片側空は前回値を継承） ===
         lat, lng = _normalize_latlng(
