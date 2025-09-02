@@ -283,22 +283,6 @@ def _pause_state():
     return False, None
 # ======= /停止管理 =======
 
-# ---- 利用者メッセージ判定（ゆるめの日本語/英語を網羅） ----
-def _is_pause_cmd(text: str) -> bool:
-    t = re.sub(r"\s+", "", (text or "")).lower()
-    # 代表パターン：「停止」「中止」「ストップ」「とめて」「mute」など
-    return (
-        ("停止" in t) or ("中止" in t) or ("止めて" in t) or ("とめて" in t)
-        or t in {"stop", "mute", "ちゅうし", "ストップ"}
-    )
-
-def _is_resume_cmd(text: str) -> bool:
-    t = re.sub(r"\s+", "", (text or "")).lower()
-    # 代表パターン：「再開」「解除」「続けて」「戻して」「resume」など
-    return (
-        ("再開" in t) or ("解除" in t) or ("続けて" in t) or ("戻して" in t)
-        or t in {"resume", "さいかい"}
-    )
 
 # === 透かしON/OFF（Render環境変数をまとめて判定） ===
 def _env_truthy(val: str | None) -> bool:
@@ -3266,37 +3250,70 @@ def on_location(event):
         _reply_or_push(event, "位置情報の処理でエラーが起きました。もう一度お試しください。", force_push=True)
 
 
-# === Postback（ボタン/クイックリプライの data）にもゲートを適用 ===
+from urllib.parse import parse_qs
+
 @handler.add(PostbackEvent)
 def on_postback(event):
-    # 0) ミュート／一時停止ゲート（管理者最優先・ユーザー再開で会話ミュートも解除する版）
+    # 0) ミュート／一時停止ゲート
     try:
         if _line_mute_gate(event, "postback"):
             return
     except Exception:
         app.logger.exception("_line_mute_gate failed in postback")
 
-    # 1) 既存の即答ルートに橋渡し（data をそのまま or 変換して渡す）
     try:
-        data = getattr(getattr(event, "postback", None), "data", "") or ""
-        key  = (data or "").strip().lower()
+        data = (getattr(getattr(event, "postback", None), "data", "") or "").strip()
+        low  = data.lower()
 
-        # 例：ポストバックの data をそのまま weather/transport 判定に使う
-        msg, ok = get_weather_reply(key)
+        # 1) 代表的キーを正規化（ボタン側の実装差を吸収）
+        canon = low
+        # 例：action=weather&day=today, kind=weather_today などを丸める
+        if "=" in low:
+            try:
+                qs = {k: (v[0] if v else "") for k, v in parse_qs(low).items()}
+                if (qs.get("action") == "weather") or (qs.get("kind") in ("weather", "weather_today")):
+                    canon = "weather_today"
+                elif (qs.get("action") in ("transport", "traffic")) or (qs.get("kind") in ("transport", "traffic_status")):
+                    canon = "transport_status"
+            except Exception:
+                pass
+
+        # 2) 天気・運行の代表表現を拾う（前方一致・別名も吸収）
+        WEATHER_KEYS   = ("weather", "weather_today", "天気", "今日の天気", "てんき", "きょうのてんき")
+        TRANSPORT_KEYS = ("transport", "transport_status", "traffic", "運行", "運行状況", "交通", "バス運行", "フェリー運行")
+
+        # 完全一致で拾えなくても部分一致で救済
+        if any(k in canon for k in WEATHER_KEYS):
+            q = "今日の天気"
+            msg, ok = get_weather_reply(q)
+            if ok and msg:
+                _reply_or_push(event, msg)
+                save_qa_log(q, msg, source="line", hit_db=False, extra={"kind":"weather", "via":"postback"})
+                return
+
+        if any(k in canon for k in TRANSPORT_KEYS):
+            q = "運行状況"
+            tmsg, ok = get_transport_reply(q)
+            if ok and tmsg:
+                _reply_or_push(event, tmsg)
+                save_qa_log(q, tmsg, source="line", hit_db=False, extra={"kind":"transport", "via":"postback"})
+                return
+
+        # 3) 最後の砦：data そのものを投げて判定
+        msg, ok = get_weather_reply(canon)
         if ok and msg:
             _reply_or_push(event, msg)
-            save_qa_log(key, msg, source="line", hit_db=False, extra={"kind":"weather", "via":"postback"})
+            save_qa_log(canon, msg, source="line", hit_db=False, extra={"kind":"weather", "via":"postback-fallback"})
             return
 
-        tmsg, ok = get_transport_reply(key)
+        tmsg, ok = get_transport_reply(canon)
         if ok and tmsg:
             _reply_or_push(event, tmsg)
-            save_qa_log(key, tmsg, source="line", hit_db=False, extra={"kind":"transport", "via":"postback"})
+            save_qa_log(canon, tmsg, source="line", hit_db=False, extra={"kind":"transport", "via":"postback-fallback"})
             return
 
-        # 必要なら他の postback もここで分岐
-        # if key.startswith("xxx:"):
-        #     ...
+        # 4) 何も該当しなければ軽い案内
+        _reply_or_push(event, "うまく処理できませんでした。もう一度お試しください。")
 
     except Exception as e:
         app.logger.exception(f"on_postback failed: {e}")
@@ -4279,14 +4296,6 @@ GLOBAL_LINE_PAUSE_FILE = os.path.join(BASE_DIR, "line_paused.flag")  # 全体停
 ALLOW_RESUME_WHEN_PAUSED = os.getenv("ALLOW_RESUME_WHEN_PAUSED", "0").lower() in {"1","true","on","yes"}
 LINE_RETHROW_ON_SEND_ERROR = os.getenv("LINE_RETHROW_ON_SEND_ERROR", "0").lower() in {"1","true","on","yes"}
 
-# ミュート/再開コマンド（NFKC正規化＋小文字化で比較）
-STOP_COMMANDS = {
-    "停止", "中止", "応答停止", "配信停止", "やめて",
-    "stop", "stop!", "stop.", "mute", "silence"
-}
-RESUME_COMMANDS = {
-    "再開", "解除", "応答再開", "start", "resume", "unmute"
-}
 # （ここから追記）停止中案内の一回通知設定
 LINE_PAUSE_NOTICE = os.getenv("LINE_PAUSE_NOTICE", "1").lower() in {"1","true","on","yes"}
 
@@ -4471,6 +4480,11 @@ def _clear_paused_notices():
             os.remove(PAUSED_NOTICE_FILE)
     except Exception:
         app.logger.exception("clear paused notices failed")
+    # ★ 追加：メモリ上の「一度だけ案内」フラグも全消し
+    try:
+        _clear_pause_notice_cache_all()
+    except Exception:
+        pass
 
 def _safe_read_json(path: str, default_obj):
     """
@@ -4508,17 +4522,6 @@ def _n(s: str) -> str:
     t = re.sub(r"\s+", " ", t)
     return t.strip().lower()
 
-
-def _norm_cmd(s: str) -> str:
-    return unicodedata.normalize("NFKC", (s or "")).strip().lower()
-
-def _is_resume_cmd(tnorm: str) -> bool:
-    # 「再開」「解除」「応答再開」や英語、語尾つき（例：再開です／再開！）も拾う
-    if tnorm in RESUME_COMMANDS:
-        return True
-    if tnorm.startswith("再開") or tnorm.startswith("解除") or tnorm.startswith("応答再開"):
-        return True
-    return bool(re.search(r"\b(resume|unmute|start)\b", tnorm))
 
 def _is_stop_cmd(tnorm: str) -> bool:
     # 「停止」「中止」「やめて」や英語、語尾つきも拾う
@@ -4568,26 +4571,85 @@ def _set_global_paused(paused: bool):
     except Exception:
         app.logger.exception("set_global_paused failed")
 
+# ==== Mute/Resume 判定ヘルパ（強化版） ====
+import re
+
+def _norm_cmd(s: str) -> str:
+    if s is None:
+        return ""
+    # 全角スペース→半角、改行/タブ削除、英字小文字化、空白削除
+    s = s.replace("　", " ").strip().lower()
+    s = re.sub(r"\s+", "", s)
+    return s
+
+# 正規化後の代表語（スペース無し・小文字・NFKC前提）
+RESUME_COMMANDS = {
+    "再開", "解除", "ミュート解除", "応答再開",
+    "resume", "unmute", "start", "muteoff", "mute_off", "muteオフ"
+}
+PAUSE_COMMANDS = {
+    "停止", "一時停止", "ミュート", "黙って", "黙る",
+    "stop", "pause", "muteon", "mute_on", "muteオン"
+}
+
+def _is_pause_cmd(text: str) -> bool:
+    """停止コマンド判定：停止/一時停止/ミュート/stop/pause/mute on 等"""
+    t = _norm_cmd(text)
+    if t in PAUSE_COMMANDS:
+        return True
+    if any(k in t for k in ("停止", "一時停止", "ミュート", "黙って", "黙る")):
+        return True
+    return any(k in t for k in ("stop", "pause", "muteon"))
+
+def _is_resume_cmd(text: str) -> bool:
+    """
+    再開コマンド判定：
+    - 日本語：「再開」「解除」「ミュート解除」「再開してください」等（前方一致OK）
+    - 英語   ：resume / unmute / start / mute off 等
+    """
+    t = _norm_cmd(text)
+    if t in RESUME_COMMANDS:
+        return True
+    if t.startswith("再開") or t.startswith("解除") or t.startswith("応答再開"):
+        return True
+    return any(k in t for k in ("resume", "unmute", "start", "muteoff"))
+
+def _clear_pause_notice_cache(tid: str):
+    """
+    “全体一時停止中の案内を一度だけ返す”系の既存キャッシュがあればクリア。
+    名前は環境差があるので代表的なキーを総当たり。
+    """
+    for k in ("_PAUSE_NOTICE_SENT", "PAUSE_NOTICE_SENT", "_NOTICE_PAUSED_ONCE"):
+        d = globals().get(k)
+        if isinstance(d, dict):
+            try:
+                d.pop(tid, None)
+            except Exception:
+                pass
+            
+
+def _clear_pause_notice_cache_all():
+    """
+    上記キャッシュをプロセス内で全消し（管理者の全体再開で呼ぶ用）。
+    """
+    for k in ("_PAUSE_NOTICE_SENT", "PAUSE_NOTICE_SENT", "_NOTICE_PAUSED_ONCE"):
+        d = globals().get(k)
+        if isinstance(d, dict):
+            try:
+                d.clear()
+            except Exception:
+                pass
+            
+# ==== 統一ゲート（管理者最優先＋再開で旧ミュートも解除） ====
 def _line_mute_gate(event, text: str) -> bool:
     """
     True  -> ここで処理完了（以降の通常応答は行わない）
     False -> 通常の応答処理を継続
     優先順位: 管理者 > ユーザー
-
-    互換メモ:
-    - _pause_state() が (paused: bool, by: 'admin'|'user'|None) を返す前提。
-      無い/例外時は _is_global_paused() をフォールバック（byは admin 扱い）。
-    - 会話別ミュートの旧API (_set_muted_target/_is_muted_target) が無くても動くよう try/except 保護。
-    - 「停止/再開」判定は _is_pause_cmd/_is_resume_cmd が無ければ
-      _is_stop_cmd（旧名）をフォールバックします。
     """
-    # --- 互換: コマンド判定関数を拾う（無ければダミー） ---
-    _is_pause = globals().get("_is_pause_cmd") or globals().get("_is_stop_cmd") or (lambda _t: False)
-    _is_resume = globals().get("_is_resume_cmd") or (lambda _t: False)
-
     t = (text or "").strip()
 
-    # --- 停止状態の取得（新実装が無ければ旧実装をフォールバック） ---
+    # 停止状態（新API: _pause_state、無ければ旧APIにフォールバック）
     try:
         paused, by = _pause_state()  # 期待: (bool, 'admin'|'user'|None)
     except Exception:
@@ -4597,45 +4659,46 @@ def _line_mute_gate(event, text: str) -> bool:
             paused = False
         by = "admin" if paused else None
 
-    # --- ターゲットID（個チャ/グループ両対応） ---
+    # ターゲットID
     try:
         tid = _line_target_id(event)
     except Exception:
         tid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
-    # 1) 管理者停止が立っている間は、常にミュート（ユーザーの再開も無効）
+    # 1) 管理者停止中は常にミュート（ユーザーの再開も無効・案内のみ）
     if paused and by == "admin":
-        if _is_pause(t) or _is_resume(t):
+        if _is_pause_cmd(t) or _is_resume_cmd(t):
             try:
                 _reply_or_push(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
             except Exception:
                 pass
         return True
 
-    # 2) ユーザーの「再開」：会話ミュートもグローバルも両方解除
-    if _is_resume(t):
+    # 2) ユーザー「再開」：全体（user）＆旧ミュートの両方を解除＋案内
+    if _is_resume_cmd(t):
         try:
-            _pause_set_user(False)  # 全体（ユーザー）停止フラグを解除
+            _pause_set_user(False)  # 全体（ユーザー）停止解除
         except Exception:
             pass
         try:
-            _set_muted_target(tid, False, who="user")  # 旧・会話ミュートも確実に解除（無ければ無視）
+            _set_muted_target(tid, False, who="user")  # 旧・会話ミュート解除
         except Exception:
             pass
+        _clear_pause_notice_cache(tid)  # “一度だけ案内”キャッシュを消す
         try:
             _reply_or_push(event, "了解です。応答を再開します。")
         except Exception:
             pass
         return True
 
-    # 3) ユーザーの「停止」：両方ON（互換のため）
-    if _is_pause(t):
+    # 3) ユーザー「停止」：両方ON（互換のため）＋案内
+    if _is_pause_cmd(t):
         try:
-            _pause_set_user(True)  # 全体（ユーザー）停止ON
+            _pause_set_user(True)   # 全体（ユーザー）停止ON
         except Exception:
             pass
         try:
-            _set_muted_target(tid, True, who="user")  # 旧・会話ミュートもON（無ければ無視）
+            _set_muted_target(tid, True, who="user")  # 旧・会話ミュートON
         except Exception:
             pass
         try:
@@ -4652,7 +4715,7 @@ def _line_mute_gate(event, text: str) -> bool:
             pass
         return True
 
-    # 5) 念のため：旧・会話ミュートが残っていたら同様に案内
+    # 5) 念のため：旧・会話ミュートが残っていたら案内してミュート
     try:
         if "_is_muted_target" in globals() and _is_muted_target(tid):
             try:
