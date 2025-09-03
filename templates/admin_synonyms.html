@@ -54,7 +54,7 @@ function normalizeSynStr(str){
 function getRows(){
   return Array.from(document.querySelectorAll("#syn_tbody tr"));
 }
-function addRow(tag="", syns=""){
+function addRow(tag = "", syns = ""){
   const tbody = document.getElementById('syn_tbody');
   const tr = document.createElement('tr');
   tr.innerHTML = `
@@ -70,7 +70,20 @@ function addRow(tag="", syns=""){
     <td style="width:1%;white-space:nowrap">
       <button type="button" class="btn danger" onclick="delRow(this)">削除</button>
     </td>`;
-  tbody.appendChild(tr);
+
+  // 先頭に差し込む（最上部に新規行を表示）
+  if (tbody.firstChild) {
+    tbody.insertBefore(tr, tbody.firstChild);
+  } else {
+    tbody.appendChild(tr);
+  }
+
+  // 使い勝手向上（フィルタ中でも見える・件数更新・フォーカス・軽いスクロール）
+  tr.style.display = "";
+  updateCount();
+  const inp = tr.querySelector('input[name="tag"]');
+  if (inp) inp.focus();
+  try { tr.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch(e) {}
 }
 function delRow(btn){
   const tr = btn.closest('tr');
