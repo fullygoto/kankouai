@@ -63,7 +63,8 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
     QuickReply, QuickReplyButton, MessageAction,
-    ImageSendMessage, LocationMessage, FlexSendMessage, LocationAction
+    ImageSendMessage, LocationMessage, FlexSendMessage, LocationAction,
+    FollowEvent,
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
@@ -3165,6 +3166,52 @@ def handle_message(event):
         save_qa_log(text, "fallback", source="line", hit_db=False, extra={"error": str(e)})
 # ==== ここまで：統合ハンドラ ====
 
+
+@handler.add(FollowEvent)
+def on_follow(event):
+    """
+    友だち追加（またはブロック解除）時の最初の挨拶メッセージを送る。
+    ※公式の「あいさつメッセージ」をONにしている場合は二重送信になるので、
+      基本は公式側OFF＋このWebhookで送る運用を推奨。
+    """
+    # 表示名の取得（失敗しても続行）
+    display_name = ""
+    try:
+        if hasattr(event, "source") and event.source and hasattr(event.source, "user_id"):
+            prof = line_bot_api.get_profile(event.source.user_id)
+            display_name = (prof.display_name or "").strip()
+    except Exception as e:
+        app.logger.info(f"[follow] get_profile failed: {e}")
+
+    # あいさつ文（必要なら調整してください）
+    nick = f"{display_name}さん" if display_name else "はじめまして"
+    greet = (
+        f"{nick}、fullyGOTO観光AIです。友だち追加ありがとうございます。\n\n"
+        "このLINEでは、店名・観光地名を送るだけで基本情報をまとめて返信し、"
+        "「今日の天気」「運行状況（船・飛行機・バス）」へのリンク、"
+        "「展望所マップ」など◯◯マップの表示にも対応しています。"
+        "※試運転（ベータ）中です。\n\n"
+        "ご利用前に、下記の説明サイトを必ずお読みください（使い方／できること／トラブル時の停止・再開の方法）\n"
+        "▶ https://www.fullygoto.com/fullygoto-ai/\n\n"
+        "使い方の例：\n"
+        "・「今日の天気」「運行状況」\n"
+        "・「高浜海水浴場」「コワーキング＠mitake」\n"
+        "・「展望所マップ」「海水浴場マップ」\n"
+        "トラブル時のメモ：\n"
+        "・「停止」と送る → 応答を一時停止\n"
+        "・「解除」と送る → 応答を再開\n"
+        "※管理側が全体停止中は復帰できない場合があります（復旧後に再開）。"
+    )
+
+    # 既存の安全送信ユーティリティがあればそれを使用
+    try:
+        _reply_or_push(event, greet)
+    except Exception:
+        # フォールバック（直接SDKで返信）
+        try:
+            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=greet)])
+        except Exception as e:
+            app.logger.error(f"[follow] reply failed: {e}")
 
 # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
 @handler.add(MessageEvent, message=LocationMessage)
