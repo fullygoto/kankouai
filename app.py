@@ -4722,7 +4722,7 @@ def _line_mute_gate(event, text: str) -> bool:
         except Exception:
             pass
         try:
-            _reply_quick_no_dedupe(event, "了解です。しばらく応答を停止します。「再開」と送ると元に戻します。")
+            _reply_quick_no_dedupe(event, "了解です。しばらく応答を停止します。「解除」と送ると元に戻します。")
         except Exception:
             pass
         return True
@@ -4730,7 +4730,7 @@ def _line_mute_gate(event, text: str) -> bool:
     # 4) ユーザー停止中は案内のみ返してミュート
     if paused and by == "user":
         try:
-            _reply_quick_no_dedupe(event, "（現在、応答を一時停止しています。「再開」と送ると再開します）")
+            _reply_quick_no_dedupe(event, "（現在、応答を一時停止しています。「解除」と送ると再開します）")
         except Exception:
             pass
         return True
@@ -4739,7 +4739,7 @@ def _line_mute_gate(event, text: str) -> bool:
     try:
         if "_is_muted_target" in globals() and _is_muted_target(tid):
             try:
-                _reply_quick_no_dedupe(event, "（この会話はミュート中です。「再開」と送ると再開します）")
+                _reply_quick_no_dedupe(event, "（この会話はミュート中です。「解除」と送ると再開します）")
             except Exception:
                 pass
             return True
