@@ -469,33 +469,34 @@
 
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
-    <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
-    <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-    <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-    <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-    <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-    <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
-    <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
-    <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
-    <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
-    <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+        <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
+        <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+        <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+        <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
+        <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
+        <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
+        <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
+        <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
+        <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
+        <a href="{{ safe_url_for('admin_synonyms') or '/admin_synonyms.html' }}">[類義語（シノニム）]</a>
+        <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
-    <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
-        <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
-        <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
-    </form>
+        <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
+            <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
+            <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
+        </form>
 
-    <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
-        <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">[LINE応答 一時停止]</button>
-    </form>
-    <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
-        <button class="btn ghost" type="submit">[再開]</button>
-    </form>
-    {% if global_paused %}
-    <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">
-        LINE停止中{% if paused_by %}（{{ '管理者' if paused_by=='admin' else 'ユーザー' }}）{% endif %}
-    </span>
-    {% endif %}
+        <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
+            <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">[LINE応答 一時停止]</button>
+        </form>
+        <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
+            <button class="btn ghost" type="submit">[再開]</button>
+        </form>
+        {% if global_paused %}
+        <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">
+            LINE停止中{% if paused_by %}（{{ '管理者' if paused_by=='admin' else 'ユーザー' }}）{% endif %}
+        </span>
+        {% endif %}
     </div>
     <h1 style="margin-bottom:20px;">観光データ（管理者モード） {{ '編集' if edit_id else '登録' }}</h1>
     {% else %}
