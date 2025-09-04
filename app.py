@@ -7933,17 +7933,42 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
             if c:
                 arr.append(c)
         return _uniq_preserve(arr)
-
+    
+    def _tag_norm(s: str) -> str:
+        """タグ比較用に normalize。前後クォート/空白を除去し、NFKC+lower で比較できる形に"""
+        t = (s or "").strip()
+        # 前後の ' や " を剥がす（複数重なっていてもOK）
+        while len(t) >= 2 and ((t[0] == t[-1]) and t[0] in {"'", '"'}):
+            t = t[1:-1].strip()
+        # 片側だけ付いているケースも軽くケア
+        if t[:1] in {"'", '"'}: t = t[1:].strip()
+        if t[-1:] in {"'", '"'}: t = t[:-1].strip()
+        import unicodedata, re
+        t = unicodedata.normalize("NFKC", t)
+        t = re.sub(r"\s+", " ", t).lower()
+        return t
+    
     def _discriminative_tags(entries, limit: int = 12):
-        """候補間で“かぶっていない”タグ（弁別力のあるタグ）だけを提示"""
+        """候補間で“かぶっていない”タグ（弁別力のあるタグ）を、表示用にクォートを剥がして返す"""
         from collections import Counter
-        all_sets = [set(e.get("tags") or []) for e in entries if e.get("tags")]
-        if not all_sets:
+        raw_sets = [set(e.get("tags") or []) for e in entries if e.get("tags")]
+        if not raw_sets:
             return []
-        union = set().union(*all_sets)
-        inter = set.intersection(*all_sets) if len(all_sets) > 1 else set()
-        cand = sorted(list(union - inter))
-        return cand[:limit]
+        union = set().union(*raw_sets)
+        inter = set.intersection(*raw_sets) if len(raw_sets) > 1 else set()
+        # 弁別候補（共通タグを除く）
+        cand_raw = list(union - inter) if inter else list(union)
+        # 表示用にクォートを剥がし、正規化キーでユニーク化
+        seen, out = set(), []
+        for t in sorted(cand_raw):
+            disp = t.strip().strip("'").strip('"').strip()
+            key  = _tag_norm(disp)
+            if key and key not in seen:
+                seen.add(key)
+                out.append(disp)
+            if len(out) >= limit:
+                break
+        return out
 
     # ====== セッション状態（関数内だけで完結）======
     #   user_id が無い場合はセッションを使わず“従来表示”にフォールバック
@@ -8113,16 +8138,33 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
 
                 # ---- TAG ----
                 if st["stage"] == "tag":
+                    # 表示用タグ（クォート除去済み）
                     tags = st.get("tags") or _discriminative_tags(cand)
+                    # ユーザー入力 → 正規化
+                    s_norm = _tag_norm(q)
                     picked = None
+
+                    # 1) 番号選択
                     if idx and 1 <= idx <= len(tags):
                         picked = tags[idx-1]
-                    elif q.strip() in (tags or []):
-                        picked = q.strip()
+                    # 2) 名称選択（正規化一致）
+                    elif s_norm:
+                        for opt in tags:
+                            if _tag_norm(opt) == s_norm:
+                                picked = opt
+                                break
+
                     if not picked:
                         return _format_choose_lines("最後にタグで絞り込みましょう：", tags or []), True, ""
 
-                    cand2 = [e for e in cand if picked in (e.get("tags") or [])] or cand
+                    # タグでフィルタ（エントリ側のタグも正規化して比較）
+                    def _has_tag(e) -> bool:
+                        for t in (e.get("tags") or []):
+                            if _tag_norm(t) == _tag_norm(picked):
+                                return True
+                        return False
+
+                    cand2 = [e for e in cand if _has_tag(e)] or cand
                     if len(cand2) == 1:
                         _flow_clear(user_id)
                         e = cand2[0]
@@ -8156,6 +8198,7 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
                         add("カテゴリー", e.get("category"))
                         return "\n".join(lines), True, img_url
 
+                    # まだ複数 → 番号選択へ
                     titles = [(e.get("title") or "") for e in cand2][:8]
                     _flow_set(user_id, {"stage":"pick", "cand_titles":[(e.get("title") or "") for e in cand2], "titles": titles})
                     return _format_choose_lines("まだ複数あります。番号で選んでください：", titles), True, ""
