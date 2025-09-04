@@ -174,24 +174,26 @@ function escapeHtml(s){
     <div class="table-wrap">
       <table>
         <colgroup>
-          <col style="width:110px">
-          <col style="width:220px">
-          <col style="width:520px">
-          <col style="width:240px">
-          <col style="width:280px">
-          <col style="width:220px">
-          <col style="width:220px">
-          <col style="width:140px">
-          <col style="width:140px">
-          <col style="width:180px">
-          <col style="width:110px">
-          <col style="width:90px">
-          <col style="width:200px">
-          <col style="width:220px">
-          <col style="width:110px">
+          <!-- 列順を「操作 → カテゴリー → タイトル …」に変更 -->
+          <col style="width:110px"><!-- 操作 -->
+          <col style="width:110px"><!-- カテゴリー -->
+          <col style="width:220px"><!-- タイトル -->
+          <col style="width:520px"><!-- 説明 -->
+          <col style="width:240px"><!-- 住所 -->
+          <col style="width:280px"><!-- 地図URL -->
+          <col style="width:220px"><!-- タグ -->
+          <col style="width:220px"><!-- エリア -->
+          <col style="width:140px"><!-- 電話 -->
+          <col style="width:140px"><!-- 休み -->
+          <col style="width:180px"><!-- 営業時間 -->
+          <col style="width:110px"><!-- 駐車 -->
+          <col style="width:90px"><!-- 台数 -->
+          <col style="width:200px"><!-- 支払方法 -->
+          <col style="width:220px"><!-- 備考 -->
         </colgroup>
         <thead>
           <tr>
+            <th>操作</th>
             <th>カテゴリー</th>
             <th>タイトル</th>
             <th>説明</th>
@@ -206,12 +208,16 @@ function escapeHtml(s){
             <th>台数</th>
             <th>支払方法</th>
             <th>備考</th>
-            <th>操作</th>
           </tr>
         </thead>
         <tbody id="tbody">
           {% for e in entries %}
           <tr>
+            <!-- 先頭：削除ボタン -->
+            <td class="row-actions">
+              <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
+            </td>
+
             <td>
               <select name="category[]" onchange="onCategoryChange(this)">
                 {% for c in cat_list %}
@@ -239,10 +245,6 @@ function escapeHtml(s){
             <td><input data-shop type="text" name="parking_num[]" value="{{ e.parking_num or '' }}"></td>
             <td><input data-shop type="text" name="payment[]" value="{% if e.payment %}{{ ','.join(e.payment) }}{% endif %}"></td>
             <td><input data-shop type="text" name="remark[]" value="{{ e.remark or '' }}"></td>
-
-            <td class="row-actions">
-              <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
-            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -256,6 +258,11 @@ function escapeHtml(s){
 
     <template id="row-template">
       <tr>
+        <!-- 先頭：削除ボタン -->
+        <td class="row-actions">
+          <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
+        </td>
+
         <td>
           <select name="category[]" onchange="onCategoryChange(this)">
             <option value="観光" selected>観光</option>
@@ -289,10 +296,6 @@ function escapeHtml(s){
         <td><input data-shop type="text" name="parking_num[]" value=""></td>
         <td><input data-shop type="text" name="payment[]" value=""></td>
         <td><input data-shop type="text" name="remark[]" value=""></td>
-
-        <td class="row-actions">
-          <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
-        </td>
       </tr>
     </template>
   </form>
