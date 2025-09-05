@@ -87,15 +87,14 @@ def _inject_template_helpers():
         "has_endpoint": has_endpoint,
     }
 
-# 10MB上限（Flaskがリクエストボディで制御）
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10MB
+# 64MB上限（ZIP復元のため拡張）
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64MB
 
 # 413: サイズ超過時のメッセージ
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(e):
-    flash("ファイルサイズが大きすぎます（最大10MB）。")
-    # 直前のページへ戻す（必要なら '/admin/watermark' に固定でもOK）
-    return redirect(request.referrer or url_for("admin_watermark"))
+    flash("ファイルサイズが大きすぎます（最大64MB）。")
+    return redirect(request.referrer or url_for("admin_entries_edit"))
 
 # 既に前の回答で入れていれば流用されます
 MYMAP_MID = os.getenv("MYMAP_MID", "")
@@ -6693,83 +6692,123 @@ def admin_entries_edit():
     if session.get("role") != "admin":
         abort(403)
 
-    if request.method == "POST":
-        # ① 生JSONでの上書き（従来互換）
+    import json, os
+    from datetime import datetime as _dt
+
+    old_entries = load_entries()
+
+    # ① 生JSONでの上書き（従来互換）
+    if request.method == "POST" and request.form.get("entries_raw"):
         raw_json = request.form.get("entries_raw")
-        if raw_json:
-            try:
-                data = json.loads(raw_json)
-                if not isinstance(data, list):
-                    raise ValueError("ルート要素は配列(list)にしてください")
-                data = [_norm_entry(e) for e in data]
-                save_entries(data)
-                flash("entries.jsonを上書きしました")
-                return redirect(url_for("admin_entries_edit"))
-            except Exception as e:
-                flash("JSONエラー: " + str(e))
-        else:
-            # ② UIフォームからの保存（テンプレートに合わせる）
-            cats        = request.form.getlist("category[]")
-            titles      = request.form.getlist("title[]")
-            descs       = request.form.getlist("desc[]")
-            addresses   = request.form.getlist("address[]")
-            maps        = request.form.getlist("map[]")
-            tags_list   = request.form.getlist("tags[]")
-            areas_list  = request.form.getlist("areas[]")
-            tels        = request.form.getlist("tel[]")
-            holidays    = request.form.getlist("holiday[]")
-            opens       = request.form.getlist("open_hours[]")
-            parkings    = request.form.getlist("parking[]")
-            parking_nums= request.form.getlist("parking_num[]")
-            payments    = request.form.getlist("payment[]")
-            remarks     = request.form.getlist("remark[]")
-            links_list  = request.form.getlist("links[]")
-
-            new_entries = []
-            n = max(len(titles), len(descs))
-            for i in range(n):
-                title = (titles[i] if i < len(titles) else "").strip()
-                desc  = (descs[i]  if i < len(descs)  else "").strip()
-                # 完全空行はスキップ
-                if not title and not desc:
-                    continue
-
-                e = {
-                    "category":   (cats[i] if i < len(cats) else "観光").strip() or "観光",
-                    "title":      title,
-                    "desc":       desc,
-                    "address":    (addresses[i]  if i < len(addresses)  else "").strip(),
-                    "map":        (maps[i]       if i < len(maps)       else "").strip(),
-                    "tags":       _split_lines_commas(tags_list[i]  if i < len(tags_list)  else ""),
-                    "areas":      _split_lines_commas(areas_list[i] if i < len(areas_list) else ""),
-                    "links":      _split_lines_commas(links_list[i]  if i < len(links_list)  else ""),
-                    "payment":    _split_lines_commas(payments[i]    if i < len(payments)    else ""),
-                    "tel":        (tels[i]        if i < len(tels)        else "").strip(),
-                    "holiday":    (holidays[i]    if i < len(holidays)    else "").strip(),
-                    "open_hours": (opens[i]       if i < len(opens)       else "").strip(),
-                    "parking":    (parkings[i]    if i < len(parkings)    else "").strip(),
-                    "parking_num":(parking_nums[i]if i < len(parking_nums)else "").strip(),
-                    "remark":     (remarks[i]     if i < len(remarks)     else "").strip(),
-                    "extras": {},
-                }
-                e = _norm_entry(e)
-                if not e["areas"]:
-                    # エリア必須（空なら行ごと無視）
-                    continue
-                new_entries.append(e)
-
-            save_entries(new_entries)
-            flash(f"{len(new_entries)} 件保存しました")
+        try:
+            data = json.loads(raw_json)
+            if not isinstance(data, list):
+                raise ValueError("ルート要素は配列(list)にしてください")
+            data = [_norm_entry(e) for e in data]
+            save_entries(data)
+            flash("entries.jsonを上書きしました")
             return redirect(url_for("admin_entries_edit"))
+        except Exception as e:
+            flash("JSONエラー: " + str(e))
+
+    # ② UIフォームからの保存（未表示フィールドは既存からマージして保持）
+    if request.method == "POST" and not request.form.get("entries_raw"):
+        getl = request.form.getlist
+
+        row_ids       = getl("row_id[]")            # ★ hidden（未導入なら空配列）
+        cats          = getl("category[]")
+        titles        = getl("title[]")
+        descs         = getl("desc[]")
+        addresses     = getl("address[]")
+        maps          = getl("map[]")
+        tags_list     = getl("tags[]")
+        areas_list    = getl("areas[]")
+        tels          = getl("tel[]")
+        holidays      = getl("holiday[]")
+        opens         = getl("open_hours[]")
+        parkings      = getl("parking[]")
+        parking_nums  = getl("parking_num[]")
+        payments      = getl("payment[]")
+        remarks       = getl("remark[]")
+        links_list    = getl("links[]")            # テンプレに無ければ空で来るのでOK
+
+        def _safe(lst, i):  # インデックス安全取得
+            return lst[i] if i < len(lst) else ""
+
+        # いずれかの最大長で回す（テンプレ列ズレの保険）
+        n = max(len(titles), len(descs), len(cats), len(addresses), len(areas_list))
+
+        new_entries = []
+        for i in range(n):
+            title = (_safe(titles, i) or "").strip()
+            desc  = (_safe(descs,  i) or "").strip()
+
+            # 完全空行はスキップ（従来互換）
+            if not title and not desc:
+                continue
+
+            # 既存行にマッピング：row_id が数字ならそれを優先
+            base = {}
+            rid = (_safe(row_ids, i) or "").strip()
+            if rid.isdigit():
+                j = int(rid)
+                if 0 <= j < len(old_entries):
+                    base = dict(old_entries[j])   # ← 未表示フィールドを保持
+            elif i < len(old_entries):
+                # row_id 未導入テンプレ互換：同じインデックスをベースに（完璧ではないが後方互換）
+                base = dict(old_entries[i])
+
+            # フォーム値で上書き（空文字は“クリア”として反映）
+            base["category"]     = (_safe(cats, i) or "観光").strip() or "観光"
+            base["title"]        = title
+            base["desc"]         = desc
+            base["address"]      = _safe(addresses, i)
+            base["map"]          = _safe(maps, i)
+
+            # 配列系はユーティリティで正規化
+            base["tags"]         = _split_lines_commas(_safe(tags_list,  i))
+            base["areas"]        = _split_lines_commas(_safe(areas_list, i))
+            base["links"]        = _split_lines_commas(_safe(links_list,  i))
+            base["payment"]      = _split_lines_commas(_safe(payments,   i))
+
+            base["tel"]          = _safe(tels, i)
+            base["holiday"]      = _safe(holidays, i)
+            base["open_hours"]   = _safe(opens, i)
+            base["parking"]      = _safe(parkings, i)
+            base["parking_num"]  = _safe(parking_nums, i)
+            base["remark"]       = _safe(remarks, i)
+
+            # ★ 触らない＝保持：images/image/thumb/wm_external_choice/lat/lng/place_id/gmaps_share_url/extras 等
+
+            e = _norm_entry(base)
+
+            # エリア必須（従来挙動を維持）
+            if not e.get("areas"):
+                continue
+
+            new_entries.append(e)
+
+        # 保存前に自動バックアップ（復元用）
+        try:
+            os.makedirs("backups", exist_ok=True)
+            ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+            with open(os.path.join("backups", f"entries-backup-{ts}.json"), "w", encoding="utf-8") as f:
+                json.dump(old_entries, f, ensure_ascii=False, indent=2)
+        except Exception as ex:
+            app.logger.warning(f"[admin_entries_edit] backup failed: {ex}")
+
+        save_entries(new_entries)
+        flash(f"{len(new_entries)} 件保存しました（未表示フィールドは保持）")
+        return redirect(url_for("admin_entries_edit"))
 
     # GET（またはPOSTエラー後の再表示）
-    entries = [_norm_entry(x) for x in load_entries()]
-    paused, by = _pause_state()  # ← 追加
+    entries = [_norm_entry(x) for x in old_entries]
+    paused, by = _pause_state()  # ← 既存の一時停止表示に合わせて維持
     return render_template(
         "admin_entries_edit.html",
         entries=entries,
-        global_paused=paused,     # ← 追加
-        paused_by=by,             # ← 追加
+        global_paused=paused,
+        paused_by=by,
     )
 
 
@@ -7933,7 +7972,7 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
             if c:
                 arr.append(c)
         return _uniq_preserve(arr)
-    
+
     def _tag_norm(s: str) -> str:
         """タグ比較用に normalize。前後クォート/空白を除去し、NFKC+lower で比較できる形に"""
         t = (s or "").strip()
@@ -7943,14 +7982,12 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
         # 片側だけ付いているケースも軽くケア
         if t[:1] in {"'", '"'}: t = t[1:].strip()
         if t[-1:] in {"'", '"'}: t = t[:-1].strip()
-        import unicodedata, re
         t = unicodedata.normalize("NFKC", t)
         t = re.sub(r"\s+", " ", t).lower()
         return t
-    
+
     def _discriminative_tags(entries, limit: int = 12):
         """候補間で“かぶっていない”タグ（弁別力のあるタグ）を、表示用にクォートを剥がして返す"""
-        from collections import Counter
         raw_sets = [set(e.get("tags") or []) for e in entries if e.get("tags")]
         if not raw_sets:
             return []
@@ -7976,13 +8013,13 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
     now = datetime.utcnow()
     # 15分でGC
     try:
-        for k, st in list(gf.items()):
-            if st.get("exp_at") and st["exp_at"] < now:
+        for k, st_gc in list(gf.items()):
+            if st_gc.get("exp_at") and st_gc["exp_at"] < now:
                 gf.pop(k, None)
     except Exception:
         pass
 
-    def _flow_clear(uid): 
+    def _flow_clear(uid):
         if uid in gf: gf.pop(uid, None)
 
     def _flow_set(uid, st):
@@ -8000,6 +8037,16 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
     q = (question or "").strip()
     if not q:
         return "（内容が読み取れませんでした）", False, ""
+
+    # （任意）★ 交通は即答優先：進行中フローが無ければだけ割り込み
+    try:
+        st0 = _flow_get(user_id) if user_id else None
+    except Exception:
+        st0 = None
+    if not st0:
+        m0, ok0 = get_transport_reply(q)
+        if ok0:
+            return m0, False, ""  # 画像なし/即答扱い
 
     # ========= 1) 継続フローの処理（user_id がある場合のみ）=========
     if user_id:
@@ -8289,7 +8336,7 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
             ranked.append((score, tie, e))
 
     if not ranked:
-        # 即返し（天気 / 運行）
+        # 即返し（天気 / 交通）
         m, ok = get_weather_reply(q)
         if ok:
             return m, False, ""
@@ -8464,7 +8511,8 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
     # ---- user_id が無い場合は従来の一覧表示（互換モード）----
     lines = ["候補が複数見つかりました。気になるものはありますか？"]
     for i, e in enumerate(hits[:8], 1):
-        area = " / ".join(e.get("areas", []) or "") or ""
+        area_list = e.get("areas", []) or []
+        area = " / ".join(area_list) if area_list else ""
         suffix = f"（{area}）" if area else ""
         lines.append(f"{i}. {e.get('title','')}{suffix}")
     if len(hits) > 8:
@@ -8499,43 +8547,94 @@ def get_weather_reply(text: str):
 
 def get_transport_reply(text: str):
     """
-    「運行/運航/運休/欠航/状況/情報/status」か、乗り物語（船/フェリー/…/空港 等）の
-    どちらかでも含まれていれば即リンクを返す。
-    片方しか特定できなければ、その片方だけ返す。
+    交通に関する即答ロジックを統合：
+    - 「運行/運航/運休/欠航/状況/情報/status」＋（船/飛行機 等）があれば、従来どおり運行状況リンクを即答
+    - それ以外の「交通/移動/レンタカー/タクシー/バス/レンタサイクル など」は、
+      エリア別の『交通機関一覧』ページを即答（エリアが特定できなければ4エリア一覧）
+    戻り値: (message:str, ok:bool)
     """
     t = _norm_text_jp(text)
 
+    # -------------------------
+    # 1) 運行状況（従来ロジックを維持）
+    # -------------------------
     state_hit = any(k in t for k in ["運行", "運航", "運休", "欠航", "状況", "情報", "status"])
     vehicle_hit = any(k in t for k in [
-        "船","フェリー","ジェットフォイル","高速船","太古",
-        "飛行機","空港","福江空港","五島つばき空港","ana","jal"
+        "船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船",
+        "飛行機","空港","福江空港","五島つばき空港","ana","jal","フライト"
     ])
-    if not (state_hit or vehicle_hit):
+
+    if state_hit and vehicle_hit:
+        wants_ship = any(k in t for k in ["船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船"])
+        wants_fly  = any(k in t for k in ["飛行機","空港","フライト","福江空港","五島つばき空港","ana","jal"])
+
+        ship_section = (
+            "【長崎ー五島航路 運行状況】\n"
+            "・野母商船「フェリー太古」運航情報  \n"
+            "  http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+            "・九州商船「フェリー・ジェットフォイル」運航情報  \n"
+            "  https://kyusho.co.jp/status\n"
+            "・五島産業汽船「フェリー」運航情報  \n"
+            "  https://www.goto-sangyo.co.jp/\n"
+            "その他の航路や詳細は各リンクをご覧ください。"
+        )
+        fly_section = (
+            "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
+            "▶ https://www.fukuekuko.jp/"
+        )
+
+        if wants_ship and not wants_fly:
+            return ship_section, True
+        if wants_fly and not wants_ship:
+            return fly_section, True
+        return ship_section + "\n\n" + fly_section, True
+
+    # -------------------------
+    # 2) 交通機関一覧（新規ロジック）
+    # -------------------------
+    # 交通インテント（必要に応じて語を追加）
+    transport_intent = any(k in t for k in [
+        "交通","移動","レンタカー","レンタサイクル","タクシ","タクシー",
+        "配車","送迎","バス","路線バス","交通機関","transport","taxi","bus","car"
+    ])
+    if not (transport_intent or vehicle_hit):  # vehicle_hit 単独（=船/飛行機ワードのみ）の場合も一覧へ誘導したいので含める
         return "", False
 
-    wants_ship = any(k in t for k in ["船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船"])
-    wants_fly  = any(k in t for k in ["飛行機","空港","フライト","福江空港","五島つばき空港","ana","jal"])
+    AREA_URL = {
+        "五島市":     "https://www.fullygoto.com/kotsuu/",
+        "新上五島町": "https://www.fullygoto.com/kamigotokotuu/",
+        "小値賀町":   "https://www.fullygoto.com/odikakotuu/",
+        "宇久町":     "https://www.fullygoto.com/ukukotsuu/",
+    }
+    AREA_ALIASES = {
+        "五島市":     {"五島市","福江","福江島","富江","玉之浦","岐宿","三井楽","奈留","奈留島"},
+        "新上五島町": {"新上五島町","上五島","中通島","若松","有川","奈良尾","青方"},
+        "小値賀町":   {"小値賀町","小値賀","小値賀島","野崎島"},
+        "宇久町":     {"宇久町","宇久","宇久島"},
+    }
 
-    ship_section = (
-        "【長崎ー五島航路 運行状況】\n"
-        "・野母商船「フェリー太古」運航情報  \n"
-        "  http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-        "・九州商船「フェリー・ジェットフォイル」運航情報  \n"
-        "  https://kyusho.co.jp/status\n"
-        "・五島産業汽船「フェリー」運航情報  \n"
-        "  https://www.goto-sangyo.co.jp/\n"
-        "その他の航路や詳細は各リンクをご覧ください。"
-    )
-    fly_section = (
-        "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
-        "▶ https://www.fukuekuko.jp/"
-    )
+    def detect_area(text_norm: str) -> str | None:
+        for area, names in AREA_ALIASES.items():
+            for name in names:
+                if _norm_text_jp(name) in text_norm:
+                    return area
+        return None
 
-    if wants_ship and not wants_fly:
-        return ship_section, True
-    if wants_fly and not wants_ship:
-        return fly_section, True
-    return ship_section + "\n\n" + fly_section, True
+    area = detect_area(t)
+    if area:
+        url = AREA_URL[area]
+        msg = (
+            f"{area} の交通機関一覧はこちらです。\n{url}\n\n"
+            "※レンタカー／タクシー／バス等の連絡先と最新の案内は、このページに集約しています。"
+        )
+        return msg, True
+
+    # エリア未特定 → 4エリアの一覧を提示（即答）
+    lines = ["交通機関のエリアをお選びください（リンクをタップ）："]
+    for a, u in AREA_URL.items():
+        lines.append(f"- {a} 交通機関一覧：{u}")
+    lines.append("\n例：『五島市の交通』『上五島のレンタカー』『小値賀 タクシー』などでもOK。")
+    return "\n".join(lines), True
 
 @app.route("/admin/upload_image", methods=["POST"])
 @login_required
