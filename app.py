@@ -90,6 +90,11 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+# ---- アップロード上限（MB）を環境変数で可変に。デフォルト64MB ----
+import os  # 未インポートなら
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "64"))
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+
 # === サーバ内スナップショット（ZIP）: 生成 / 一覧 / 復元 / DL ===================
 
 def _snapshot_dir():
@@ -240,8 +245,6 @@ def _inject_template_helpers():
         "has_endpoint": has_endpoint,
     }
 
-# 64MB上限（ZIP復元のため拡張）
-app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024  # 64MB
 
 # 413: サイズ超過時のメッセージ
 @app.errorhandler(RequestEntityTooLarge)
@@ -2089,11 +2092,6 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
     e["wm"] = wm_choice          # ← 追加（新コードが参照するエイリアス）
 
     return e
-
-
-# ← ここに追加（この下から各種設定が続く）
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))  # お好みで
-app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 # Flask本体と MAX_CONTENT_LENGTH の設定のすぐ後に追加
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))  # 例: 40MP
@@ -7592,6 +7590,87 @@ def admin_restore():
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
 
+@app.route("/admin/restore_from_url", methods=["POST"])
+@login_required
+def admin_restore_from_url():
+    if session.get("role") != "admin":
+        abort(403)
+
+    import os, zipfile, socket, ipaddress, ssl
+    from urllib.parse import urlparse
+    from urllib.request import Request, urlopen
+
+    backup_url = (request.form.get("backup_url") or "").strip()
+    if not backup_url:
+        flash("URLが指定されていません")
+        return redirect(url_for("admin_backup"))
+
+    # http/https のみ許可
+    parsed = urlparse(backup_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        flash("有効な http/https のURLを指定してください")
+        return redirect(url_for("admin_backup"))
+
+    # SSRF対策：内部/ローカル向けIPは拒否
+    try:
+        host = parsed.hostname
+        ip = socket.gethostbyname(host)
+        ipobj = ipaddress.ip_address(ip)
+        if (ipobj.is_private or ipobj.is_loopback or ipobj.is_link_local
+                or ipobj.is_reserved or ipobj.is_multicast):
+            flash("内部ネットワーク向けのURLは使用できません")
+            return redirect(url_for("admin_backup"))
+    except Exception:
+        flash("URLのホスト名解決に失敗しました")
+        return redirect(url_for("admin_backup"))
+
+    # サイズ上限（既定200MB／環境変数 RESTORE_URL_MAX_MB で調整可）
+    try:
+        MAX_BYTES = int(os.getenv("RESTORE_URL_MAX_MB", "200")) * 1024 * 1024
+    except Exception:
+        MAX_BYTES = 200 * 1024 * 1024
+
+    tmpdir = os.path.join(BASE_DIR, "tmp")
+    os.makedirs(tmpdir, exist_ok=True)
+    tmpzip = os.path.join(tmpdir, "restore_download.zip")
+
+    try:
+        req = Request(backup_url, headers={"User-Agent": "BackupRestore/1.0"})
+        context = ssl.create_default_context()
+        total = 0
+        with urlopen(req, timeout=60, context=context) as resp, open(tmpzip, "wb") as wf:
+            cl = resp.headers.get("Content-Length")
+            if cl and cl.isdigit() and int(cl) > MAX_BYTES:
+                mb = int(int(cl) / 1024 / 1024)
+                lim = int(MAX_BYTES / 1024 / 1024)
+                flash(f"ZIPが大きすぎます（{mb}MB > 許容 {lim}MB）")
+                return redirect(url_for("admin_backup"))
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_BYTES:
+                    flash("ダウンロードサイズが上限を超えました（RESTORE_URL_MAX_MB を増やせます）")
+                    return redirect(url_for("admin_backup"))
+                wf.write(chunk)
+
+        # 既存の安全展開関数で復元
+        with zipfile.ZipFile(tmpzip, "r") as zf:
+            _safe_extractall(zf, BASE_DIR)
+
+        flash("URLからの復元が完了しました。データをご確認ください。")
+    except Exception as e:
+        app.logger.exception("restore_from_url failed: %s", e)
+        flash("URLからの復元でエラーが発生しました: " + str(e))
+    finally:
+        try:
+            if os.path.exists(tmpzip):
+                os.remove(tmpzip)
+        except Exception:
+            pass
+
+    return redirect(url_for("admin_backup"))
 
 @app.route("/internal/backup", methods=["POST"])
 def internal_backup():
