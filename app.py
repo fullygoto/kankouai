@@ -8812,65 +8812,80 @@ def get_weather_reply(text: str):
 
 def get_transport_reply(text: str):
     """
-    交通に関する即答ロジックを統合：
-    - 「運行/運航/運休/欠航/状況/情報/status」＋（船/飛行機 等）があれば、従来どおり運行状況リンクを即答
-    - それ以外の「交通/移動/レンタカー/タクシー/バス/レンタサイクル など」は、
-      エリア別の『交通機関一覧』ページを即答（エリアが特定できなければ4エリア一覧）
+    「運行/運航/運休/欠航/状況/情報/status」か、乗り物語（船/フェリー/…/空港 等）の
+    どちらかでも含まれていれば即リンクを返す。
+    片方しか特定できなければ、その片方だけ返す。
     戻り値: (message:str, ok:bool)
     """
     t = _norm_text_jp(text)
 
-    # -------------------------
-    # 1) 運行状況（従来ロジックを維持）
-    # -------------------------
-    state_hit = any(k in t for k in ["運行", "運航", "運休", "欠航", "状況", "情報", "status"])
+    # ② 状態語を少し拡充（任意）
+    state_hit = any(k in t for k in ["運行", "運航", "運休", "欠航", "遅延", "見合わせ", "運転見合わせ", "状況", "情報", "status"])
+
+    # ① ORC を追加
     vehicle_hit = any(k in t for k in [
-        "船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船",
-        "飛行機","空港","福江空港","五島つばき空港","ana","jal","フライト"
+        "船","フェリー","ジェットフォイル","高速船","太古",
+        "飛行機","空港","福江空港","五島つばき空港","ana","jal","orc","オリエンタルエアブリッジ"
     ])
-
-    if state_hit and vehicle_hit:
-        wants_ship = any(k in t for k in ["船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船"])
-        wants_fly  = any(k in t for k in ["飛行機","空港","フライト","福江空港","五島つばき空港","ana","jal"])
-
-        ship_section = (
-            "【長崎ー五島航路 運行状況】\n"
-            "・野母商船「フェリー太古」運航情報  \n"
-            "  http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-            "・九州商船「フェリー・ジェットフォイル」運航情報  \n"
-            "  https://kyusho.co.jp/status\n"
-            "・五島産業汽船「フェリー」運航情報  \n"
-            "  https://www.goto-sangyo.co.jp/\n"
-            "その他の航路や詳細は各リンクをご覧ください。"
-        )
-        fly_section = (
-            "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
-            "▶ https://www.fukuekuko.jp/"
-        )
-
-        if wants_ship and not wants_fly:
-            return ship_section, True
-        if wants_fly and not wants_ship:
-            return fly_section, True
-        return ship_section + "\n\n" + fly_section, True
-
-    # -------------------------
-    # 2) 交通機関一覧（新規ロジック）
-    # -------------------------
-    # 交通インテント（必要に応じて語を追加）
-    transport_intent = any(k in t for k in [
-        "交通","移動","レンタカー","レンタサイクル","タクシ","タクシー",
-        "配車","送迎","バス","路線バス","交通機関","transport","taxi","bus","car"
-    ])
-    if not (transport_intent or vehicle_hit):  # vehicle_hit 単独（=船/飛行機ワードのみ）の場合も一覧へ誘導したいので含める
+    if not (state_hit or vehicle_hit):
         return "", False
 
+    wants_ship = any(k in t for k in ["船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船"])
+    # ① ORC を追加
+    wants_fly  = any(k in t for k in ["飛行機","空港","フライト","福江空港","五島つばき空港","ana","jal","orc","オリエンタルエアブリッジ"])
+
+    ship_section = (
+        "【長崎ー五島航路 運行状況】\n"
+        "・野母商船「フェリー太古」運航情報  \n"
+        "  http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
+        "・九州商船「フェリー・ジェットフォイル」運航情報  \n"
+        "  https://kyusho.co.jp/status\n"
+        "・五島産業汽船「フェリー」運航情報  \n"
+        "  https://www.goto-sangyo.co.jp/\n"
+        "その他の航路や詳細は各リンクをご覧ください。"
+    )
+    fly_section = (
+        "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
+        "▶ https://www.fukuekuko.jp/"
+    )
+
+    if wants_ship and not wants_fly:
+        return ship_section, True
+    if wants_fly and not wants_ship:
+        return fly_section, True
+    return ship_section + "\n\n" + fly_section, True
+
+
+def get_mobility_reply(text: str):
+    """
+    レンタカー／バス／レンタサイクル 専用の即リンク返事
+    - タクシーは既存ロジックに任せるため、この関数では扱わない（空振りで返す）
+    - エリア名を含めばそのエリアの一覧を返す。無ければ4エリアの選択肢を返す
+    戻り値: (message:str, ok:bool)
+    """
+    t = _norm_text_jp(text)
+
+    # タクシーは既存の “今動いている” 実装に丸投げするため対象外
+    if any(k in t for k in ["タクシ", "タクシー", "taxi"]):
+        return "", False
+
+    # 対象キーワード（必要に応じて増やしてください）
+    triggers = [
+        "レンタカー", "バス", "路線バス",
+        "レンタサイクル", "シェアサイクル", "自転車レンタル",
+        "car rental", "bus", "bicycle"
+    ]
+    if not any(k in t for k in triggers):
+        return "", False
+
+    # エリア -> ページURL
     AREA_URL = {
         "五島市":     "https://www.fullygoto.com/kotsuu/",
         "新上五島町": "https://www.fullygoto.com/kamigotokotuu/",
         "小値賀町":   "https://www.fullygoto.com/odikakotuu/",
         "宇久町":     "https://www.fullygoto.com/ukukotsuu/",
     }
+    # エリアの別名
     AREA_ALIASES = {
         "五島市":     {"五島市","福江","福江島","富江","玉之浦","岐宿","三井楽","奈留","奈留島"},
         "新上五島町": {"新上五島町","上五島","中通島","若松","有川","奈良尾","青方"},
@@ -8889,16 +8904,17 @@ def get_transport_reply(text: str):
     if area:
         url = AREA_URL[area]
         msg = (
-            f"{area} の交通機関一覧はこちらです。\n{url}\n\n"
-            "※レンタカー／タクシー／バス等の連絡先と最新の案内は、このページに集約しています。"
+            f"{area} の交通機関（レンタカー／バス／レンタサイクル）一覧はこちらです。\n"
+            f"{url}\n\n"
+            "※最新の案内・連絡先は上記ページに集約しています。"
         )
         return msg, True
 
-    # エリア未特定 → 4エリアの一覧を提示（即答）
+    # エリア未特定 → 4エリアの一覧を提示
     lines = ["交通機関のエリアをお選びください（リンクをタップ）："]
     for a, u in AREA_URL.items():
         lines.append(f"- {a} 交通機関一覧：{u}")
-    lines.append("\n例：『五島市の交通』『上五島のレンタカー』『小値賀 タクシー』などでもOK。")
+    lines.append("\n例：『五島市 レンタカー』『上五島 バス』『小値賀 レンタサイクル』などでもOK。")
     return "\n".join(lines), True
 
 @app.route("/admin/upload_image", methods=["POST"])
