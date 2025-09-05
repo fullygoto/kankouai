@@ -29,6 +29,23 @@ from flask import (
     current_app as _flask_current_app,  # ← これを追加
 )
 
+
+# --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
+try:
+    # 既に flask_login を使っている環境なら公式の login_required を使う
+    from flask_login import login_required  # type: ignore
+except Exception:
+    # フォールバック（セッションに role が無ければ 403）
+    def login_required(view_func):
+        from functools import wraps  # すでに上で import しているが二重でもOK
+        @wraps(view_func)
+        def _wrapped(*args, **kwargs):
+            if not session.get("role"):
+                return abort(403)
+            return view_func(*args, **kwargs)
+        return _wrapped
+# ---------------------------------------------------------------------------
+
 from werkzeug.exceptions import RequestEntityTooLarge, NotFound
 from werkzeug.utils import secure_filename, safe_join
 from werkzeug.routing import BuildError
@@ -160,6 +177,7 @@ def _snapshot_restore_internal(fname: str):
             if _is_allowed(m.filename):
                 z.extract(m, ".")
     return path
+
 
 @app.route("/admin/snapshot/create", methods=["POST"])
 @login_required
