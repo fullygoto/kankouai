@@ -73,6 +73,141 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+# === サーバ内スナップショット（ZIP）: 生成 / 一覧 / 復元 / DL ===================
+
+def _snapshot_dir():
+    import os
+    return os.environ.get("SNAPSHOT_DIR", "backups")
+
+def _snapshot_includes():
+    """
+    ZIPに含めるパス（カンマ区切り環境変数 SNAPSHOT_INCLUDES があれば上書き）
+    既定： data/, static/uploads/, images/, entries.json
+    """
+    import os
+    raw = os.environ.get("SNAPSHOT_INCLUDES", "data,static/uploads,images,entries.json")
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+def _snapshot_list():
+    import os, glob, datetime as dt
+    base = _snapshot_dir()
+    os.makedirs(base, exist_ok=True)
+    files = sorted(glob.glob(os.path.join(base, "snapshot-*.zip")))
+    out = []
+    for f in files:
+        st = os.stat(f)
+        out.append({
+            "name": os.path.basename(f),
+            "size": st.st_size,
+            "mtime": dt.datetime.fromtimestamp(st.st_mtime),
+        })
+    return list(reversed(out))  # 新しい順
+
+def _snapshot_create_internal(tag: str | None = None):
+    """
+    サーバ内にZIPを作成してパスを返す。失敗時は例外。
+    """
+    import os, time, zipfile, os.path as op
+    base = _snapshot_dir()
+    os.makedirs(base, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    name = f"snapshot-{ts}{('-'+tag) if tag else ''}.zip"
+    out = op.join(base, name)
+
+    def _add_path(z: zipfile.ZipFile, p: str):
+        if not op.exists(p):
+            return
+        if op.isdir(p):
+            for root, dirs, files in os.walk(p):
+                for fn in files:
+                    fp = op.join(root, fn)
+                    arc = op.relpath(fp, start=".")
+                    z.write(fp, arcname=arc)
+        else:
+            z.write(p, arcname=op.relpath(p, start="."))
+
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for p in _snapshot_includes():
+            _add_path(z, p)
+    return out
+
+def _snapshot_restore_internal(fname: str):
+    """
+    ZIPから復元する。許可されたパス（entries.json / data/ / static/uploads/ / images/）のみ展開。
+    """
+    import os, zipfile, os.path as op
+    base = op.abspath(_snapshot_dir())
+    path = op.abspath(op.join(base, fname))
+    if not path.startswith(base) or not op.isfile(path):
+        raise FileNotFoundError("snapshot not found")
+
+    def _is_allowed(member_name: str) -> bool:
+        norm = op.normpath(member_name)
+        if norm.startswith(("/", "\\")):  # ルート直下禁止
+            return False
+        parts = norm.split(os.sep)
+        if ".." in parts:  # zip-slip対策
+            return False
+        allowed_prefixes = [
+            "data"+os.sep,
+            "static"+os.sep+"uploads"+os.sep,
+            "images"+os.sep,
+        ]
+        return (norm == "entries.json") or any(norm.startswith(p) for p in allowed_prefixes)
+
+    with zipfile.ZipFile(path, "r") as z:
+        for m in z.infolist():
+            if _is_allowed(m.filename):
+                z.extract(m, ".")
+    return path
+
+@app.route("/admin/snapshot/create", methods=["POST"])
+@login_required
+def admin_snapshot_create():
+    if session.get("role") != "admin":
+        abort(403)
+    from flask import redirect, url_for, flash
+    try:
+        out = _snapshot_create_internal()
+        from os.path import basename
+        flash(f"スナップショットを作成しました：{basename(out)}")
+    except Exception as e:
+        app.logger.exception("snapshot create failed")
+        flash(f"スナップショット作成に失敗しました: {e}")
+    return redirect(url_for("admin_entries_edit"))
+
+@app.route("/admin/snapshot/download/<path:fname>")
+@login_required
+def admin_snapshot_download(fname):
+    if session.get("role") != "admin":
+        abort(403)
+    from flask import send_from_directory, abort as _abort
+    import os, os.path as op
+    base = op.abspath(_snapshot_dir())
+    path = op.abspath(op.join(base, fname))
+    if not path.startswith(base) or not op.isfile(path):
+        _abort(404)
+    return send_from_directory(base, op.basename(path), as_attachment=True)
+
+@app.route("/admin/snapshot/restore", methods=["POST"])
+@login_required
+def admin_snapshot_restore():
+    if session.get("role") != "admin":
+        abort(403)
+    from flask import request, redirect, url_for, flash
+    fname = (request.form.get("fname") or "").strip()
+    if not fname:
+        flash("スナップショットが選択されていません。")
+        return redirect(url_for("admin_entries_edit"))
+    try:
+        path = _snapshot_restore_internal(fname)
+        from os.path import basename
+        flash(f"復元しました：{basename(path)}")
+    except Exception as e:
+        app.logger.exception("snapshot restore failed")
+        flash(f"復元に失敗しました: {e}")
+    return redirect(url_for("admin_entries_edit"))
+# ========================================================================
 
 @app.context_processor
 def _inject_template_helpers():
@@ -6692,8 +6827,9 @@ def admin_entries_edit():
     if session.get("role") != "admin":
         abort(403)
 
-    import json, os
+    import json, os, glob
     from datetime import datetime as _dt
+    import os.path as _op
 
     old_entries = load_entries()
 
@@ -6755,7 +6891,7 @@ def admin_entries_edit():
                 if 0 <= j < len(old_entries):
                     base = dict(old_entries[j])   # ← 未表示フィールドを保持
             elif i < len(old_entries):
-                # row_id 未導入テンプレ互換：同じインデックスをベースに（完璧ではないが後方互換）
+                # row_id 未導入テンプレ互換：同じインデックスをベースに（後方互換）
                 base = dict(old_entries[i])
 
             # フォーム値で上書き（空文字は“クリア”として反映）
@@ -6797,6 +6933,17 @@ def admin_entries_edit():
         except Exception as ex:
             app.logger.warning(f"[admin_entries_edit] backup failed: {ex}")
 
+        # （任意）環境変数で保存直前スナップショットを作成：SNAPSHOT_ON_SAVE=1
+        if os.environ.get("SNAPSHOT_ON_SAVE") == "1":
+            try:
+                # 事前に _snapshot_create_internal が定義済みなら呼び出す
+                _snapshot_create_internal(tag="pre-save")
+            except NameError:
+                # ヘルパ未導入環境ではスキップ
+                pass
+            except Exception as ex:
+                app.logger.warning(f"[admin_entries_edit] snapshot(on save) failed: {ex}")
+
         save_entries(new_entries)
         flash(f"{len(new_entries)} 件保存しました（未表示フィールドは保持）")
         return redirect(url_for("admin_entries_edit"))
@@ -6804,11 +6951,32 @@ def admin_entries_edit():
     # GET（またはPOSTエラー後の再表示）
     entries = [_norm_entry(x) for x in old_entries]
     paused, by = _pause_state()  # ← 既存の一時停止表示に合わせて維持
+
+    # スナップショット一覧（ヘルパ未導入でも動くようフォールバック）
+    try:
+        snapshots = _snapshot_list()
+    except NameError:
+        # backups/snapshot-*.zip を新しい順で列挙（テンプレの表示に合わせた dict 形式）
+        os.makedirs("backups", exist_ok=True)
+        files = sorted(glob.glob(_op.join("backups", "snapshot-*.zip")))
+        snapshots = []
+        for f in reversed(files):
+            try:
+                st = os.stat(f)
+                snapshots.append({
+                    "name": _op.basename(f),
+                    "size": st.st_size,
+                    "mtime": _dt.fromtimestamp(st.st_mtime),
+                })
+            except Exception:
+                pass
+
     return render_template(
         "admin_entries_edit.html",
         entries=entries,
         global_paused=paused,
         paused_by=by,
+        snapshots=snapshots,   # ★ スナップショットUI用
     )
 
 
