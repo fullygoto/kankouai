@@ -25,7 +25,7 @@
 
   /* 横スクロール用：テーブルをラップして overflow-x */
   .table-wrap{overflow-x:auto;background:var(--panel);border-radius:12px;box-shadow:0 4px 16px #c6d4e71a}
-  table{border-collapse:collapse;min-width:1900px;width:100%}
+  table{border-collapse:collapse;min-width:1960px;width:100%}
   th,td{border-bottom:1px solid var(--line);padding:8px;vertical-align:top;font-size:13px;background:#fff}
   thead th{position:sticky;top:0;background:#f1f5f9;text-align:left;white-space:nowrap;z-index:1}
   input[type=text], textarea, select{
@@ -134,6 +134,43 @@ function escapeHtml(s){
     {% endif %}
   {% endwith %}
 
+  <!-- サーバ内スナップショット（ZIP）: app.py で snapshots を渡していない場合でも表示は安全です -->
+  <div class="card">
+    <h2>サーバ内スナップショット（ZIP）</h2>
+    <div class="row" style="margin-bottom:8px">
+      <form method="post" action="{{ url_for('admin_snapshot_create') }}">
+        <button class="btn" type="submit">📦 スナップショットを作成</button>
+      </form>
+      <span class="note">データ（data/）、画像（static/uploads/・images/）、entries.json をZIPで保存します（アップロード不要）。</span>
+    </div>
+    {% if snapshots and snapshots|length %}
+      <div class="row" style="gap:8px;align-items:center;margin-bottom:8px">
+        <form method="post" action="{{ url_for('admin_snapshot_restore') }}"
+              onsubmit="return confirm('選択したスナップショットで復元します。現在の内容は上書きされます。よろしいですか？');">
+          <select name="fname">
+            {% for s in snapshots %}
+              <option value="{{ s.name }}">
+                {{ s.name }}（{{ (s.size/1048576)|round(1) }} MB / {{ s.mtime.strftime('%Y-%m-%d %H:%M') }}）
+              </option>
+            {% endfor %}
+          </select>
+          <button class="btn danger" type="submit">⏪ このスナップショットで復元</button>
+        </form>
+      </div>
+      <ul style="margin:0;padding-left:18px">
+        {% for s in snapshots %}
+        <li>
+          <code>{{ s.name }}</code>
+          <span class="note"> — {{ (s.size/1048576)|round(1) }} MB / {{ s.mtime.strftime('%Y-%m-%d %H:%M') }}</span>
+          <a class="btn ghost" style="margin-left:8px" href="{{ url_for('admin_snapshot_download', fname=s.name) }}">⬇ ダウンロード</a>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="note">まだスナップショットはありません。「📦 スナップショットを作成」を押すと保存されます。</div>
+    {% endif %}
+  </div>
+
   <div class="card">
     <h2>タイトル重複の統合（AI最適化）</h2>
     <div class="row" style="margin-bottom:8px">
@@ -174,24 +211,26 @@ function escapeHtml(s){
     <div class="table-wrap">
       <table>
         <colgroup>
-          <col style="width:110px">
-          <col style="width:220px">
-          <col style="width:520px">
-          <col style="width:240px">
-          <col style="width:280px">
-          <col style="width:220px">
-          <col style="width:220px">
-          <col style="width:140px">
-          <col style="width:140px">
-          <col style="width:180px">
-          <col style="width:110px">
-          <col style="width:90px">
-          <col style="width:200px">
-          <col style="width:220px">
-          <col style="width:110px">
+          <!-- 列順を「操作 → カテゴリー → タイトル …」に変更 -->
+          <col style="width:110px"><!-- 操作 -->
+          <col style="width:110px"><!-- カテゴリー -->
+          <col style="width:220px"><!-- タイトル -->
+          <col style="width:520px"><!-- 説明 -->
+          <col style="width:240px"><!-- 住所 -->
+          <col style="width:280px"><!-- 地図URL -->
+          <col style="width:220px"><!-- タグ -->
+          <col style="width:220px"><!-- エリア -->
+          <col style="width:140px"><!-- 電話 -->
+          <col style="width:140px"><!-- 休み -->
+          <col style="width:180px"><!-- 営業時間 -->
+          <col style="width:110px"><!-- 駐車 -->
+          <col style="width:90px"><!-- 台数 -->
+          <col style="width:200px"><!-- 支払方法 -->
+          <col style="width:220px"><!-- 備考 -->
         </colgroup>
         <thead>
           <tr>
+            <th>操作</th>
             <th>カテゴリー</th>
             <th>タイトル</th>
             <th>説明</th>
@@ -206,12 +245,20 @@ function escapeHtml(s){
             <th>台数</th>
             <th>支払方法</th>
             <th>備考</th>
-            <th>操作</th>
           </tr>
         </thead>
         <tbody id="tbody">
           {% for e in entries %}
           <tr>
+            <!-- 先頭：削除ボタン + 安定ID/リンク保持のhidden -->
+            <td class="row-actions">
+              <!-- ★ 安定ID：サーバ側のマージ保存用（未表示フィールド保持） -->
+              <input type="hidden" name="row_id[]" value="{{ loop.index0 }}">
+              <!-- ★ links[] がテンプレに無い環境でも既存値を保持するための hidden -->
+              <input type="hidden" name="links[]" value="{% if e.links %}{{ ','.join(e.links) }}{% endif %}">
+              <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
+            </td>
+
             <td>
               <select name="category[]" onchange="onCategoryChange(this)">
                 {% for c in cat_list %}
@@ -239,10 +286,6 @@ function escapeHtml(s){
             <td><input data-shop type="text" name="parking_num[]" value="{{ e.parking_num or '' }}"></td>
             <td><input data-shop type="text" name="payment[]" value="{% if e.payment %}{{ ','.join(e.payment) }}{% endif %}"></td>
             <td><input data-shop type="text" name="remark[]" value="{{ e.remark or '' }}"></td>
-
-            <td class="row-actions">
-              <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
-            </td>
           </tr>
           {% endfor %}
         </tbody>
@@ -256,6 +299,13 @@ function escapeHtml(s){
 
     <template id="row-template">
       <tr>
+        <!-- 先頭：削除ボタン + 安定ID/リンク保持のhidden -->
+        <td class="row-actions">
+          <input type="hidden" name="row_id[]" value="">
+          <input type="hidden" name="links[]" value="">
+          <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
+        </td>
+
         <td>
           <select name="category[]" onchange="onCategoryChange(this)">
             <option value="観光" selected>観光</option>
@@ -289,10 +339,6 @@ function escapeHtml(s){
         <td><input data-shop type="text" name="parking_num[]" value=""></td>
         <td><input data-shop type="text" name="payment[]" value=""></td>
         <td><input data-shop type="text" name="remark[]" value=""></td>
-
-        <td class="row-actions">
-          <button class="btn danger" type="button" onclick="removeRow(this)">削除</button>
-        </td>
       </tr>
     </template>
   </form>
