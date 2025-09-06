@@ -3143,33 +3143,22 @@ def handle_message(event):
             _reply_quick_no_dedupe(event, w)
             save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
             return
+        
+        # ④-2 mobility（レンタカー／タクシー／バス／レンタサイクル）→ fullyGOTOリンク最優先
+        try:
+            mmsg, mok = get_mobility_reply(text)  # ← ここでリンク or 事業者詳細を決定
+            app.logger.debug(f"[quick] mobility_match={mok} text={text!r}")
+            if mok and mmsg:
+                _reply_quick_no_dedupe(event, mmsg)  # 長文分割/重複抑止の既存ユーティリティを活用
+                try:
+                    save_qa_log(text, mmsg, source="line", hit_db=False,
+                                extra={"kind":"mobility","via":"link_first"})
+                except Exception:
+                    pass
+                return
+        except Exception as e:
+            app.logger.exception(f"mobility link-first failed: {e}")
 
-        # ④-2 mobility（レンタカー／バス／レンタサイクル）→ クイックリプライ
-        #    ※ “タクシー”は既存の別ロジックを優先したいのでトリガには含めません
-        tnorm = _norm_text_jp(text)
-        _mob_trigs = ("レンタカー","バス","路線バス","バス時刻表","レンタサイクル","シェアサイクル","自転車レンタル","car rental","bus","bicycle")
-        mob_hit = any(w in tnorm for w in _mob_trigs)
-        app.logger.debug(f"[quick] mobility_match={mob_hit} text={text!r}")
-        if mob_hit:
-            qr = QuickReply(items=[
-                QuickReplyButton(action=PostbackAction(
-                    label="レンタカー", data="act=mobility&kind=rentacar")),
-                QuickReplyButton(action=PostbackAction(
-                    label="バス時刻表", data="act=mobility&kind=bus")),
-                QuickReplyButton(action=PostbackAction(
-                    label="レンタサイクル", data="act=mobility&kind=bicycle")),
-                QuickReplyButton(action=PostbackAction(
-                    label="タクシー", data="act=mobility&kind=taxi")),
-            ])
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="移動手段を選んでください", quick_reply=qr)
-            )
-            try:
-                save_qa_log(text, "mobility_quickreply", source="line", hit_db=False, extra={"kind":"mobility","via":"quick"})
-            except Exception:
-                pass
-            return
 
         # ④-3 交通（運行状況：船・飛行機）
         tmsg, ok = get_transport_reply(text)
@@ -9043,67 +9032,137 @@ def get_transport_reply(text: str):
     return ship_section + "\n\n" + fly_section, True
 
 
+# エリア -> ページURL（そのまま流用）
+AREA_URL = {
+    "五島市":     "https://www.fullygoto.com/kotsuu/",
+    "新上五島町": "https://www.fullygoto.com/kamigotokotuu/",
+    "小値賀町":   "https://www.fullygoto.com/odikakotuu/",
+    "宇久町":     "https://www.fullygoto.com/ukukotsuu/",
+}
+# エリアの別名（そのまま流用）
+AREA_ALIASES = {
+    "五島市":     {"五島市","福江","福江島","富江","玉之浦","岐宿","三井楽","奈留","奈留島"},
+    "新上五島町": {"新上五島町","上五島","中通島","若松","有川","奈良尾","青方"},
+    "小値賀町":   {"小値賀町","小値賀","小値賀島","野崎島"},
+    "宇久町":     {"宇久町","宇久","宇久島"},
+}
+
+# 事業者レジストリ（例）。実データに差し替えてください。
+PROVIDERS = {
+    "レンタカー": [
+        {
+            "name": "五島レンタカー",
+            "aliases": ["五島レンタ","ごとうレンタカー","goto rentacar"],
+            "tel": "0959-XX-XXXX",
+            "url": "https://example.com/goto-rentacar",
+            "hours": "8:30-18:00",
+            "note": "空港/港での受け渡し可"
+        },
+        {
+            "name": "上五島レンタカー",
+            "aliases": ["かみごとうレンタ","上五島RC"],
+            "tel": "0959-YY-YYYY",
+            "url": "https://example.com/kamigoto-rentacar",
+            "hours": "9:00-17:30",
+            "note": "青方港周辺で受け渡し"
+        },
+    ],
+    "タクシー": [
+        {
+            "name": "五島タクシー",
+            "aliases": ["ごとうタクシー","Goto Taxi"],
+            "tel": "0959-ZZ-ZZZZ",
+            "url": "https://example.com/goto-taxi",
+            "hours": "24時間",
+            "note": "空港/港の定額あり"
+        },
+        {
+            "name": "上五島タクシー",
+            "aliases": ["かみごとうタクシー","Kamigoto Taxi"],
+            "tel": "0959-AA-AAAA",
+            "url": "https://example.com/kamigoto-taxi",
+            "hours": "6:00-24:00",
+            "note": "早朝予約は前日まで"
+        },
+    ],
+}
+
+def _detect_area(text_norm: str) -> str | None:
+    for area, names in AREA_ALIASES.items():
+        for name in names:
+            if _norm_text_jp(name) in text_norm:
+                return area
+    return None
+
+def _format_provider(p: dict) -> str:
+    parts = [f"【{p.get('name','')}】"]
+    if p.get("tel"):   parts.append(f"電話：{p['tel']}")
+    if p.get("hours"): parts.append(f"時間：{p['hours']}")
+    if p.get("url"):   parts.append(f"URL：{p['url']}")
+    if p.get("note"):  parts.append(f"備考：{p['note']}")
+    return "\n".join(parts)
+
+def _find_provider_by_text(text: str) -> dict | None:
+    t = _norm_text_jp(text)
+    # 完全/部分一致
+    for cat, arr in PROVIDERS.items():
+        for p in arr:
+            for nm in [p["name"], *p.get("aliases", [])]:
+                if _norm_text_jp(nm) in t:
+                    return p
+    # 近似（必要なら閾値を下げる）
+    candidates = {}
+    for cat, arr in PROVIDERS.items():
+        for p in arr:
+            for nm in [p["name"], *p.get("aliases", [])]:
+                key = _norm_text_jp(nm)
+                candidates[key] = p
+    hit = get_close_matches(_norm_text_jp(text), list(candidates.keys()), n=1, cutoff=0.92)
+    if hit:
+        return candidates[hit[0]]
+    return None
+
 def get_mobility_reply(text: str):
     """
-    レンタカー／バス／レンタサイクル 専用の即リンク返事
-    - タクシーは既存ロジックに任せるため、この関数では扱わない（空振りで返す）
-    - エリア名を含めばそのエリアの一覧を返す。無ければ4エリアの選択肢を返す
+    レンタカー／タクシー／バス／レンタサイクル
+    - 原則：各交通機関の一覧（fullyGOTOサイト）リンクを“最優先”で返す
+    - その後：固有名（会社名）が来たら、その詳細を返す
     戻り値: (message:str, ok:bool)
     """
     t = _norm_text_jp(text)
 
-    # タクシーは既存の “今動いている” 実装に丸投げするため対象外
-    if any(k in t for k in ["タクシ", "タクシー", "taxi"]):
-        return "", False
+    # 0) 固有名が含まれていれば、詳細を返す（“その後”フェーズ）
+    p = _find_provider_by_text(t)
+    if p:
+        return _format_provider(p), True
 
-    # 対象キーワード（必要に応じて増やしてください）
+    # 1) 一般トリガー語なら“リンク最優先”で返答
     triggers = [
-        "レンタカー", "バス", "路線バス",
+        "レンタカー", "タクシ", "タクシー", "バス", "路線バス",
         "レンタサイクル", "シェアサイクル", "自転車レンタル",
-        "car rental", "bus", "bicycle"
+        "car rental", "taxi", "bus", "bicycle"
     ]
-    if not any(k in t for k in triggers):
-        return "", False
+    if any(k in t for k in triggers):
+        area = _detect_area(t)
+        if area:
+            url = AREA_URL[area]
+            msg = (
+                f"{area} の交通機関（レンタカー／タクシー／バス／レンタサイクル）一覧はこちらです。\n"
+                f"{url}\n\n"
+                "※最新の案内・連絡先は上記ページに集約しています。"
+            )
+            return msg, True
 
-    # エリア -> ページURL
-    AREA_URL = {
-        "五島市":     "https://www.fullygoto.com/kotsuu/",
-        "新上五島町": "https://www.fullygoto.com/kamigotokotuu/",
-        "小値賀町":   "https://www.fullygoto.com/odikakotuu/",
-        "宇久町":     "https://www.fullygoto.com/ukukotsuu/",
-    }
-    # エリアの別名
-    AREA_ALIASES = {
-        "五島市":     {"五島市","福江","福江島","富江","玉之浦","岐宿","三井楽","奈留","奈留島"},
-        "新上五島町": {"新上五島町","上五島","中通島","若松","有川","奈良尾","青方"},
-        "小値賀町":   {"小値賀町","小値賀","小値賀島","野崎島"},
-        "宇久町":     {"宇久町","宇久","宇久島"},
-    }
+        # エリア未特定 → 4エリアのリンク一覧
+        lines = ["交通機関のエリアをお選びください（リンクをタップ）："]
+        for a, u in AREA_URL.items():
+            lines.append(f"- {a} 交通機関一覧：{u}")
+        lines.append("\n例：『五島市 レンタカー』『上五島 タクシー』『小値賀 バス』『宇久 レンタサイクル』などでもOK。")
+        return "\n".join(lines), True
 
-    def detect_area(text_norm: str) -> str | None:
-        for area, names in AREA_ALIASES.items():
-            for name in names:
-                if _norm_text_jp(name) in text_norm:
-                    return area
-        return None
-
-    area = detect_area(t)
-    if area:
-        url = AREA_URL[area]
-        msg = (
-            f"{area} の交通機関（レンタカー／バス／レンタサイクル）一覧はこちらです。\n"
-            f"{url}\n\n"
-            "※最新の案内・連絡先は上記ページに集約しています。"
-        )
-        return msg, True
-
-    # エリア未特定 → 4エリアの一覧を提示
-    lines = ["交通機関のエリアをお選びください（リンクをタップ）："]
-    for a, u in AREA_URL.items():
-        lines.append(f"- {a} 交通機関一覧：{u}")
-    lines.append("\n例：『五島市 レンタカー』『上五島 バス』『小値賀 レンタサイクル』などでもOK。")
-    return "\n".join(lines), True
-
+    # 何も該当しない
+    return "", False
+# =====================================================================
 @app.route("/admin/upload_image", methods=["POST"])
 @login_required
 def admin_upload_image():
