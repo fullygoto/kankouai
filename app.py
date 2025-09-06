@@ -13,11 +13,16 @@ import uuid
 import hmac, hashlib, base64
 import zipfile
 import io
+# 追加が必要な標準ライブラリ
+import shutil      # _has_free_space で disk_usage を使用
+import tarfile     # _stream_backup_targz で使用
+import queue       # ストリーミング用の内部キュー
 from pathlib import Path
 from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
 import urllib.parse as _u  # ← _extract_wm_flags などで使用
+
 
 # === Third-Party ===
 from dotenv import load_dotenv
@@ -82,6 +87,9 @@ from linebot.models import (
     QuickReply, QuickReplyButton, MessageAction,
     ImageSendMessage, LocationMessage, FlexSendMessage, LocationAction,
     FollowEvent,
+    PostbackEvent,   # ← 追加：postback用ハンドラで使います
+    PostbackAction,  # ← 追加：クイックリプライのボタンに使います
+    URIAction,       # ← 任意：押したら直でURLを開きたい時に使います
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
@@ -91,7 +99,6 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 app = Flask(__name__)
 
 # ---- アップロード上限（MB）を環境変数で可変に。デフォルト64MB ----
-import os  # 未インポートなら
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "64"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -3127,8 +3134,9 @@ def handle_message(event):
     except Exception:
         app.logger.exception("nearby keyword handler failed")
 
-    # --- ④ 即答リンク（天気・交通） -------------------------
+    # --- ④ 即答リンク（天気・mobility・交通） -----------------
     try:
+        # ④-1 天気
         w, ok = get_weather_reply(text)
         app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
         if ok and w:
@@ -3136,6 +3144,34 @@ def handle_message(event):
             save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
             return
 
+        # ④-2 mobility（レンタカー／バス／レンタサイクル）→ クイックリプライ
+        #    ※ “タクシー”は既存の別ロジックを優先したいのでトリガには含めません
+        tnorm = _norm_text_jp(text)
+        _mob_trigs = ("レンタカー","バス","路線バス","バス時刻表","レンタサイクル","シェアサイクル","自転車レンタル","car rental","bus","bicycle")
+        mob_hit = any(w in tnorm for w in _mob_trigs)
+        app.logger.debug(f"[quick] mobility_match={mob_hit} text={text!r}")
+        if mob_hit:
+            qr = QuickReply(items=[
+                QuickReplyButton(action=PostbackAction(
+                    label="レンタカー", data="act=mobility&kind=rentacar")),
+                QuickReplyButton(action=PostbackAction(
+                    label="バス時刻表", data="act=mobility&kind=bus")),
+                QuickReplyButton(action=PostbackAction(
+                    label="レンタサイクル", data="act=mobility&kind=bicycle")),
+                QuickReplyButton(action=PostbackAction(
+                    label="タクシー", data="act=mobility&kind=taxi")),
+            ])
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="移動手段を選んでください", quick_reply=qr)
+            )
+            try:
+                save_qa_log(text, "mobility_quickreply", source="line", hit_db=False, extra={"kind":"mobility","via":"quick"})
+            except Exception:
+                pass
+            return
+
+        # ④-3 交通（運行状況：船・飛行機）
         tmsg, ok = get_transport_reply(text)
         app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
         if ok and tmsg:
@@ -7452,60 +7488,169 @@ def _safe_extractall(zf: zipfile.ZipFile, dst: str):
     os.makedirs(dst, exist_ok=True)
     zf.extractall(dst)
 
+def _is_render_env() -> bool:
+    # Render では以下の環境変数が設定されている（どれか一つでもあれば Render とみなす）
+    return any(os.getenv(k) for k in ("RENDER", "RENDER_SERVICE_ID", "RENDER_SERVICE_NAME", "RENDER_EXTERNAL_URL"))
+
+def _backup_keep() -> int:
+    """
+    Render では既定3件保持。それ以外は既定10件。
+    環境変数で上書き可能:
+      BACKUP_KEEP_RENDER（Render時の保持数、既定 3）
+      BACKUP_KEEP_DEFAULT（非Render時の保持数、既定 10）
+    """
+    if _is_render_env():
+        try:
+            return int(os.getenv("BACKUP_KEEP_RENDER", "3"))
+        except Exception:
+            return 3
+    try:
+        return int(os.getenv("BACKUP_KEEP_DEFAULT", "10"))
+    except Exception:
+        return 10
+
+def _rotate_backups(out_dir: str, keep: int | None = None):
+    keep = keep or _backup_keep()
+    p = Path(out_dir)
+    if not p.exists():
+        return
+    # zip / tar.gz / tgz を対象に、更新日の新しい順に keep だけ残す
+    files = sorted(
+        [x for x in p.iterdir() if x.is_file() and (x.suffix in (".zip", ".tgz") or str(x).endswith(".tar.gz"))],
+        key=lambda x: x.stat().st_mtime,
+        reverse=True
+    )
+    for old in files[keep:]:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+def _iter_backup_items():
+    """
+    いまの実装の対象を“そのまま”パッケージ。不要な入れ子バックアップは除外。
+    戻り値: (abs_path, arcname)
+    """
+    # 単体ファイル（従来の論理名で）
+    if os.path.exists(ENTRIES_FILE):   yield ENTRIES_FILE,   "entries.json"
+    if os.path.exists(SYNONYM_FILE):   yield SYNONYM_FILE,   "synonyms.json"
+    if os.path.exists(NOTICES_FILE):   yield NOTICES_FILE,   "notices.json"
+    if os.path.exists(SHOP_INFO_FILE): yield SHOP_INFO_FILE, "shop_infos.json"
+
+    # ディレクトリ（入れ子バックアップや一部生成物は除外）
+    exclude_dirs = {"manual_backups", "auto_backups", "tmp", "__pycache__", ".git"}
+    exclude_exts = {".zip", ".tar", ".tgz", ".gz"}  # バックアップの入れ子防止
+
+    def _walk_dir(root_dir):
+        for root, dirs, files in os.walk(root_dir):
+            dirs[:] = [d for d in dirs if d not in exclude_dirs]
+            for fname in files:
+                _, ext = os.path.splitext(fname.lower())
+                if ext in exclude_exts:
+                    continue
+                fpath = os.path.join(root, fname)
+                arcname = os.path.relpath(fpath, BASE_DIR)  # BASE_DIR は既存定義を使用
+                yield fpath, arcname
+
+    if os.path.exists(DATA_DIR):
+        for item in _walk_dir(DATA_DIR):
+            yield item
+    if os.path.exists(LOG_DIR):
+        for item in _walk_dir(LOG_DIR):
+            yield item
+
+    # コードスナップショット（app.py と templates/）
+    try:
+        app_root = os.path.dirname(os.path.abspath(__file__))
+        app_py   = os.path.abspath(__file__)
+        templates_dir = os.path.join(app_root, "templates")
+        if os.path.isfile(app_py):
+            yield app_py, "code/app.py"
+        if os.path.isdir(templates_dir):
+            for root, dirs, files in os.walk(templates_dir):
+                dirs[:] = [d for d in dirs if d not in exclude_dirs]
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    rel   = os.path.relpath(fpath, app_root)  # templates/xxx...
+                    yield fpath, os.path.join("code", rel)
+    except Exception as e:
+        app.logger.exception("[backup] code snapshot enumerate failed: %s", e)
+
+def _estimate_total_bytes() -> int:
+    total = 0
+    for fpath, _ in _iter_backup_items():
+        try:
+            total += os.path.getsize(fpath)
+        except Exception:
+            pass
+    return int(total * 1.08) + 1_000_000  # 少しマージン
+
+def _has_free_space(dirpath: str, need_bytes: int) -> bool:
+    try:
+        usage = shutil.disk_usage(dirpath)
+        return usage.free > need_bytes
+    except Exception:
+        # 取得できない環境では true 扱い（従来と同等挙動）
+        return True
+
 def write_full_backup_zip(out_dir: str) -> str:
-    """アプリ内バックアップを out_dir に保存し、ファイルパスを返す"""
+    """アプリ内バックアップを out_dir に保存し、ファイルパスを返す（容量チェック付き）"""
     os.makedirs(out_dir, exist_ok=True)
+
+    # 容量事前チェック：足りなければ ENOSPC 相当を投げる
+    need = _estimate_total_bytes()
+    if not _has_free_space(out_dir, need):
+        raise OSError(28, "No space left on device (precheck)")
+
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     filename = f"gotokanko_{ts}.zip"
     out_path = os.path.join(out_dir, filename)
 
-    # 追加: アプリコードの場所を特定
-    app_root = os.path.dirname(os.path.abspath(__file__))  # app.py があるディレクトリ
-    app_py   = os.path.abspath(__file__)
-    templates_dir = os.path.join(app_root, "templates")
-
-    with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        # ---- 既存: データ類 ----
-        if os.path.exists(ENTRIES_FILE):   zf.write(ENTRIES_FILE,   arcname="entries.json")
-        if os.path.exists(SYNONYM_FILE):   zf.write(SYNONYM_FILE,   arcname="synonyms.json")
-        if os.path.exists(NOTICES_FILE):   zf.write(NOTICES_FILE,   arcname="notices.json")
-        if os.path.exists(SHOP_INFO_FILE): zf.write(SHOP_INFO_FILE, arcname="shop_infos.json")
-
-        if os.path.exists(DATA_DIR):
-            for root, dirs, files in os.walk(DATA_DIR):
-                for fname in files:
-                    fpath   = os.path.join(root, fname)
-                    arcname = os.path.relpath(fpath, BASE_DIR)
-                    zf.write(fpath, arcname)
-
-        if os.path.exists(LOG_DIR):
-            for root, dirs, files in os.walk(LOG_DIR):
-                for fname in files:
-                    fpath   = os.path.join(root, fname)
-                    arcname = os.path.relpath(fpath, BASE_DIR)
-                    zf.write(fpath, arcname)
-
-        # ---- 追加: コードスナップショット ----
-        # app.py 本体
-        try:
-            if os.path.isfile(app_py):
-                zf.write(app_py, arcname="code/app.py")
-        except Exception as e:
-            app.logger.exception("[backup] add app.py failed: %s", e)
-
-        # templates/ ディレクトリ
-        try:
-            if os.path.isdir(templates_dir):
-                for root, dirs, files in os.walk(templates_dir):
-                    for fname in files:
-                        fpath = os.path.join(root, fname)
-                        # code/templates/... というパスで格納
-                        rel   = os.path.relpath(fpath, app_root)
-                        zf.write(fpath, arcname=os.path.join("code", rel))
-        except Exception as e:
-            app.logger.exception("[backup] add templates/ failed: %s", e)
+    with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+        for fpath, arcname in _iter_backup_items():
+            try:
+                zf.write(fpath, arcname)
+            except Exception as e:
+                app.logger.warning("[backup] zip skip %s: %s", fpath, e)
 
     return out_path
+
+def _stream_backup_targz():
+    """
+    ディスクを使わずに tar.gz をストリーミング出力（WSGI Response に直接）。
+    """
+    q: "queue.Queue[bytes|None]" = queue.Queue(maxsize=8)
+
+    class _QWriter(io.BufferedIOBase):
+        def writable(self): return True
+        def write(self, b):
+            if b: q.put(bytes(b))
+            return len(b)
+        def flush(self): return
+
+    def _worker():
+        writer = _QWriter()
+        try:
+            with tarfile.open(fileobj=writer, mode="w|gz") as tf:
+                for fpath, arcname in _iter_backup_items():
+                    try:
+                        tf.add(fpath, arcname=arcname, recursive=False)
+                    except FileNotFoundError:
+                        continue
+                    except Exception as e:
+                        app.logger.warning("[backup] tar skip %s: %s", fpath, e)
+                        continue
+        finally:
+            q.put(None)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    while True:
+        chunk = q.get()
+        if chunk is None:
+            break
+    # yield outside of loop
+        yield chunk
+# ===== /backup helpers =================================================
 
 @app.route("/admin/backup")
 @login_required
@@ -7513,14 +7658,44 @@ def admin_backup():
     if session.get("role") != "admin":
         abort(403)
 
-    if request.args.get("download"):
+    # ダウンロード要求 (ZIP or ストリーム)
+    if request.args.get("download") or request.args.get("stream"):
         out_dir = os.path.join(BASE_DIR, "manual_backups")
-        path = write_full_backup_zip(out_dir)
-        app.logger.info(f"[backup] manual saved: {path}")
-        return send_file(path, as_attachment=True,
-                         download_name=os.path.basename(path),
-                         mimetype="application/zip")
+        os.makedirs(out_dir, exist_ok=True)
 
+        # 明示的に stream=1 → tar.gz をストリーム配信
+        if request.args.get("stream"):
+            ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            filename = f"gotokanko_{ts}.tar.gz"
+            headers = {
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Type": "application/gzip",
+            }
+            return Response(_stream_backup_targz(), headers=headers)
+
+        # 通常は ZIP を作る → ENOSPC のときだけストリーミングに自動フォールバック
+        try:
+            path = write_full_backup_zip(out_dir)
+            # Render では保持数（最新3件）にローテーション
+            _rotate_backups(out_dir, keep=_backup_keep())
+            app.logger.info(f"[backup] manual saved: {path}")
+            return send_file(path, as_attachment=True,
+                             download_name=os.path.basename(path),
+                             mimetype="application/zip")
+        except OSError as e:
+            if getattr(e, "errno", None) == 28 or "No space left" in str(e):
+                ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+                filename = f"gotokanko_{ts}.tar.gz"
+                headers = {
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Content-Type": "application/gzip",
+                }
+                app.logger.warning("[backup] ENOSPC -> stream tar.gz fallback")
+                return Response(_stream_backup_targz(), headers=headers)
+            app.logger.exception("admin_backup failed")
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    # 画面表示（統計は従来どおり）
     logs_count = 0
     if os.path.exists(LOG_FILE):
         try:
@@ -7534,6 +7709,7 @@ def admin_backup():
         "synonyms_count": len(load_synonyms()),
         "notices_count": len(load_notices()),
         "logs_count": logs_count,
+        "keep_limit": _backup_keep(),  # 画面で表示用
     }
     return render_template("admin_backup.html", stats=stats)
 
@@ -7679,19 +7855,20 @@ def internal_backup():
         abort(403)
 
     out_dir = os.path.join(BASE_DIR, "auto_backups")
-    path = write_full_backup_zip(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
 
-    # ローテーション（最新10個だけ残す）
     try:
-        files = sorted(
-            [os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".zip")],
-            key=lambda p: os.path.getmtime(p),
-            reverse=True,
-        )
-        for old in files[10:]:
-            os.remove(old)
-    except Exception:
-        app.logger.exception("backup rotation failed")
+        path = write_full_backup_zip(out_dir)
+    except OSError as e:
+        if getattr(e, "errno", None) == 28 or "No space left" in str(e):
+            # 自動ジョブも ENOSPC 時はストリーミングに切替…は難しいのでログして終了（Renderでは保持3件運用前提）
+            app.logger.warning("[backup job] ENOSPC during auto backup; consider downloading old backups.")
+            return jsonify({"ok": False, "error": "ENOSPC"}), 507
+        app.logger.exception("auto backup failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    # ローテーション：Render では最新3個だけ残す（非Renderは既定10）
+    _rotate_backups(out_dir, keep=_backup_keep())
 
     app.logger.info(f"[backup] saved: {path}")
     return jsonify({"ok": True, "saved": path})
@@ -8792,6 +8969,16 @@ import unicodedata as _unic
 
 def _norm_text_jp(s: str) -> str:
     return _unic.normalize("NFKC", (s or "")).strip().lower()
+
+# === mobility（レンタカー/バス/レンタサイクル）トリガ判定 ===
+MOBILITY_TRIGGERS = (
+    "レンタカー", "バス", "路線バス", "バス時刻表",
+    "レンタサイクル", "シェアサイクル", "自転車レンタル",
+    "car rental", "bus", "bicycle"
+)
+def _is_mobility_text(s: str) -> bool:
+    t = _norm_text_jp(s)
+    return any(w in t for w in MOBILITY_TRIGGERS)
 
 def get_weather_reply(text: str):
     """
@@ -10277,24 +10464,42 @@ def smart_search_answer_with_hitflag(question):
 #  API: /ask
 # =========================
 @app.route("/ask", methods=["POST"])
-@limit_deco(ASK_LIMITS) 
+@limit_deco(ASK_LIMITS)
 def ask():
     data = request.get_json(silent=True) or {}
     question = data.get("question", "")
+    user_lat = data.get("lat")   # 追加（任意）
+    user_lng = data.get("lng")   # 追加（任意）
 
+    # ① 天気
     weather_reply, weather_hit = get_weather_reply(question)
     if weather_hit:
         save_qa_log(question, weather_reply, source="web", hit_db=True, extra={"kind": "weather"})
         return jsonify({"answer": weather_reply, "hit_db": True, "meta": {"kind": "weather"}})
 
+    # ② モビリティ（ページ直リンク）…まずは既存の即返し
+    mob_reply, mob_hit = get_mobility_reply(question)
+    if mob_hit:
+        save_qa_log(question, mob_reply, source="web", hit_db=True, extra={"kind": "mobility", "mode": "page"})
+        return jsonify({"answer": mob_reply, "hit_db": True, "meta": {"kind": "mobility", "mode": "page"}})
+
+    # ②' モビリティ（地図リンク）…未ヒット時のフォールバック
+    mob_map_reply, mob_map_hit = handle_mobility(question, lat=user_lat, lng=user_lng)
+    if mob_map_hit:
+        save_qa_log(question, mob_map_reply, source="web", hit_db=True, extra={"kind": "mobility", "mode": "map"})
+        return jsonify({"answer": mob_map_reply, "hit_db": True, "meta": {"kind": "mobility", "mode": "map"}})
+
+    # ③ 運行状況（船・飛行機）
     trans_reply, trans_hit = get_transport_reply(question)
     if trans_hit:
         save_qa_log(question, trans_reply, source="web", hit_db=True, extra={"kind": "transport"})
         return jsonify({"answer": trans_reply, "hit_db": True, "meta": {"kind": "transport"}})
 
+    # ④ バリデーション
     if not question:
         return jsonify({"error": "質問が空です"}), 400
 
+    # ⑤ 通常検索（既存）
     orig_lang = detect_lang_simple(question)
     lang = orig_lang
     if not ENABLE_FOREIGN_LANG:
