@@ -16,18 +16,45 @@
   .btn{padding:9px 16px;border:none;border-radius:9px;background:#2a8ed8;color:#fff;cursor:pointer}
   .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #cfe1ef}
   .btn.danger{background:#e11d48}
+  .btn.gray{background:#64748b}
   .flash{background:#ecfeff;border:1px solid #bae6fd;color:#075985;padding:8px 10px;border-radius:8px;margin:8px 0}
-  input[type=file]{padding:8px;border:1px solid #cfe1ef;border-radius:8px;background:#fff;width:100%}
+  input[type=file],input[type=url]{padding:8px;border:1px solid #cfe1ef;border-radius:8px;background:#fff;width:100%}
   ul{margin:8px 0 0 18px}
   li{margin:4px 0}
   .kv{border-collapse:collapse;margin-top:8px}
   .kv td{border:1px solid #e6edf3;padding:6px 8px}
   .kv td.k{background:#f6f9fb;font-weight:600;color:#345;min-width:140px}
   @media(max-width:860px){.grid{grid-template-columns:1fr}}
+  code{background:#f3f4f6;padding:0 4px;border-radius:4px}
 </style>
 <script>
 function confirmRestore(){
   return confirm('現在のデータが上書きされます。本当に復元しますか？');
+}
+async function showStorage(){
+  const el = document.getElementById('storage');
+  el.textContent = '読み込み中…';
+  try{
+    const r = await fetch('{{ url_for("admin_storage_stats") }}');
+    const j = await r.json();
+    function human(n){
+      const u=['B','KB','MB','GB','TB']; let i=0; let x=Number(n||0);
+      while(x>=1024 && i<u.length-1){ x/=1024; i++; }
+      return x.toFixed(1)+' '+u[i];
+    }
+    let html = '<table class="kv">';
+    html += '<tr><td class="k">BASE_DIR</td><td>'+ (j.base_dir||'') +'</td></tr>';
+    for(const [k,v] of Object.entries(j.dirs||{})){
+      html += '<tr><td class="k">'+k+'</td><td>'+human(v.bytes)+' / '+(v.files||0)+' files</td></tr>';
+    }
+    for(const [k,v] of Object.entries(j.files||{})){
+      html += '<tr><td class="k">'+k+'</td><td>'+human(v.bytes)+'</td></tr>';
+    }
+    html += '</table>';
+    el.innerHTML = html;
+  }catch(e){
+    el.textContent = '取得に失敗しました: '+e;
+  }
 }
 </script>
 </head>
@@ -47,7 +74,11 @@ function confirmRestore(){
     </div>
 
     <h1>全体バックアップ / 復元</h1>
-    <div class="muted">データをZIPでまとめてエクスポート／インポートできます。</div>
+    <div class="muted">
+      データをZIPでまとめてエクスポート／インポートできます。<br>
+      サーバー上のスナップショット保持は<strong>最新 {{ stats.keep_limit or 3 }} 件</strong>までです。
+      容量不足時は<strong>ストリーミング（tar.gz）</strong>をご利用ください。
+    </div>
 
     <!-- フラッシュ表示 -->
     {% with messages = get_flashed_messages() %}
@@ -59,20 +90,27 @@ function confirmRestore(){
     <div class="grid" style="margin-top:10px">
       <!-- バックアップ作成 -->
       <div class="card">
-        <h2 style="margin:0 0 8px">バックアップの作成（ZIPダウンロード）</h2>
-        <p class="muted">現在の保存内容をZIPに固めてダウンロードします。</p>
-        <!-- GET でダウンロードさせる想定。必要に応じて href のクエリは外してください。 -->
-        <a class="btn" href="{{ url_for('admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
-        <button class="btn ghost" style="margin-left:8px" onclick="location.reload()">再読込</button>
+        <h2 style="margin:0 0 8px">バックアップの作成</h2>
+        <p class="muted">現在の保存内容をダウンロードします。</p>
+        <div>
+          <a class="btn" href="{{ url_for('admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
+          <a class="btn gray" style="margin-left:8px" href="{{ url_for('admin_backup', stream='1') }}">容量不足のとき：ストリーミング（tar.gz）</a>
+          <button class="btn ghost" style="margin-left:8px" onclick="location.reload()">再読込</button>
+        </div>
 
         {% if stats %}
-          <table class="kv">
+          <table class="kv" style="margin-top:8px">
             <tr><td class="k">観光データ（entries）</td><td>{{ stats.entries_count }} 件</td></tr>
             <tr><td class="k">類義語（synonyms）</td><td>{{ stats.synonyms_count }} 語</td></tr>
             <tr><td class="k">お知らせ（notices）</td><td>{{ stats.notices_count }} 件</td></tr>
             <tr><td class="k">ログ（logs）</td><td>{{ stats.logs_count }} 件</td></tr>
           </table>
         {% endif %}
+
+        <div style="margin-top:10px">
+          <button class="btn ghost" onclick="showStorage()">サーバーの容量状況を表示</button>
+          <div id="storage" class="muted" style="margin-top:8px"></div>
+        </div>
       </div>
 
       <!-- 復元（上書き） -->
@@ -95,6 +133,26 @@ function confirmRestore(){
       </div>
     </div>
 
+    <!-- URLから復元（10MB制限回避） -->
+    <div class="card" style="margin-top:16px">
+      <h2 style="margin:0 0 8px">URLから復元（ブラウザの10MB制限を回避）</h2>
+      <p class="muted">
+        Google Drive / Dropbox / S3 などに置いた ZIP の<strong>直リンク</strong>を指定すると、<br>
+        サーバー側が直接ダウンロードして復元します。
+      </p>
+      <form method="post" action="{{ url_for('admin_restore_from_url') }}" onsubmit="return confirmRestore()">
+        <input type="url" name="backup_url" placeholder="https://example.com/your-backup.zip" required>
+        <div style="margin-top:10px">
+          <button class="btn danger" type="submit">URLから復元</button>
+        </div>
+      </form>
+      <ul class="muted">
+        <li>推奨：S3 の<strong>署名付きURL</strong>や Dropbox/Drive の<strong>ダイレクトリンク</strong></li>
+        <li>サイズ上限は環境変数 <code>RESTORE_URL_MAX_MB</code>（既定 200MB）で変更できます</li>
+        <li>安全のため、ローカル/プライベートIP向けURLは使用できません</li>
+      </ul>
+    </div>
+
     <!-- 参考：バックアップに含まれる想定ファイル -->
     <div class="card" style="margin-top:16px">
       <h2 style="margin:0 0 8px">バックアップの中身（想定）</h2>
@@ -102,7 +160,7 @@ function confirmRestore(){
         <li><code>entries.json</code> … 観光データ本体</li>
         <li><code>synonyms.json</code> … 類義語辞書</li>
         <li><code>notices.json</code> … お知らせ一覧</li>
-        <li>（任意）<code>logs.json</code> や関連ファイル</li>
+        <li>（任意）<code>logs</code> ディレクトリや画像など</li>
       </ul>
       <p class="muted">構成はアプリ実装に依存します。異なる場合はこの説明だけ調整してください。</p>
     </div>
