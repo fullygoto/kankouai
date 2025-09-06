@@ -22,6 +22,7 @@ from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
 import urllib.parse as _u  # ← _extract_wm_flags などで使用
+from difflib import get_close_matches  # ★追加
 
 
 # === Third-Party ===
