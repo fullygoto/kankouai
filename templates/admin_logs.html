@@ -121,7 +121,6 @@ function applyFilters(){
   // グループ表示
   const gwrap = document.getElementById('grouped');
   if(VIEW_MODE==='group'){
-    // 収集
     const rows = [];
     cards.forEach(c=>{
       const obj = {
@@ -131,7 +130,6 @@ function applyFilters(){
       };
       rows.push(obj);
     });
-    // フィルタ
     const filt = rows.filter(r=>{
       if(q && !(norm(r.q+' '+r.a+' '+r.source+' '+JSON.stringify(r.extra)).includes(q))) return false;
       if(src!=='all' && r.source!==src) return false;
@@ -141,7 +139,6 @@ function applyFilters(){
       if(to){ const d=new Date(to); d.setHours(23,59,59,999); if(new Date(r.ts) > d) return false; }
       return true;
     });
-    // グループ化（質問でまとめる）
     const map = new Map();
     for (const r of filt){
       const key = norm(r.q);
@@ -152,7 +149,6 @@ function applyFilters(){
       if(new Date(r.ts) < new Date(g.first)) g.first = r.ts;
       if(new Date(r.ts) > new Date(g.last))  g.last  = r.ts;
     }
-    // 描画
     const groups = Array.from(map.values()).sort((a,b)=> new Date(b.last)-new Date(a.last));
     shown = groups.length; hitN = filt.filter(r=>r.hit).length; missN = filt.filter(r=>!r.hit).length;
 
@@ -174,7 +170,6 @@ function applyFilters(){
     gwrap.innerHTML = html || '<div class="empty">該当がありません。</div>';
   }
 
-  // 件数表示
   document.getElementById('f_count').textContent = shown;
   document.getElementById('f_hitn').textContent = hitN;
   document.getElementById('f_missn').textContent = missN;
@@ -258,7 +253,6 @@ function download(url, filename){
 function escapeHtml(s){ return (s??'').toString().replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m])); }
 
 document.addEventListener('DOMContentLoaded', ()=>{
-  // タイムスタンプ表示
   document.querySelectorAll('[data-tslabel]').forEach(el=>{
     el.textContent = fmt(el.getAttribute('data-tslabel'));
   });
@@ -299,10 +293,11 @@ document.addEventListener('DOMContentLoaded', ()=>{
           {% set q = item.question or item.get('question','') %}
           {% set a = item.answer or item.get('answer','') %}
           {% set extra = item.extra or item.get('extra', {}) %}
-          {# --- ここで「未ヒット＝該当が見つかりませんでした。」判定に上書き --- #}
+
+          {# --- ここで「未ヒット＝『該当が見つかりませんでした。』」に上書き判定 --- #}
           {% set _a = (a or '') %}
-          {% set _an = _a.replace('。','').replace('．','').replace('.','').strip() %}
-          {% set is_miss = ('該当が見つかりませんでした' in _an) or (_an.startswith('該当が見つからず')) or (_an == '見つかりませんでした') %}
+          {% set _an = _a.replace('。','').replace('．','').replace('.','').replace(' ','').replace('　','').strip() %}
+          {% set is_miss = '該当が見つかりませんでした' in _an %}
           {% set hit_db = (not is_miss) %}
 
           <div class="log-card"
