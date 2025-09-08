@@ -99,6 +99,26 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+# === Admin no-cache & static cache-busting =========================
+# デプロイ毎に変わるビルドID（環境変数 BUILD_ID があればそれを使う）
+BUILD_ID = os.getenv("BUILD_ID") or datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
+
+# Jinja から {{ BUILD_ID }} を使えるように注入
+@app.context_processor
+def _inject_build_id():
+    return dict(BUILD_ID=BUILD_ID)
+
+# 管理系や運用系ページは常に最新を返す（ブラウザキャッシュ無効化）
+@app.after_request
+def _no_cache_admin(resp):
+    p = (request.path or "")
+    if p.startswith(("/admin", "/notices")):
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"]        = "no-cache"
+        resp.headers["Expires"]       = "0"
+    return resp
+# ==================================================================
+
 # ---- アップロード上限（MB）を環境変数で可変に。デフォルト64MB ----
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "64"))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
@@ -2572,6 +2592,7 @@ btn.addEventListener("click", ()=>{
 </body></html>
     """
     return render_template_string(html)
+
 
 @app.route("/_debug/ip")
 def _debug_ip():
@@ -10936,6 +10957,98 @@ except Exception:
 # ... 全ての @app.route(...) 定義が終わった一番最後に置く
 from watermark_ext import init_watermark_ext
 init_watermark_ext(app)
+
+
+# ===== 未ヒット：テキスト保存＆要約API（admin専用） =========================
+def _slug_for_filename(s: str, max_len: int = 40) -> str:
+    """日本語を含むタイトルもファイル名に安全に落とす簡易スラッグ"""
+    s = unicodedata.normalize("NFKC", s)
+    # 記号を _ に
+    s = re.sub(r"[^\w\-一-龥ぁ-んァ-ヶー・、。0-9]", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return (s or "text")[:max_len]
+
+@app.post("/api/text_summarize")
+@login_required
+@limit_deco(ASK_LIMITS)   # 既存のレート制限デコレータ
+def api_text_summarize():
+    # 管理者のみ許可（必要に応じて緩めてもOK）
+    if session.get("role") != "admin":
+        abort(403)
+
+    text = (request.form.get("text") or "").strip()
+    q    = (request.form.get("q") or "").strip()
+    try:
+        max_chars = int(request.form.get("max_chars", 220))
+    except Exception:
+        max_chars = 220
+
+    if not text:
+        return jsonify({"ok": False, "error": "text is required"}), 400
+
+    # 既存の要約ヘルパを再利用（OpenAIあり/なし両対応：内部でフェイルセーフ）
+    # ai_summarize(question, snippets, max_chars) は app.py で既に定義済み
+    if not q:
+        q = f"次のテキストの要点を日本語で{max_chars}字以内に簡潔に要約してください。"
+    try:
+        summary = ai_summarize(q, [text], max_chars=max_chars) or ""
+    except Exception:
+        # 何かあっても必ず返す
+        summary = (text.replace("\r\n", "\n").strip())[:max_chars]
+
+    return jsonify({"ok": True, "summary": summary})
+
+@app.post("/admin/unhit/save_text")
+@login_required
+def admin_unhit_save_text():
+    # 管理者のみ
+    if session.get("role") != "admin":
+        abort(403)
+
+    title     = (request.form.get("title") or "").strip()
+    tags      = (request.form.get("tags") or "").strip()
+    areas     = (request.form.get("areas") or "").strip()
+    text_full = (request.form.get("text_full") or request.form.get("full") or request.form.get("text") or "").strip()
+    text_short= (request.form.get("text_short") or request.form.get("summary") or "").strip()
+
+    if not title or not text_full:
+        return jsonify({"ok": False, "error": "title and text_full are required"}), 400
+
+    # 要約が未指定なら生成
+    if not text_short:
+        try:
+            text_short = ai_summarize(f"次のテキストの要点を日本語で220字以内に要約してください。", [text_full], max_chars=220)
+        except Exception:
+            text_short = (text_full.replace("\r\n", "\n").strip())[:220]
+
+    # 保存先: 既存の DATA_DIR（app.py 冒頭で定義済み）を使う
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    fname = f"{stamp}_{_slug_for_filename(title)}.txt"
+    fpath = Path(DATA_DIR) / fname
+
+    # 検索ヒット性を意識して「タイトル/タグ/エリア/要約/本文」をテキストで保存
+    # 既存 search_text_files() は .txt 全文からスニペット抽出する実装なので
+    # プレーンテキストでOK（フロントマターは不要）
+    lines = []
+    lines.append(f"タイトル: {title}")
+    if tags:
+        lines.append(f"タグ: {tags}")
+    if areas:
+        lines.append(f"エリア: {areas}")
+    lines.append("")  # 空行
+    lines.append("【要約】")
+    lines.append(text_short.strip())
+    lines.append("")  # 空行
+    lines.append("【本文】")
+    lines.append(text_full.strip())
+    content = "\n".join(lines).strip() + "\n"
+    fpath.write_text(content, encoding="utf-8")
+
+    # 返却（フロントでトースト表示などに利用）
+    return jsonify({"ok": True, "filename": fname})
+# ===== ここまで ==============================================================
 
 
 # メイン起動（重複禁止：これ1つだけ残す）
