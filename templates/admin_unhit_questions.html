@@ -14,44 +14,56 @@
   .nav a:hover{text-decoration:underline}
   h1{margin:0 0 10px}
   .muted{color:#789;font-size:.92em}
-  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0 16px}
-  .toolbar input[type=text], .toolbar input[type=date], .toolbar select{padding:8px 10px;border:1px solid #b0c4d7;border-radius:8px;font-size:.96em;background:#fff}
+
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0 16px}
+  .toolbar input[type=text], .toolbar input[type=date], .toolbar select{
+    padding:8px 10px;border:1px solid #b0c4d7;border-radius:8px;font-size:.96em;background:#fff
+  }
   .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef6ff;color:var(--brand);font-size:.86em}
-  .stat{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1f1;color:var(--miss);font-size:.86em;margin-left:6px}
   .btn{padding:7px 12px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer}
   .btn.ghost{background:#fff;color:var(--brand);border:1px solid #cfe1ef}
   .btn.secondary{background:#5aa}
   .btn.warn{background:#c53}
+
   .card{background:#f7faf7;margin:12px 0;border-radius:12px;padding:14px 16px;box-shadow:0 2px 6px #e0e6ed30}
   .ts{color:#678;font-size:.9em;margin-bottom:6px}
   .q{font-weight:600;margin:2px 0 8px}
   label{display:block;font-weight:600;margin:.5rem 0 .25rem}
   textarea, input[type=text]{width:100%;box-sizing:border-box;border:1px solid #bfd2e2;border-radius:8px;padding:8px 10px;font-size:14px;background:#fff}
   textarea{resize:vertical;min-height:90px}
+
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
   .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+
   .answer-preview{white-space:pre-wrap;background:#fff;border:1px dashed #d7e6f2;border-radius:8px;padding:8px 10px;margin-top:8px}
   .empty{padding:10px 12px;background:#fff;border:1px dashed #cfe2ef;border-radius:10px;color:#789;margin-top:12px}
+
   .mode{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
   .mode .seg{display:inline-flex;border:1px solid #cfe1ef;border-radius:10px;overflow:hidden}
   .mode .seg button{background:#fff;color:var(--brand);border:none;padding:7px 12px;cursor:pointer}
   .mode .seg button.active{background:var(--brand);color:#fff}
+
   .box{background:#fff;border:1px solid #e5eff7;border-radius:12px;padding:10px 12px;margin-top:8px}
   .path{font-size:.9em;color:#567}
   .hint{font-size:.86em;color:#567;margin-top:4px}
   .right{display:flex;gap:8px;align-items:center;justify-content:flex-end}
   .row-head{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:6px}
   .row-left{display:flex;gap:10px;align-items:center}
+
   .done{display:inline-flex;gap:6px;align-items:center}
+
   .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 6px}
   .pager .btn{padding:6px 10px}
+
+  /* グループ表示 */
   details.group{background:#f7faf7;border-radius:12px;padding:10px 12px;margin:10px 0;border:1px solid #e6eef2}
   details.group summary{cursor:pointer;font-weight:600}
   .g-meta{font-size:.9em;color:#567;margin-left:8px}
   .g-list{margin-top:8px}
   .g-item{border:1px dashed #dbe7f1;background:#fff;border-radius:10px;padding:8px 10px;margin:8px 0}
   .g-q{font-weight:600;margin-bottom:4px}
+
   @media (max-width:960px){.row2,.row3{grid-template-columns:1fr}}
 </style>
 
@@ -108,7 +120,7 @@ function _loadDone(){ try{ return new Set(JSON.parse(localStorage.getItem(DONE_K
 function _saveDone(set){ localStorage.setItem(DONE_KEY, JSON.stringify(Array.from(set))); }
 const DONE = _loadDone();
 
-// === paging state ===
+// === paging & view state ===
 let PAGE_SIZE = 20;
 let CUR_PAGE = 1;
 let VIEW_MODE = 'cards'; // 'cards' | 'group'
@@ -126,15 +138,14 @@ function filterCards(){
 
   const cards = [...document.querySelectorAll('.card[data-key]')];
 
-  let shown = 0;
   FILTERED_KEYS = [];
 
-  // filter & count
   for(const card of cards){
-    const text = card.dataset.text;
+    const text = card.dataset.text; // lower 済
     const source = card.dataset.source;
     const ts = card.dataset.ts;
     const key = card.dataset.key;
+
     let ok = true;
     if(q && !text.includes(q)) ok=false;
     if(src!=='all' && source!==src) ok=false;
@@ -142,13 +153,13 @@ function filterCards(){
     if(to){ try{ const d=new Date(to); d.setHours(23,59,59,999); if(new Date(ts) > d) ok=false; }catch(e){} }
     if(hideDone && DONE.has(key)) ok=false;
 
-    if(ok){ FILTERED_KEYS.push(key); shown++; }
+    if(ok) FILTERED_KEYS.push(key);
   }
 
   CUR_PAGE = 1;
   renderPage();
 
-  document.getElementById('f_count').textContent = shown;
+  document.getElementById('f_count').textContent = FILTERED_KEYS.length;
 }
 
 function renderPage(){
@@ -162,7 +173,6 @@ function renderPage(){
   const end   = Math.min(start + PAGE_SIZE, total);
   const pageKeys = new Set(FILTERED_KEYS.slice(start, end));
 
-  // show/hide for card view
   if(VIEW_MODE==='cards'){
     for(const card of cards){
       const show = pageKeys.has(card.dataset.key);
@@ -171,20 +181,21 @@ function renderPage(){
     document.getElementById('groups').style.display = 'none';
     document.getElementById('cardswrap').style.display = '';
   }else{
-    // group view
     buildGroups(pageKeys);
     document.getElementById('groups').style.display = '';
     document.getElementById('cardswrap').style.display = 'none';
   }
 
-  // pager UI
-  document.getElementById('pg_info').textContent = `ページ ${CUR_PAGE} / ${totalPages}（1ページ ${PAGE_SIZE}件）`;
-  document.getElementById('pg_prev').disabled = (CUR_PAGE<=1);
-  document.getElementById('pg_first').disabled = (CUR_PAGE<=1);
-  document.getElementById('pg_next').disabled = (CUR_PAGE>=totalPages);
-  document.getElementById('pg_last').disabled = (CUR_PAGE>=totalPages);
+  const info = `ページ ${CUR_PAGE} / ${totalPages}（1ページ ${PAGE_SIZE}件）`;
+  ['pg_info','pg_info2'].forEach(id=>{ const el=document.getElementById(id); if(el) el.textContent = info; });
 
-  // selection helper
+  const setBtn = (id, dis)=>{ const b=document.getElementById(id); if(b) b.disabled = dis; };
+  const atFirst = (CUR_PAGE<=1), atLast = (CUR_PAGE>=totalPages);
+  ['pg_prev','pg_first'].forEach(id=>setBtn(id, atFirst));
+  ['pg_next','pg_last'].forEach(id=>setBtn(id, atLast));
+  ['pg_prev2','pg_first2'].forEach(id=>setBtn(id, atFirst));
+  ['pg_next2','pg_last2'].forEach(id=>setBtn(id, atLast));
+
   document.getElementById('sel_all').checked = false;
 }
 
@@ -202,11 +213,22 @@ function setView(mode){
   document.querySelector(`.viewseg button[data-mode="${mode}"]`).classList.add('active');
   renderPage();
 }
+function clearFilters(){
+  document.getElementById('f_q').value='';
+  document.getElementById('f_src').value='all';
+  document.getElementById('f_from').value='';
+  document.getElementById('f_to').value='';
+  document.getElementById('f_hide_done').checked=false;
+  // 下部ミラーも同期
+  syncMirrorFromTop();
+  filterCards();
+}
 
-// === grouping ===
+// === grouping（現在ページのみで軽量構築） ===
 function buildGroups(pageKeys){
-  const items = [...document.querySelectorAll('.card[data-key]')].filter(c=>pageKeys.has(c.dataset.key))
-                 .map(c=>({q:c.dataset.q, a:c.dataset.a, ts:c.dataset.ts, source:c.dataset.source}));
+  const items = [...document.querySelectorAll('.card[data-key]')]
+    .filter(c=>pageKeys.has(c.dataset.key))
+    .map(c=>({q:c.dataset.q, a:c.dataset.a, ts:c.dataset.ts, source:c.dataset.source}));
   const map = new Map();
   for(const r of items){
     const k = norm(r.q);
@@ -222,7 +244,7 @@ function buildGroups(pageKeys){
       <div class="g-item">
         <div class="g-q">[${it.source.toUpperCase()}] ${fmt(it.ts)}</div>
         <div class="label">Q.</div><div class="box">${escapeHtml(it.q)}</div>
-        <div class="label">A.</div><div class="box">${escapeHtml(it.a)}</div>
+        ${it.a ? `<div class="label">A.</div><div class="box">${escapeHtml(it.a)}</div>`:''}
       </div>`).join('');
     return `<details class="group">
       <summary>${escapeHtml(g.q)} <span class="g-meta">（${g.items.length}件｜最古 ${fmt(g.first)} ／ 最新 ${fmt(g.last)}）</span></summary>
@@ -234,11 +256,12 @@ function buildGroups(pageKeys){
 
 // === selection ===
 function toggleSelectAll(box){
-  const pageSet = new Set(FILTERED_KEYS.slice((CUR_PAGE-1)*PAGE_SIZE, (CUR_PAGE-1)*PAGE_SIZE + PAGE_SIZE));
+  const start = (CUR_PAGE-1)*PAGE_SIZE;
+  const pageSet = new Set(FILTERED_KEYS.slice(start, start+PAGE_SIZE));
   document.querySelectorAll('.card[data-key]').forEach(c=>{
     if(pageSet.has(c.dataset.key)){
       const cb = c.querySelector('input.sel');
-      cb.checked = box.checked;
+      if(cb) cb.checked = box.checked;
     }
   });
 }
@@ -260,13 +283,13 @@ function getSelected(){
 
 // === exports ===
 function exportJSON(){
-  const rows = collectFilteredRows();
+  const rows = collectFilteredAll(); // フィルタ済み全件
   const blob = new Blob([JSON.stringify(rows, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   download(url, 'unhit_filtered.json');
 }
 function exportCSV(){
-  const rows = collectFilteredRows();
+  const rows = collectFilteredAll(); // フィルタ済み全件
   const head = ['timestamp','source','question','answer'];
   const esc = s => `"${(s??'').toString().replace(/"/g,'""').replace(/\r?\n/g,'\\n')}"`;
   const lines = [head.join(',')].concat(rows.map(r=>[r.timestamp,r.source,r.question,r.answer].map(esc).join(',')));
@@ -275,7 +298,6 @@ function exportCSV(){
   download(url, 'unhit_filtered.csv');
 }
 function exportCSVForEntries(){
-  // entries_edit の CSV 取り込み用スキーマ
   const rows = getSelected();
   if(!rows.length){ alert('エクスポートする項目を選択してください（左のチェックボックス）'); return; }
   const head = ['category','title','desc','address','map','tags','areas','links'];
@@ -288,11 +310,20 @@ function exportCSVForEntries(){
   download(url, 'entries_import_from_unhit.csv');
   alert('CSVをダウンロードしました。「観光データ一括編集」画面のCSV取り込みで追加できます。');
 }
-function collectFilteredRows(){
-  const cards = [...document.querySelectorAll('.card[data-key]')].filter(c=>c.style.display!=='none');
-  return cards.map(c=>({
-    timestamp:c.dataset.ts, source:c.dataset.source, question:c.dataset.q, answer:c.dataset.a
-  }));
+function collectFilteredAll(){
+  const set = new Set(FILTERED_KEYS);
+  const rows = [];
+  document.querySelectorAll('.card[data-key]').forEach(c=>{
+    if(set.has(c.dataset.key)){
+      rows.push({
+        timestamp: c.dataset.ts,
+        source: c.dataset.source,
+        question: c.dataset.q,
+        answer: c.dataset.a
+      });
+    }
+  });
+  return rows;
 }
 function download(url, filename){
   const a = document.createElement('a'); a.href=url; a.download=filename; a.click();
@@ -307,7 +338,6 @@ function setMode(idx, mode){
   root.querySelector('.box.db').style.display   = (mode==='db')?'':'none';
   root.querySelector('.box.txt').style.display  = (mode==='txt')?'':'none';
 }
-
 async function genFAQ(btn, idx){
   const wrap = document.getElementById('card-'+idx);
   const q = wrap.querySelector('input[name="__q"]').value;
@@ -317,13 +347,10 @@ async function genFAQ(btn, idx){
     const res = await fetch('{{ url_for("api_faq_suggest") }}', {method:'POST', body:form});
     const data = await res.json();
     if(!data.ok){ alert(data.error || '失敗しました'); }
-    else{
-      wrap.querySelector('textarea[name="desc"]').value = (data.text || '').trim();
-    }
+    else{ wrap.querySelector('textarea[name="desc"]').value = (data.text || '').trim(); }
   }catch(e){ alert('通信に失敗しました'); }
   finally{ btn.disabled=false; btn.textContent=orig; }
 }
-
 async function genSummary(btn, idx){
   const root = document.getElementById('card-'+idx);
   const src  = (root.querySelector('textarea[name="desc"]').value || '').trim();
@@ -334,20 +361,16 @@ async function genSummary(btn, idx){
     const res = await fetch('{{ url_for("api_text_summarize") }}', {method:'POST', body:fd});
     const data = await res.json();
     if(!data.ok){ alert(data.error || '要約に失敗しました'); }
-    else{
-      root.querySelector('textarea[name="text_short"]').value = (data.summary||'').trim();
-    }
+    else{ root.querySelector('textarea[name="text_short"]').value = (data.summary||'').trim(); }
   }catch(e){ alert('通信に失敗しました'); }
   finally{ btn.disabled=false; btn.textContent=orig; }
 }
-
 function fillSlug(idx){
   const root = document.getElementById('card-'+idx);
   const title = (root.querySelector('input[name="title"]').value||'').trim();
   const q = (root.querySelector('input[name="__q"]').value||'').trim();
   root.querySelector('input[name="slug"]').value = slugify(title || q);
 }
-
 function openEntryWithPrefill(idx){
   const root = document.getElementById('card-'+idx);
   const base = '{{ url_for("admin_entry") }}';
@@ -360,24 +383,63 @@ function openEntryWithPrefill(idx){
   });
   window.open(base + '?' + params.toString(), '_blank');
 }
-
 function markDone(cb, key){
   if(cb.checked){ DONE.add(key); } else { DONE.delete(key); }
   _saveDone(DONE);
   if(document.getElementById('f_hide_done').checked) filterCards();
 }
 
+// === top/bottom filter mirror ===
+function syncMirrorFromTop(){
+  const map = [
+    ['f_q','f_q_bottom'],
+    ['f_src','f_src_bottom'],
+    ['f_from','f_from_bottom'],
+    ['f_to','f_to_bottom'],
+    ['f_hide_done','f_hide_done_bottom'],
+  ];
+  for(const [t,b] of map){
+    const te = document.getElementById(t), be = document.getElementById(b);
+    if(te && be){
+      if(be.type==='checkbox'){ be.checked = te.checked; } else { be.value = te.value; }
+    }
+  }
+}
+function wireMirror(){
+  const pairs = [
+    ['f_q','f_q_bottom','input'],
+    ['f_src','f_src_bottom','change'],
+    ['f_from','f_from_bottom','change'],
+    ['f_to','f_to_bottom','change'],
+    ['f_hide_done','f_hide_done_bottom','change'],
+  ];
+  for(const [top,bottom,ev] of pairs){
+    const te = document.getElementById(top), be = document.getElementById(bottom);
+    if(!te || !be) continue;
+    te.addEventListener(ev, ()=>{ syncMirrorFromTop(); filterCards(); });
+    be.addEventListener(ev, ()=>{ // bottom -> top
+      if(te.type==='checkbox'){ te.checked = be.checked; } else { te.value = be.value; }
+      filterCards();
+    });
+  }
+}
+
 document.addEventListener('DOMContentLoaded', ()=>{
-  // init stamps/keys
+  // init stamps/keys & done check
   document.querySelectorAll('[data-tslabel]').forEach(el=>{ el.textContent = fmt(el.getAttribute('data-tslabel')); });
   document.querySelectorAll('.card[data-key]').forEach((card, i)=>{
-    setMode(i, 'db');
     const key = card.dataset.key;
     const chk = card.querySelector('input.donebox');
     if(chk){ chk.checked = DONE.has(key); }
+    // 既定モード
+    const db = card.querySelector('.box.db'), txt = card.querySelector('.box.txt');
+    if(db && txt){ db.style.display=''; txt.style.display='none'; }
   });
 
-  filterCards(); // will compute paging
+  wireMirror();
+  syncMirrorFromTop();
+
+  filterCards(); // 初回フィルタ→描画
 });
 </script>
 </head>
@@ -399,7 +461,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     <h1>未ヒット質問一覧</h1>
     <div class="muted">未ヒット（DBに該当がない）ログから、観光DB追加 または data への要約テキスト保存を行えます。</div>
 
-    <!-- フィルタ＆ビュー＆エクスポート -->
+    <!-- ▼ 上部：フィルタ＆ビュー＆エクスポート -->
     <div class="toolbar">
       <input type="text" id="f_q" placeholder="キーワード（質問/回答/メタ）" oninput="filterCards()">
       <select id="f_src" onchange="filterCards()">
@@ -421,9 +483,10 @@ document.addEventListener('DOMContentLoaded', ()=>{
       </div>
       <button class="btn ghost" type="button" onclick="exportJSON()">JSON出力</button>
       <button class="btn ghost" type="button" onclick="exportCSV()">CSV出力</button>
+      <button class="btn ghost" type="button" onclick="clearFilters()">フィルタをクリア</button>
     </div>
 
-    <!-- ページャ -->
+    <!-- ▼ ページャ（上） -->
     <div class="pager">
       <label>1ページ件数：
         <select onchange="changePageSize(this)">
@@ -449,7 +512,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
       <div class="empty">未ヒット質問はありません。</div>
     {% else %}
 
-      <!-- カード一覧 -->
+      <!-- ▼ カード一覧 -->
       <div id="cardswrap">
         {% for log in unhit_logs|reverse %}
           {% set ts = log.timestamp or log.get('timestamp','') %}
@@ -620,25 +683,38 @@ document.addEventListener('DOMContentLoaded', ()=>{
         {% endfor %}
       </div>
 
-      <!-- グループ表示エリア -->
+      <!-- ▼ グループ表示エリア -->
       <div id="groups" style="display:none"></div>
 
     {% endif %}
 
-    <!-- 下部ページャ -->
+    <!-- ▼ ページャ（下） -->
     <div class="pager">
       <button id="pg_first2" class="btn ghost" type="button" onclick="gotoPage('first')">≪ 最初</button>
       <button id="pg_prev2"  class="btn ghost" type="button" onclick="gotoPage('prev')">‹ 前へ</button>
-      <span class="muted" id="pg_info2"><script>document.getElementById && (document.getElementById('pg_info2').textContent=document.getElementById('pg_info')?.textContent||'');</script></span>
+      <span class="muted" id="pg_info2">ページ 1 / 1（1ページ 20件）</span>
       <button id="pg_next2" class="btn ghost" type="button" onclick="gotoPage('next')">次へ ›</button>
       <button id="pg_last2" class="btn ghost" type="button" onclick="gotoPage('last')">最後 ≫</button>
     </div>
-    <script>
-      // 下部も上部の状態をミラー（簡易）
-      const mirror = ()=>{ const s=document.getElementById('pg_info'); const t=document.getElementById('pg_info2'); if(s&&t){ t.textContent=s.textContent; } };
-      const _ob = new MutationObserver(mirror);
-      _ob.observe(document.getElementById('pg_info'), {childList:true,subtree:true});
-    </script>
+
+    <!-- ▼ 下部：フィルタのミラー（長いページ対策） -->
+    <div class="toolbar">
+      <input type="text" id="f_q_bottom" placeholder="キーワード（質問/回答/メタ）">
+      <select id="f_src_bottom">
+        <option value="all">ソース：すべて</option>
+        <option value="web">Web</option>
+        <option value="line">LINE</option>
+      </select>
+      <span class="muted">期間：</span>
+      <input type="date" id="f_from_bottom">〜
+      <input type="date" id="f_to_bottom">
+      <label style="display:inline-flex;align-items:center;gap:6px">
+        <input type="checkbox" id="f_hide_done_bottom"> 処理済みを隠す
+      </label>
+      <button class="btn ghost" type="button" onclick="exportJSON()">JSON出力</button>
+      <button class="btn ghost" type="button" onclick="exportCSV()">CSV出力</button>
+      <button class="btn ghost" type="button" onclick="clearFilters()">フィルタをクリア</button>
+    </div>
 
   </div>
 </body>
