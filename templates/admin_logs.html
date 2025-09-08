@@ -101,7 +101,7 @@ function applyFilters(){
   // リスト表示
   const cards = document.querySelectorAll('.log-card[data-q]');
   cards.forEach(card=>{
-    const text = card.dataset.q + ' ' + card.dataset.a + ' ' + card.dataset.source + ' ' + (card.dataset.extra||'');
+    const text = (card.dataset.q + ' ' + card.dataset.a + ' ' + card.dataset.source + ' ' + (card.dataset.extra||'')).toLowerCase();
     const source = card.dataset.source;
     const hit_db = card.dataset.hit === '1';
     const ts = card.dataset.ts;
@@ -124,7 +124,6 @@ function applyFilters(){
     // 収集
     const rows = [];
     cards.forEach(c=>{
-      const recOK = (c.style.display!== 'none' || true); // ここでは一旦全部見てフィルタ再適用
       const obj = {
         q: c.dataset.q, a: c.dataset.a, ts: c.dataset.ts, source: c.dataset.source,
         hit: (c.dataset.hit==='1'), extra: c.dataset.extra?JSON.parse(c.dataset.extra):{},
@@ -142,7 +141,7 @@ function applyFilters(){
       if(to){ const d=new Date(to); d.setHours(23,59,59,999); if(new Date(r.ts) > d) return false; }
       return true;
     });
-    // グループ化
+    // グループ化（質問でまとめる）
     const map = new Map();
     for (const r of filt){
       const key = norm(r.q);
@@ -284,35 +283,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
     </div>
 
     <h1>質問・回答ログ</h1>
-    <div class="muted">直近 {{ logs|length }} 件を表示（クライアントフィルタ可）</div>
-
-    <!-- フィルタ＆表示切替 -->
-    <div class="toolbar">
-      <input type="text" id="f_q" placeholder="キーワード（質問/回答/メタ）" oninput="applyFilters()">
-      <select id="f_src" onchange="applyFilters()">
-        <option value="all">ソース：すべて</option>
-        <option value="web">Web</option>
-        <option value="line">LINE</option>
-      </select>
-      <select id="f_hit" onchange="applyFilters()">
-        <option value="all">ヒット状況：すべて</option>
-        <option value="hit">ヒットのみ</option>
-        <option value="miss">未ヒットのみ</option>
-      </select>
-      <span class="muted">期間：</span>
-      <input type="date" id="f_from" onchange="applyFilters()">〜
-      <input type="date" id="f_to" onchange="applyFilters()">
-      <span class="badge">表示：<span id="f_count">0</span>件
-        <span class="stat">ヒット <b id="f_hitn">0</b></span>
-        <span class="stat miss">未ヒット <b id="f_missn">0</b></span>
-      </span>
-
-      <div class="seg" style="margin-left:auto">
-        <button type="button" data-mode="list" class="active" onclick="setMode('list')">一覧表示</button>
-        <button type="button" data-mode="group" onclick="setMode('group')">質問でグルーピング</button>
-      </div>
-      <button class="btn ghost" type="button" onclick="exportJSON()">JSONエクスポート</button>
-      <button class="btn ghost" type="button" onclick="exportCSV()">CSVエクスポート</button>
+    <div class="muted">
+      直近 {{ logs|length }} 件を表示（クライアントフィルタ可）／
+      <b>未ヒットの定義：</b>回答が「該当が見つかりませんでした。」のときのみ
     </div>
 
     {% if not logs %}
@@ -325,8 +298,12 @@ document.addEventListener('DOMContentLoaded', ()=>{
           {% set source = item.source or item.get('source','web') %}
           {% set q = item.question or item.get('question','') %}
           {% set a = item.answer or item.get('answer','') %}
-          {% set hit_db = item.hit_db or item.get('hit_db', False) %}
           {% set extra = item.extra or item.get('extra', {}) %}
+          {# --- ここで「未ヒット＝該当が見つかりませんでした。」判定に上書き --- #}
+          {% set _a = (a or '') %}
+          {% set _an = _a.replace('。','').replace('．','').replace('.','').strip() %}
+          {% set is_miss = ('該当が見つかりませんでした' in _an) or (_an.startswith('該当が見つからず')) or (_an == '見つかりませんでした') %}
+          {% set hit_db = (not is_miss) %}
 
           <div class="log-card"
                id="card-{{ loop.index0 }}"
@@ -398,6 +375,35 @@ document.addEventListener('DOMContentLoaded', ()=>{
       <!-- グループ表示 -->
       <div id="grouped" style="display:none"></div>
     {% endif %}
+
+    <!-- フィルタ＆表示切替 -->
+    <div class="toolbar">
+      <input type="text" id="f_q" placeholder="キーワード（質問/回答/メタ）" oninput="applyFilters()">
+      <select id="f_src" onchange="applyFilters()">
+        <option value="all">ソース：すべて</option>
+        <option value="web">Web</option>
+        <option value="line">LINE</option>
+      </select>
+      <select id="f_hit" onchange="applyFilters()">
+        <option value="all">ヒット状況：すべて</option>
+        <option value="hit">ヒットのみ</option>
+        <option value="miss">未ヒットのみ</option>
+      </select>
+      <span class="muted">期間：</span>
+      <input type="date" id="f_from" onchange="applyFilters()">〜
+      <input type="date" id="f_to" onchange="applyFilters()">
+      <span class="badge">表示：<span id="f_count">0</span>件
+        <span class="stat">ヒット <b id="f_hitn">0</b></span>
+        <span class="stat miss">未ヒット <b id="f_missn">0</b></span>
+      </span>
+
+      <div class="seg" style="margin-left:auto">
+        <button type="button" data-mode="list" class="active" onclick="setMode('list')">一覧表示</button>
+        <button type="button" data-mode="group" onclick="setMode('group')">質問でグルーピング</button>
+      </div>
+      <button class="btn ghost" type="button" onclick="exportJSON()">JSONエクスポート</button>
+      <button class="btn ghost" type="button" onclick="exportCSV()">CSVエクスポート</button>
+    </div>
   </div>
 </body>
 </html>
