@@ -100,6 +100,13 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+@app.template_filter("b64encode")
+def jinja_b64encode(s):
+    if s is None:
+        return ""
+    if not isinstance(s, (bytes, bytearray)):
+        s = str(s).encode("utf-8")
+    return base64.b64encode(s).decode("ascii")
 
 def _ensure_csrf_token():
     """
