@@ -45,6 +45,9 @@
 
   .empty{padding:10px 12px;background:#fff;border:1px dashed #cfe2ef;border-radius:10px;color:#789;margin-top:12px}
 
+  .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 6px}
+  .pager .btn{padding:6px 10px}
+
   /* グループ表示 */
   details.group{background:#f7faf7;border-radius:12px;padding:10px 12px;margin:10px 0;border:1px solid #e6eef2}
   details.group summary{cursor:pointer;font-weight:600}
@@ -85,9 +88,32 @@ function fmt(ts){
 }
 function copyText(t){ navigator.clipboard.writeText(t).then(()=>alert('コピーしました')); }
 function norm(s){ return (s||'').toString().trim().toLowerCase().replace(/\s+/g,' '); }
+function escapeHtml(s){ return (s??'').toString().replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m])); }
 
-// === filters & view mode ===
+// === view state ===
 let VIEW_MODE = 'list'; // 'list' | 'group'
+let PAGE_SIZE = 20;
+let CUR_PAGE = 1;
+let FILTERED_KEYS = []; // data-key の配列（フィルタ適合）
+
+function setMode(mode){
+  VIEW_MODE = mode;
+  document.querySelectorAll('.seg button').forEach(b=>b.classList.remove('active'));
+  document.querySelector(`.seg button[data-mode="${mode}"]`).classList.add('active');
+  renderPage(); // 描画だけ切替
+}
+
+function changePageSize(sel){ PAGE_SIZE = parseInt(sel.value||'20',10); CUR_PAGE = 1; renderPage(); }
+function gotoPage(w){
+  const totalPages = Math.max(1, Math.ceil(FILTERED_KEYS.length / PAGE_SIZE));
+  if(w==='first') CUR_PAGE = 1;
+  else if(w==='prev') CUR_PAGE = Math.max(1, CUR_PAGE-1);
+  else if(w==='next') CUR_PAGE = Math.min(totalPages, CUR_PAGE+1);
+  else if(w==='last') CUR_PAGE = totalPages;
+  renderPage();
+}
+
+// === filtering ===
 function applyFilters(){
   const q = norm(document.getElementById('f_q').value);
   const src = document.getElementById('f_src').value;  // all/web/line
@@ -95,71 +121,81 @@ function applyFilters(){
   const from = document.getElementById('f_from').value;
   const to   = document.getElementById('f_to').value;
 
-  // 集計
-  let shown=0, hitN=0, missN=0;
+  FILTERED_KEYS = [];
+  let hitN=0, missN=0;
 
-  // リスト表示
-  const cards = document.querySelectorAll('.log-card[data-q]');
-  cards.forEach(card=>{
-    const text = (card.dataset.q + ' ' + card.dataset.a + ' ' + card.dataset.source + ' ' + (card.dataset.extra||'')).toLowerCase();
-    const source = card.dataset.source;
-    const hit_db = card.dataset.hit === '1';
-    const ts = card.dataset.ts;
+  const cards = document.querySelectorAll('.log-card[data-key]');
+  for(const c of cards){
+    const text = c.dataset.text; // 低コスト（事前lower）
+    const source = c.dataset.source;
+    const hit_db = c.dataset.hit === '1';
+    const ts = c.dataset.ts;
+
     let ok = true;
     if(q && !text.includes(q)) ok=false;
     if(src!=='all' && source!==src) ok=false;
-    if(hit!=='all'){
-      if(hit==='hit' && !hit_db) ok=false;
-      if(hit==='miss'&&  hit_db) ok=false;
-    }
+    if(hit==='hit' && !hit_db) ok=false;
+    if(hit==='miss'&&  hit_db) ok=false;
     if(from){ try{ if(new Date(ts) < new Date(from)) ok=false; }catch(e){} }
     if(to){ try{ const d=new Date(to); d.setHours(23,59,59,999); if(new Date(ts) > d) ok=false; }catch(e){} }
-    card.style.display = (VIEW_MODE==='list' && ok) ? '' : 'none';
-    if(ok){ shown++; if(hit_db) hitN++; else missN++; }
-  });
 
-  // グループ表示
+    if(ok){
+      FILTERED_KEYS.push(c.dataset.key);
+      hit_db ? hitN++ : missN++;
+    }
+  }
+
+  CUR_PAGE = 1;
+  renderPage();
+
+  document.getElementById('f_count').textContent = FILTERED_KEYS.length;
+  document.getElementById('f_hitn').textContent = hitN;
+  document.getElementById('f_missn').textContent = missN;
+}
+
+function renderPage(){
+  const cards = [...document.querySelectorAll('.log-card[data-key]')];
+  const total = FILTERED_KEYS.length;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if(CUR_PAGE > totalPages) CUR_PAGE = totalPages;
+
+  const start = (CUR_PAGE-1)*PAGE_SIZE;
+  const end   = Math.min(start + PAGE_SIZE, total);
+  const pageKeys = new Set(FILTERED_KEYS.slice(start, end));
+
+  const listwrap = document.getElementById('listview');
   const gwrap = document.getElementById('grouped');
-  if(VIEW_MODE==='group'){
-    const rows = [];
-    cards.forEach(c=>{
-      const obj = {
-        q: c.dataset.q, a: c.dataset.a, ts: c.dataset.ts, source: c.dataset.source,
-        hit: (c.dataset.hit==='1'), extra: c.dataset.extra?JSON.parse(c.dataset.extra):{},
-        html: c
-      };
-      rows.push(obj);
-    });
-    const filt = rows.filter(r=>{
-      if(q && !(norm(r.q+' '+r.a+' '+r.source+' '+JSON.stringify(r.extra)).includes(q))) return false;
-      if(src!=='all' && r.source!==src) return false;
-      if(hit==='hit' && !r.hit) return false;
-      if(hit==='miss'&&  r.hit) return false;
-      if(from && new Date(r.ts) < new Date(from)) return false;
-      if(to){ const d=new Date(to); d.setHours(23,59,59,999); if(new Date(r.ts) > d) return false; }
-      return true;
-    });
+
+  if(VIEW_MODE==='list'){
+    // show/hide cards
+    for(const c of cards){
+      c.style.display = pageKeys.has(c.dataset.key) ? '' : 'none';
+    }
+    listwrap.style.display = '';
+    gwrap.style.display = 'none';
+  }else{
+    // build groups for current page only（軽量）
+    const items = cards.filter(c=>pageKeys.has(c.dataset.key)).map(c=>({
+      q:c.dataset.q, a:c.dataset.a, ts:c.dataset.ts, source:c.dataset.source, hit:(c.dataset.hit==='1')
+    }));
     const map = new Map();
-    for (const r of filt){
-      const key = norm(r.q);
-      if(!map.has(key)) map.set(key, {q:r.q, items:[], hit:0, miss:0, first:r.ts, last:r.ts});
-      const g = map.get(key);
+    for(const r of items){
+      const k = norm(r.q);
+      if(!map.has(k)) map.set(k, {q:r.q, items:[], hit:0, miss:0, first:r.ts, last:r.ts});
+      const g = map.get(k);
       g.items.push(r);
       r.hit ? g.hit++ : g.miss++;
       if(new Date(r.ts) < new Date(g.first)) g.first = r.ts;
       if(new Date(r.ts) > new Date(g.last))  g.last  = r.ts;
     }
     const groups = Array.from(map.values()).sort((a,b)=> new Date(b.last)-new Date(a.last));
-    shown = groups.length; hitN = filt.filter(r=>r.hit).length; missN = filt.filter(r=>!r.hit).length;
-
-    const html = groups.map((g,i)=>{
-      const body = g.items.map(it=>(
-        `<div class="g-item">
-           <div class="g-q">[${it.source.toUpperCase()}] ${fmt(it.ts)}</div>
-           <div class="label">Q.</div><div class="box">${escapeHtml(it.q)}</div>
-           <div class="label">A.</div><div class="box">${escapeHtml(it.a)}</div>
-         </div>`
-      )).join('');
+    const html = groups.map(g=>{
+      const body = g.items.map(it=>`
+        <div class="g-item">
+          <div class="g-q">[${it.source.toUpperCase()}] ${fmt(it.ts)}</div>
+          <div class="label">Q.</div><div class="box">${escapeHtml(it.q)}</div>
+          <div class="label">A.</div><div class="box">${escapeHtml(it.a)}</div>
+        </div>`).join('');
       return `<details class="group">
         <summary>${escapeHtml(g.q)} <span class="g-meta">（${g.items.length}件｜最古 ${fmt(g.first)} ／ 最新 ${fmt(g.last)}）</span>
           <span class="stat">ヒット ${g.hit}</span><span class="stat miss">未ヒット ${g.miss}</span>
@@ -168,95 +204,85 @@ function applyFilters(){
       </details>`;
     }).join('');
     gwrap.innerHTML = html || '<div class="empty">該当がありません。</div>';
+    listwrap.style.display = 'none';
+    gwrap.style.display = '';
   }
 
-  document.getElementById('f_count').textContent = shown;
-  document.getElementById('f_hitn').textContent = hitN;
-  document.getElementById('f_missn').textContent = missN;
-}
-function setMode(mode){
-  VIEW_MODE = mode;
-  document.querySelectorAll('.seg button').forEach(b=>b.classList.remove('active'));
-  document.querySelector(`.seg button[data-mode="${mode}"]`).classList.add('active');
-  document.getElementById('listview').style.display = (mode==='list')?'':'none';
-  document.getElementById('grouped').style.display  = (mode==='group')?'':'none';
-  applyFilters();
+  // pager UI
+  const info = `ページ ${CUR_PAGE} / ${totalPages}（1ページ ${PAGE_SIZE}件）`;
+  const el1 = document.getElementById('pg_info'), el2 = document.getElementById('pg_info2');
+  if(el1) el1.textContent = info; if(el2) el2.textContent = info;
+
+  const setBtn = (id, dis)=>{ const b=document.getElementById(id); if(b) b.disabled=dis; };
+  setBtn('pg_prev', CUR_PAGE<=1); setBtn('pg_first', CUR_PAGE<=1);
+  setBtn('pg_next', CUR_PAGE>=totalPages); setBtn('pg_last', CUR_PAGE>=totalPages);
+  setBtn('pg_prev2', CUR_PAGE<=1); setBtn('pg_first2', CUR_PAGE<=1);
+  setBtn('pg_next2', CUR_PAGE>=totalPages); setBtn('pg_last2', CUR_PAGE>=totalPages);
 }
 
 // === actions ===
 async function genFAQ(btn, idx){
   const wrap = document.getElementById('card-'+idx);
-  const q = wrap.dataset.q||'';
+  const q = wrap ? (wrap.dataset.q||'') : '';
   btn.disabled = true; const orig = btn.textContent; btn.textContent = '生成中…';
   try{
     const fd = new FormData(); fd.append('q', q);
     const res = await fetch('{{ url_for("api_faq_suggest") }}', {method:'POST', body:fd});
     const j = await res.json();
-    if(!j || !j.ok){ alert(j.error || '失敗しました'); }
+    if(!j || !j.ok){ alert(j?.error || '失敗しました'); }
     else{
       const ta = wrap.querySelector('textarea[name="desc"]');
-      if(ta){ ta.value = (j.text||'').trim(); ta.focus(); }
+      if(ta){ ta.value = (j.text||'').trim(); ta.style.display='block'; ta.focus(); }
     }
   }catch(e){ alert('通信エラー: '+e); }
   finally{ btn.disabled=false; btn.textContent=orig; }
 }
 
+// === export (フィルタ済み全件) ===
 function exportJSON(){
-  const rows = collectFiltered();
+  const rows = collectFilteredRows();
   const blob = new Blob([JSON.stringify(rows, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   download(url, 'logs_filtered.json');
 }
 function exportCSV(){
-  const rows = collectFiltered();
+  const rows = collectFilteredRows();
   const head = ['timestamp','source','hit_db','question','answer'];
   const esc = s => `"${(s??'').toString().replace(/"/g,'""').replace(/\r?\n/g,'\\n')}"`;
-  const lines = [head.join(',')]
-    .concat(rows.map(r=>[r.timestamp,r.source,r.hit_db?1:0,r.question,r.answer].map(esc).join(',')));
+  const lines = [head.join(',')].concat(rows.map(r=>
+    [r.timestamp,r.source,r.hit_db?1:0,r.question,r.answer].map(esc).join(',')
+  ));
   const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
   const url = URL.createObjectURL(blob);
   download(url, 'logs_filtered.csv');
 }
-function collectFiltered(){
-  const q = norm(document.getElementById('f_q').value);
-  const src = document.getElementById('f_src').value;
-  const hit = document.getElementById('f_hit').value;
-  const from = document.getElementById('f_from').value;
-  const to   = document.getElementById('f_to').value;
-  const cards = [...document.querySelectorAll('.log-card[data-q]')];
+function collectFilteredRows(){
+  const set = new Set(FILTERED_KEYS);
   const rows = [];
-  for(const c of cards){
-    const text = (c.dataset.q+' '+c.dataset.a+' '+c.dataset.source+' '+(c.dataset.extra||'')).toLowerCase();
-    const source = c.dataset.source;
-    const hit_db = c.dataset.hit === '1';
-    const ts = c.dataset.ts;
-    let ok = true;
-    if(q && !text.includes(q)) ok=false;
-    if(src!=='all' && source!==src) ok=false;
-    if(hit==='hit' && !hit_db) ok=false;
-    if(hit==='miss'&&  hit_db) ok=false;
-    if(from){ try{ if(new Date(ts) < new Date(from)) ok=false; }catch(e){} }
-    if(to){ try{ const d=new Date(to); d.setHours(23,59,59,999); if(new Date(ts) > d) ok=false; }catch(e){} }
-    if(ok){
+  document.querySelectorAll('.log-card[data-key]').forEach(c=>{
+    if(set.has(c.dataset.key)){
       rows.push({
-        timestamp: ts, source, hit_db, question: c.dataset.q, answer: c.dataset.a,
-        extra: c.dataset.extra ? JSON.parse(c.dataset.extra) : {}
+        timestamp: c.dataset.ts,
+        source: c.dataset.source,
+        hit_db: c.dataset.hit==='1',
+        question: c.dataset.q,
+        answer: c.dataset.a
       });
     }
-  }
+  });
   return rows;
 }
 function download(url, filename){
   const a = document.createElement('a'); a.href=url; a.download=filename; a.click();
   setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
-function escapeHtml(s){ return (s??'').toString().replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m])); }
 
 document.addEventListener('DOMContentLoaded', ()=>{
+  // 日時ラベル整形
   document.querySelectorAll('[data-tslabel]').forEach(el=>{
     el.textContent = fmt(el.getAttribute('data-tslabel'));
   });
-  setMode('list');
+  // 初回フィルタ→描画
   applyFilters();
 });
 </script>
@@ -282,10 +308,56 @@ document.addEventListener('DOMContentLoaded', ()=>{
       <b>未ヒットの定義：</b>回答が「該当が見つかりませんでした。」のときのみ
     </div>
 
+    <!-- ▼ 上部：フィルタ＆表示切替＆エクスポート -->
+    <div class="toolbar">
+      <input type="text" id="f_q" placeholder="キーワード（質問/回答/メタ）" oninput="applyFilters()">
+      <select id="f_src" onchange="applyFilters()">
+        <option value="all">ソース：すべて</option>
+        <option value="web">Web</option>
+        <option value="line">LINE</option>
+      </select>
+      <select id="f_hit" onchange="applyFilters()">
+        <option value="all">ヒット状況：すべて</option>
+        <option value="hit">ヒットのみ</option>
+        <option value="miss">未ヒットのみ</option>
+      </select>
+      <span class="muted">期間：</span>
+      <input type="date" id="f_from" onchange="applyFilters()">〜
+      <input type="date" id="f_to" onchange="applyFilters()">
+      <span class="badge">表示：<span id="f_count">0</span>件
+        <span class="stat">ヒット <b id="f_hitn">0</b></span>
+        <span class="stat miss">未ヒット <b id="f_missn">0</b></span>
+      </span>
+
+      <div class="seg" style="margin-left:auto">
+        <button type="button" data-mode="list" class="active" onclick="setMode('list')">一覧表示</button>
+        <button type="button" data-mode="group" onclick="setMode('group')">質問でグルーピング</button>
+      </div>
+      <button class="btn ghost" type="button" onclick="exportJSON()">JSONエクスポート</button>
+      <button class="btn ghost" type="button" onclick="exportCSV()">CSVエクスポート</button>
+    </div>
+
+    <!-- ▼ ページャ（上） -->
+    <div class="pager">
+      <label>1ページ件数：
+        <select onchange="changePageSize(this)">
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="30">30</option>
+          <option value="50">50</option>
+        </select>
+      </label>
+      <button id="pg_first" class="btn ghost" type="button" onclick="gotoPage('first')">≪ 最初</button>
+      <button id="pg_prev"  class="btn ghost" type="button" onclick="gotoPage('prev')">‹ 前へ</button>
+      <span class="muted" id="pg_info">ページ 1 / 1（1ページ 20件）</span>
+      <button id="pg_next" class="btn ghost" type="button" onclick="gotoPage('next')">次へ ›</button>
+      <button id="pg_last" class="btn ghost" type="button" onclick="gotoPage('last')">最後 ≫</button>
+    </div>
+
     {% if not logs %}
       <div class="empty">ログがありません。</div>
     {% else %}
-      <!-- 一覧表示 -->
+      <!-- 一覧（全カードは最初にDOM化しておき、表示制御はJSで） -->
       <div id="listview">
         {% for item in logs %}
           {% set ts = item.timestamp or item.get('timestamp','') %}
@@ -294,20 +366,23 @@ document.addEventListener('DOMContentLoaded', ()=>{
           {% set a = item.answer or item.get('answer','') %}
           {% set extra = item.extra or item.get('extra', {}) %}
 
-          {# --- ここで「未ヒット＝『該当が見つかりませんでした。』」に上書き判定 --- #}
+          {# --- 未ヒット判定 --- #}
           {% set _a = (a or '') %}
           {% set _an = _a.replace('。','').replace('．','').replace('.','').replace(' ','').replace('　','').strip() %}
           {% set is_miss = '該当が見つかりませんでした' in _an %}
           {% set hit_db = (not is_miss) %}
 
+          {% set _key = (ts ~ '||' ~ source ~ '||' ~ q) %}
+
           <div class="log-card"
                id="card-{{ loop.index0 }}"
+               data-key="{{ _key|b64encode }}"
                data-ts="{{ ts }}"
                data-source="{{ source }}"
                data-hit="{{ 1 if hit_db else 0 }}"
                data-q="{{ q }}"
                data-a="{{ a }}"
-               data-extra='{{ extra|tojson }}'>
+               data-text="{{ (q ~ ' ' ~ a ~ ' ' ~ source ~ ' ' ~ (extra|tojson))|lower }}">
             <div class="meta">
               <span class="tag">{{ source|upper }}</span>
               <span class="tag {{ 'hit' if hit_db else 'miss' }}">{{ 'ヒット' if hit_db else '未ヒット' }}</span>
@@ -350,55 +425,67 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
               <!-- その場でFAQ案（説明にペースト） -->
               <button class="btn secondary" type="button" onclick="genFAQ(this, {{ loop.index0 }})">AIでFAQ案</button>
-
-              <!-- 生成結果貼り付け用の小テキストエリア（必要なときに編集→手動で登録） -->
               <textarea name="desc" placeholder="AIでFAQ案→ここに挿入されます" style="width:100%;display:none"></textarea>
-              <script>
-                // ボタンが押された行だけ表示させる（初回アクセス時に活性化）
-                (function(i){
-                  const card = document.getElementById('card-'+i);
-                  const btn = card.querySelector('.btn.secondary');
-                  const ta  = card.querySelector('textarea[name="desc"]');
-                  btn.addEventListener('click', ()=>{ ta.style.display='block'; });
-                })({{ loop.index0 }});
-              </script>
             </div>
           </div>
         {% endfor %}
       </div>
 
-      <!-- グループ表示 -->
+      <!-- グループ表示（JSで埋める） -->
       <div id="grouped" style="display:none"></div>
     {% endif %}
 
-    <!-- フィルタ＆表示切替 -->
+    <!-- ▼ ページャ（下：上部と同期表示） -->
+    <div class="pager">
+      <button id="pg_first2" class="btn ghost" type="button" onclick="gotoPage('first')">≪ 最初</button>
+      <button id="pg_prev2"  class="btn ghost" type="button" onclick="gotoPage('prev')">‹ 前へ</button>
+      <span class="muted" id="pg_info2">ページ 1 / 1（1ページ 20件）</span>
+      <button id="pg_next2" class="btn ghost" type="button" onclick="gotoPage('next')">次へ ›</button>
+      <button id="pg_last2" class="btn ghost" type="button" onclick="gotoPage('last')">最後 ≫</button>
+    </div>
+
+    <!-- ▼ 下部にもフィルタをミラー（一覧が長くても操作できるように） -->
     <div class="toolbar">
-      <input type="text" id="f_q" placeholder="キーワード（質問/回答/メタ）" oninput="applyFilters()">
-      <select id="f_src" onchange="applyFilters()">
+      <input type="text" id="f_q_bottom" placeholder="キーワード（質問/回答/メタ）">
+      <select id="f_src_bottom">
         <option value="all">ソース：すべて</option>
         <option value="web">Web</option>
         <option value="line">LINE</option>
       </select>
-      <select id="f_hit" onchange="applyFilters()">
+      <select id="f_hit_bottom">
         <option value="all">ヒット状況：すべて</option>
         <option value="hit">ヒットのみ</option>
         <option value="miss">未ヒットのみ</option>
       </select>
       <span class="muted">期間：</span>
-      <input type="date" id="f_from" onchange="applyFilters()">〜
-      <input type="date" id="f_to" onchange="applyFilters()">
-      <span class="badge">表示：<span id="f_count">0</span>件
-        <span class="stat">ヒット <b id="f_hitn">0</b></span>
-        <span class="stat miss">未ヒット <b id="f_missn">0</b></span>
-      </span>
-
-      <div class="seg" style="margin-left:auto">
-        <button type="button" data-mode="list" class="active" onclick="setMode('list')">一覧表示</button>
-        <button type="button" data-mode="group" onclick="setMode('group')">質問でグルーピング</button>
-      </div>
+      <input type="date" id="f_from_bottom">〜
+      <input type="date" id="f_to_bottom">
       <button class="btn ghost" type="button" onclick="exportJSON()">JSONエクスポート</button>
       <button class="btn ghost" type="button" onclick="exportCSV()">CSVエクスポート</button>
     </div>
   </div>
+
+  <script>
+    // 下部フィルタ → 上部フィルタへ同期（操作しやすさ向上）
+    (function(){
+      const map = [
+        ['f_q_bottom','f_q','input'],
+        ['f_src_bottom','f_src','change'],
+        ['f_hit_bottom','f_hit','change'],
+        ['f_from_bottom','f_from','change'],
+        ['f_to_bottom','f_to','change'],
+      ];
+      for(const [b, t, ev] of map){
+        const be = document.getElementById(b), te = document.getElementById(t);
+        if(!be || !te) continue;
+        be.addEventListener(ev, ()=>{
+          te.value = be.value;
+          applyFilters();
+        });
+        // 初期値も揃える
+        be.value = te.value;
+      }
+    })();
+  </script>
 </body>
 </html>
