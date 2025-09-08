@@ -99,6 +99,23 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+
+def _ensure_csrf_token():
+    """
+    テンプレから呼ぶ csrf_token()。なければ作ってセッションに入れる。
+    既存の独自CSRF（Referer/Originガード）と共存可。
+    """
+    tok = session.get("_csrf_token")
+    if not tok:
+        tok = secrets.token_urlsafe(32)
+        session["_csrf_token"] = tok
+    return tok
+
+@app.context_processor
+def _inject_csrf_token():
+    # テンプレートで csrf_token() が常に呼べるようになる
+    return dict(csrf_token=_ensure_csrf_token)
+
 # === Admin no-cache & static cache-busting =========================
 # デプロイ毎に変わるビルドID（環境変数 BUILD_ID があればそれを使う）
 BUILD_ID = os.getenv("BUILD_ID") or datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
