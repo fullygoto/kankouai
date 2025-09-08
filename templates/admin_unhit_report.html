@@ -1,37 +1,358 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
   <meta charset="utf-8">
   <title>未ヒット頻出レポート</title>
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <style>
-    body { font-family: sans-serif; background: #f6faf9; }
-    .container { background: #fff; padding: 24px; margin: 30px auto; max-width: 700px; border-radius: 13px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ddd; padding: 8px; font-size: 0.96em; }
-    th { background: #eef3f9; }
-    tr:nth-child(even){background-color: #f9f9fb;}
-    .count { font-weight: bold; color: #2a8ed8; }
-    .nav { float: right; margin-bottom: 10px;}
-    .nav a { color:#2a8ed8; text-decoration:none; font-weight:500; margin-left:12px;}
-    .nav a:hover {text-decoration:underline;}
+    :root{--bg:#f6faf9;--panel:#fff;--muted:#64748b;--line:#e5e7eb;--brand:#2a8ed8;--warn:#c53}
+    *{box-sizing:border-box}
+    body{font-family:'Segoe UI','メイリオ',sans-serif;background:var(--bg);margin:0}
+    .container{background:#fff;padding:26px 28px;margin:38px auto;max-width:1100px;border-radius:17px;box-shadow:0 4px 20px #b7d3e04d}
+    .nav{margin-bottom:18px}
+    .nav a{margin-right:16px;font-size:1em;color:var(--brand);text-decoration:none;font-weight:500}
+    .nav a:hover{text-decoration:underline}
+    h1{margin:0 0 6px}
+    .muted{color:#789;font-size:.92em}
+    .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0 14px}
+    .toolbar input[type=text], .toolbar input[type=number], .toolbar select{padding:8px 10px;border:1px solid #b0c4d7;border-radius:8px;font-size:.96em;background:#fff}
+    .btn{padding:7px 12px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer}
+    .btn.ghost{background:#fff;color:var(--brand);border:1px solid #cfe1ef}
+    .btn.warn{background:var(--warn)}
+    .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef6ff;color:var(--brand);font-size:.86em}
+    .table-wrap{overflow:auto;background:#fff;border:1px solid var(--line);border-radius:12px}
+    table{border-collapse:collapse;min-width:900px;width:100%}
+    th,td{border-bottom:1px solid var(--line);padding:8px;vertical-align:top;font-size:13px;background:#fff}
+    thead th{position:sticky;top:0;background:#f1f5f9;text-align:left;z-index:1;white-space:nowrap}
+    tr:nth-child(even) td{background:#fafcff}
+    .count{font-weight:700;color:#2a8ed8}
+    details.sample{background:#f7faf7;border:1px dashed #d7e6f2;border-radius:10px;padding:8px 10px}
+    details.sample summary{cursor:pointer}
+    .sample-item{background:#fff;border:1px dashed #dbe7f1;border-radius:8px;padding:8px 10px;margin:8px 0}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0}
+    .pager .btn{padding:6px 10px}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eef6ff;color:#2563eb;font-size:12px;margin-left:6px}
   </style>
+
+  <script>
+  // === CSRF header auto ===
+  (function(){
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    const TOKEN = meta ? meta.content : null;
+    if(!TOKEN) return;
+    if (window.fetch) {
+      const _fetch = window.fetch;
+      window.fetch = function(input, init){
+        init = init || {};
+        init.headers = new Headers(init.headers || {});
+        if(!init.headers.get('X-CSRF-Token')) init.headers.set('X-CSRF-Token', TOKEN);
+        return _fetch(input, init);
+      };
+    }
+  })();
+
+  // === utils ===
+  function fmt(ts){
+    try{
+      const d=new Date(ts);const y=d.getFullYear(),m=('0'+(d.getMonth()+1)).slice(-2);
+      const dd=('0'+d.getDate()).slice(-2),hh=('0'+d.getHours()).slice(-2),mm=('0'+d.getMinutes()).slice(-2);
+      return `${y}-${m}-${dd} ${hh}:${mm}`;
+    }catch(e){ return ts; }
+  }
+  function escapeHtml(s){ return (s??'').toString().replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+  function norm(s){ return (s||'').toString().toLowerCase().trim().replace(/\s+/g,' ').replace(/[。、，,.!！?？]+/g,''); }
+  function copyText(t){ navigator.clipboard.writeText(t).then(()=>alert('コピーしました')); }
+  function download(url, filename){ const a=document.createElement('a'); a.href=url; a.download=filename; a.click(); setTimeout(()=>URL.revokeObjectURL(url), 800); }
+
+  // === local "done" state per question ===
+  const DONE_KEY='unhit_report_done_v1';
+  function _loadDone(){ try{ return new Set(JSON.parse(localStorage.getItem(DONE_KEY)||'[]')); }catch{ return new Set(); } }
+  function _saveDone(set){ localStorage.setItem(DONE_KEY, JSON.stringify(Array.from(set))); }
+  const DONE = _loadDone();
+
+  // === paging & filtering state ===
+  let PAGE_SIZE = 30;
+  let CUR_PAGE = 1;
+  let DATA = []; // {q, cnt, norm, hasSamples}
+  let FILTERED_IDX = [];
+
+  function buildData(){
+    DATA = [];
+    {% for pair in unhit_report %}
+      {% set q = pair[0] %}
+      {% set cnt = pair[1] %}
+      DATA.push({
+        q: {{ q|tojson }},
+        cnt: {{ cnt }},
+        norm: norm({{ q|tojson }}),
+        hasSamples: {% if samples_by_q %} {{ 'true' if samples_by_q.get(q) else 'false' }} {% else %} false {% endif %}
+      });
+    {% endfor %}
+  }
+
+  function applyFilter(){
+    const q = (document.getElementById('f_q').value||'').toLowerCase().trim();
+    const min = parseInt(document.getElementById('f_min').value||'1',10);
+    const hideDone = document.getElementById('f_hide').checked;
+    const sort = document.getElementById('f_sort').value; // cnt_desc, cnt_asc, alpha
+
+    FILTERED_IDX = [];
+    let totalCount = 0;
+
+    for(let i=0;i<DATA.length;i++){
+      const row = DATA[i];
+      let ok = true;
+      if(q && !(row.q.toLowerCase().includes(q) || row.norm.includes(q))) ok=false;
+      if(row.cnt < min) ok=false;
+      if(hideDone && DONE.has(row.q)) ok=false;
+      if(ok){ FILTERED_IDX.push(i); totalCount += row.cnt; }
+    }
+
+    // sort
+    FILTERED_IDX.sort((a,b)=>{
+      const A = DATA[a], B = DATA[b];
+      if(sort==='cnt_asc')  return A.cnt - B.cnt || A.q.localeCompare(B.q,'ja');
+      if(sort==='alpha')    return A.q.localeCompare(B.q,'ja');
+      return B.cnt - A.cnt || A.q.localeCompare(B.q,'ja'); // default cnt_desc
+    });
+
+    CUR_PAGE = 1;
+    renderTable();
+    document.getElementById('stat_badge').textContent = `${FILTERED_IDX.length} 件のグループ / 合計 ${totalCount} 回`;
+  }
+
+  function renderTable(){
+    const tbody = document.getElementById('tbody');
+    tbody.innerHTML = '';
+    const total = FILTERED_IDX.length;
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    if(CUR_PAGE < 1) CUR_PAGE = 1;
+    if(CUR_PAGE > totalPages) CUR_PAGE = totalPages;
+    const start = (CUR_PAGE-1)*PAGE_SIZE;
+    const end   = Math.min(start+PAGE_SIZE, total);
+    const pageIdx = FILTERED_IDX.slice(start, end);
+
+    for(const i of pageIdx){
+      const r = DATA[i];
+      const qEsc = escapeHtml(r.q);
+      const isDone = DONE.has(r.q);
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="width:40px;white-space:nowrap">
+          <input class="sel" type="checkbox">
+        </td>
+        <td style="width:80px"><span class="count">${r.cnt}</span></td>
+        <td>
+          <div class="row">
+            <b>${qEsc}</b>
+            ${isDone ? '<span class="pill">処理済</span>' : ''}
+          </div>
+          <div class="row" style="margin-top:6px;gap:6px">
+            <button class="btn ghost" type="button" onclick="copyText(\`${qEsc}\`)">質問コピー</button>
+            <a class="btn ghost" href="{{ url_for('admin_unhit_questions') }}?q=${encodeURIComponent(r.q)}" target="_blank">該当の未ヒット一覧を開く</a>
+            <a class="btn ghost" href="{{ url_for('admin_entry') }}?prefill=1&title=${encodeURIComponent(r.q)}&desc=&tags=&areas=" target="_blank">DB下書き追加（編集で開く）</a>
+            <label style="display:inline-flex;gap:6px;align-items:center;margin-left:8px">
+              <input type="checkbox" ${isDone?'checked':''} onchange="toggleDone('${r.q.replace(/["'\\]/g,'\\$&')}', this.checked)"> 処理済み
+            </label>
+          </div>
+          ${r.hasSamples ? `
+            <details class="sample" style="margin-top:8px">
+              <summary>サンプルを見る</summary>
+              <div class="sample-list">
+                {% if samples_by_q %}
+                  {% raw %}${renderSamples(r.q)}{% endraw %}
+                {% endif %}
+              </div>
+            </details>` : ``}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    // pager
+    document.getElementById('pg_info').textContent = `ページ ${CUR_PAGE} / ${totalPages}（1ページ ${PAGE_SIZE}行）`;
+    document.getElementById('pg_prev').disabled = (CUR_PAGE<=1);
+    document.getElementById('pg_first').disabled = (CUR_PAGE<=1);
+    document.getElementById('pg_next').disabled = (CUR_PAGE>=totalPages);
+    document.getElementById('pg_last').disabled = (CUR_PAGE>=totalPages);
+  }
+
+  function changePageSize(sel){ PAGE_SIZE = parseInt(sel.value||'30',10); CUR_PAGE=1; renderTable(); }
+  function gotoPage(which){
+    if(which==='first') CUR_PAGE=1;
+    else if(which==='prev') CUR_PAGE--;
+    else if(which==='next') CUR_PAGE++;
+    else if(which==='last'){ const totalPages=Math.max(1,Math.ceil(FILTERED_IDX.length/PAGE_SIZE)); CUR_PAGE=totalPages; }
+    renderTable();
+  }
+
+  function toggleDone(q, on){
+    if(on) DONE.add(q); else DONE.delete(q);
+    _saveDone(DONE);
+    if(document.getElementById('f_hide').checked) applyFilter();
+  }
+
+  // === export ===
+  function exportJSON(){
+    const rows = collectRows();
+    const blob = new Blob([JSON.stringify(rows,null,2)], {type:'application/json'});
+    download(URL.createObjectURL(blob), 'unhit_report_filtered.json');
+  }
+  function exportCSV(){
+    const rows = collectRows();
+    const head = ['question','count'];
+    const esc = s => `"${(s??'').toString().replace(/"/g,'""').replace(/\r?\n/g,'\\n')}"`;
+    const lines = [head.join(',')].concat(rows.map(r=>[r.q, r.cnt].map(esc).join(',')));
+    const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
+    download(URL.createObjectURL(blob), 'unhit_report_filtered.csv');
+  }
+  function exportCSVForEntries(){
+    // 選択行を entries_import 用CSVへ
+    const body = document.getElementById('tbody');
+    const rows = [];
+    body.querySelectorAll('tr').forEach(tr=>{
+      const sel = tr.querySelector('input.sel');
+      if(sel && sel.checked){
+        const q = tr.querySelector('b')?.textContent || '';
+        rows.push(q);
+      }
+    });
+    if(!rows.length){ alert('エクスポートする項目を選択してください（左のチェック）'); return; }
+    const head = ['category','title','desc','address','map','tags','areas','links'];
+    const esc = s => `"${(s??'').toString().replace(/"/g,'""').replace(/\r?\n/g,'\\n')}"`;
+    const lines = [head.join(',')].concat(rows.map(q=>[
+      '観光', q.slice(0,80), '', '', '', '', '', ''
+    ].map(esc).join(',')));
+    const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
+    download(URL.createObjectURL(blob), 'entries_import_from_unhit_report.csv');
+    alert('CSVをダウンロードしました。「観光データ一括編集」画面のCSV取り込みで追加できます。');
+  }
+
+  function collectRows(){
+    // 現在のフィルタ & 並び & ページング（表示中の全ページ分ではなく「フィルタ結果の全体」）をエクスポート
+    return FILTERED_IDX.map(i=>({ q: DATA[i].q, cnt: DATA[i].cnt }));
+  }
+
+  // Optional: samples_by_q を安全に描画（JinjaでHTML文字列を返すヘルパ）
+  </script>
+
+  {% if samples_by_q %}
+  <script>
+    // サンプル描画（Jinjaの辞書を参照）
+    const SAMPLES = {{ samples_by_q|tojson }};
+    function renderSamples(q){
+      const arr = SAMPLES[q] || [];
+      if(!arr.length) return '<div class="muted">サンプルはありません。</div>';
+      return arr.slice(0,10).map(s=>`
+        <div class="sample-item">
+          <div class="muted">[${(s.source||'web').toUpperCase()}] ${escapeHtml(fmt(s.timestamp||''))}</div>
+          ${s.question ? `<div><b>Q.</b> ${escapeHtml(s.question)}</div>`:''}
+          ${s.answer ? `<div style="margin-top:4px"><b>A.</b> <div style="white-space:pre-wrap">${escapeHtml(s.answer)}</div></div>`:''}
+        </div>
+      `).join('');
+    }
+  </script>
+  {% endif %}
+
+  <script>
+  // bootstrap
+  document.addEventListener('DOMContentLoaded', ()=>{
+    buildData();
+    applyFilter();
+  });
+  </script>
 </head>
 <body>
-{% include '_back_to_data.html' %}
-<div class="container">
-  <div class="nav">
-    <a href="{{ url_for('admin_entry') }}">[データ管理に戻る]</a>
+  {% include '_back_to_data.html' %}
+  <div class="container">
+    <div class="nav" style="float:right;">
+      <a href="{{ url_for('admin_logs') }}">[質問・回答ログ]</a>
+      <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+      <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+      <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
+      <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
+      <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
+      <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
+      <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
+      <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+    </div>
+
+    <h1>未ヒット頻出レポート</h1>
+    <div class="muted">
+      {% if period_label %}{{ period_label }}{% else %}直近7〜30日{% endif %}の未ヒット質問を集計。件数順で優先対応できます。
+      <span class="badge" id="stat_badge">-</span>
+    </div>
+
+    <div class="toolbar">
+      <input type="text" id="f_q" placeholder="キーワード／正規化語でも検索可" oninput="applyFilter()">
+      <label>最小件数 <input type="number" id="f_min" value="1" min="1" style="width:80px" oninput="applyFilter()"></label>
+      <label>並び順
+        <select id="f_sort" onchange="applyFilter()">
+          <option value="cnt_desc" selected>件数 ↓</option>
+          <option value="cnt_asc">件数 ↑</option>
+          <option value="alpha">五十音</option>
+        </select>
+      </label>
+      <label style="display:inline-flex;gap:6px;align-items:center">
+        <input type="checkbox" id="f_hide" onchange="applyFilter()"> 処理済みを隠す
+      </label>
+      <span style="margin-left:auto"></span>
+      <a class="btn ghost" href="{{ url_for('admin_unhit_report', days=7) }}">7日</a>
+      <a class="btn ghost" href="{{ url_for('admin_unhit_report', days=14) }}">14日</a>
+      <a class="btn ghost" href="{{ url_for('admin_unhit_report', days=30) }}">30日</a>
+      <button class="btn ghost" type="button" onclick="exportJSON()">JSON出力</button>
+      <button class="btn ghost" type="button" onclick="exportCSV()">CSV出力</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <colgroup>
+          <col style="width:40px">
+          <col style="width:80px">
+          <col>
+        </colgroup>
+        <thead>
+          <tr>
+            <th><input id="sel_all" type="checkbox" onclick="
+              document.querySelectorAll('#tbody .sel').forEach(cb=>cb.checked=this.checked)
+            "></th>
+            <th>件数</th>
+            <th>質問内容 / アクション</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="pager">
+      <label>1ページ：
+        <select onchange="changePageSize(this)">
+          <option value="20">20</option>
+          <option value="30" selected>30</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+      </label>
+      <button id="pg_first" class="btn ghost" type="button" onclick="gotoPage('first')">≪ 最初</button>
+      <button id="pg_prev"  class="btn ghost" type="button" onclick="gotoPage('prev')">‹ 前へ</button>
+      <span class="muted" id="pg_info">ページ 1 / 1（1ページ 30行）</span>
+      <button id="pg_next" class="btn ghost" type="button" onclick="gotoPage('next')">次へ ›</button>
+      <button id="pg_last" class="btn ghost" type="button" onclick="gotoPage('last')">最後 ≫</button>
+
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <button class="btn ghost" type="button" onclick="exportCSVForEntries()">選択→CSV（DB取り込み用）</button>
+      </div>
+    </div>
+
   </div>
-  <h1>未ヒット頻出質問レポート（直近7日）</h1>
-  <table>
-    <tr><th>質問内容</th><th>件数</th></tr>
-    {% for q, cnt in unhit_report %}
-      <tr>
-        <td>{{ q }}</td>
-        <td class="count">{{ cnt }}</td>
-      </tr>
-    {% endfor %}
-  </table>
-</div>
+
+  {% if not unhit_report or unhit_report|length==0 %}
+    <script>
+      document.querySelector('.container').insertAdjacentHTML('beforeend',
+        '<div class="muted" style="margin-top:10px">未ヒット項目はありません。</div>');
+    </script>
+  {% endif %}
 </body>
 </html>
