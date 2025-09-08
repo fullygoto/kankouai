@@ -5,21 +5,24 @@
 <title>未ヒット質問一覧</title>
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <style>
-  body{font-family:'Segoe UI','メイリオ',sans-serif;background:#f6faf9;margin:0}
-  .container{background:#fff;padding:26px 28px;margin:38px auto;max-width:1100px;border-radius:17px;box-shadow:0 4px 20px #b7d3e04d;}
-  .nav{margin-bottom:18px;}
-  .nav a{margin-right:16px;font-size:1em;color:#2a8ed8;text-decoration:none;font-weight:500;}
-  .nav a:hover{text-decoration:underline;}
+  :root{--bg:#f6faf9;--panel:#fff;--muted:#64748b;--line:#e5e7eb;--brand:#2a8ed8;--hit:#178a49;--miss:#c44}
+  *{box-sizing:border-box}
+  body{font-family:'Segoe UI','メイリオ',sans-serif;background:var(--bg);margin:0}
+  .container{background:#fff;padding:26px 28px;margin:38px auto;max-width:1100px;border-radius:17px;box-shadow:0 4px 20px #b7d3e04d}
+  .nav{margin-bottom:18px}
+  .nav a{margin-right:16px;font-size:1em;color:var(--brand);text-decoration:none;font-weight:500}
+  .nav a:hover{text-decoration:underline}
   h1{margin:0 0 10px}
   .muted{color:#789;font-size:.92em}
   .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0 16px}
   .toolbar input[type=text], .toolbar input[type=date], .toolbar select{padding:8px 10px;border:1px solid #b0c4d7;border-radius:8px;font-size:.96em;background:#fff}
-  .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef6ff;color:#2a8ed8;font-size:.86em}
-  .btn{padding:7px 12px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
-  .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #cfe1ef}
+  .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef6ff;color:var(--brand);font-size:.86em}
+  .stat{display:inline-block;padding:2px 8px;border-radius:999px;background:#fff1f1;color:var(--miss);font-size:.86em;margin-left:6px}
+  .btn{padding:7px 12px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer}
+  .btn.ghost{background:#fff;color:var(--brand);border:1px solid #cfe1ef}
   .btn.secondary{background:#5aa}
   .btn.warn{background:#c53}
-  .card{background:#f7faf7;margin:12px 0;border-radius:12px;padding:14px 16px;box-shadow:0 2px 6px #e0e6ed30;}
+  .card{background:#f7faf7;margin:12px 0;border-radius:12px;padding:14px 16px;box-shadow:0 2px 6px #e0e6ed30}
   .ts{color:#678;font-size:.9em;margin-bottom:6px}
   .q{font-weight:600;margin:2px 0 8px}
   label{display:block;font-weight:600;margin:.5rem 0 .25rem}
@@ -32,12 +35,23 @@
   .empty{padding:10px 12px;background:#fff;border:1px dashed #cfe2ef;border-radius:10px;color:#789;margin-top:12px}
   .mode{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
   .mode .seg{display:inline-flex;border:1px solid #cfe1ef;border-radius:10px;overflow:hidden}
-  .mode .seg button{background:#fff;color:#2a8ed8;border:none;padding:7px 12px}
-  .mode .seg button.active{background:#2a8ed8;color:#fff}
+  .mode .seg button{background:#fff;color:var(--brand);border:none;padding:7px 12px;cursor:pointer}
+  .mode .seg button.active{background:var(--brand);color:#fff}
   .box{background:#fff;border:1px solid #e5eff7;border-radius:12px;padding:10px 12px;margin-top:8px}
   .path{font-size:.9em;color:#567}
   .hint{font-size:.86em;color:#567;margin-top:4px}
   .right{display:flex;gap:8px;align-items:center;justify-content:flex-end}
+  .row-head{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:6px}
+  .row-left{display:flex;gap:10px;align-items:center}
+  .done{display:inline-flex;gap:6px;align-items:center}
+  .pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 6px}
+  .pager .btn{padding:6px 10px}
+  details.group{background:#f7faf7;border-radius:12px;padding:10px 12px;margin:10px 0;border:1px solid #e6eef2}
+  details.group summary{cursor:pointer;font-weight:600}
+  .g-meta{font-size:.9em;color:#567;margin-left:8px}
+  .g-list{margin-top:8px}
+  .g-item{border:1px dashed #dbe7f1;background:#fff;border-radius:10px;padding:8px 10px;margin:8px 0}
+  .g-q{font-weight:600;margin-bottom:4px}
   @media (max-width:960px){.row2,.row3{grid-template-columns:1fr}}
 </style>
 
@@ -68,8 +82,8 @@
 // === utils ===
 function fmt(ts){
   try{
-    const d = new Date(ts);
-    const y = d.getFullYear(), m=('0'+(d.getMonth()+1)).slice(-2);
+    const d=new Date(ts);
+    const y=d.getFullYear(), m=('0'+(d.getMonth()+1)).slice(-2);
     const dd=('0'+d.getDate()).slice(-2), hh=('0'+d.getHours()).slice(-2);
     const mm=('0'+d.getMinutes()).slice(-2);
     return `${y}-${m}-${dd} ${hh}:${mm}`;
@@ -85,29 +99,204 @@ function slugify(s){
     .toLowerCase()
     .slice(0,80) || 'untitled';
 }
+function escapeHtml(s){ return (s??'').toString().replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[m])); }
+function norm(s){ return (s||'').toString().toLowerCase().trim().replace(/\s+/g,' '); }
+
+// === local processed memory ===
+const DONE_KEY = 'unhit_done_keys_v1';
+function _loadDone(){ try{ return new Set(JSON.parse(localStorage.getItem(DONE_KEY)||'[]')); }catch{ return new Set(); } }
+function _saveDone(set){ localStorage.setItem(DONE_KEY, JSON.stringify(Array.from(set))); }
+const DONE = _loadDone();
+
+// === paging state ===
+let PAGE_SIZE = 20;
+let CUR_PAGE = 1;
+let VIEW_MODE = 'cards'; // 'cards' | 'group'
+let FILTERED_KEYS = [];  // keys after filtering (for paging)
+
+function genKey(ts, src, q){ return btoa(unescape(encodeURIComponent(`${ts}||${src}||${q}`))).slice(0,64); }
 
 // === filters ===
 function filterCards(){
-  const q = (document.getElementById('f_q').value || '').toLowerCase();
+  const q = norm(document.getElementById('f_q').value);
   const src = document.getElementById('f_src').value; // all/web/line
   const from = document.getElementById('f_from').value;
   const to   = document.getElementById('f_to').value;
+  const hideDone = document.getElementById('f_hide_done').checked;
 
-  const cards = document.querySelectorAll('.card[data-text]');
+  const cards = [...document.querySelectorAll('.card[data-key]')];
+
   let shown = 0;
-  cards.forEach(card=>{
-    const txt = card.dataset.text;
+  FILTERED_KEYS = [];
+
+  // filter & count
+  for(const card of cards){
+    const text = card.dataset.text;
     const source = card.dataset.source;
     const ts = card.dataset.ts;
+    const key = card.dataset.key;
     let ok = true;
-    if(q && !txt.includes(q)) ok = false;
-    if(src!=='all' && source!==src) ok = false;
-    if(from){ try{ if(new Date(ts) < new Date(from)) ok = false; }catch(e){} }
+    if(q && !text.includes(q)) ok=false;
+    if(src!=='all' && source!==src) ok=false;
+    if(from){ try{ if(new Date(ts) < new Date(from)) ok=false; }catch(e){} }
     if(to){ try{ const d=new Date(to); d.setHours(23,59,59,999); if(new Date(ts) > d) ok=false; }catch(e){} }
-    card.style.display = ok ? '' : 'none';
-    if(ok) shown++;
-  });
+    if(hideDone && DONE.has(key)) ok=false;
+
+    if(ok){ FILTERED_KEYS.push(key); shown++; }
+  }
+
+  CUR_PAGE = 1;
+  renderPage();
+
   document.getElementById('f_count').textContent = shown;
+}
+
+function renderPage(){
+  const cards = [...document.querySelectorAll('.card[data-key]')];
+  const total = FILTERED_KEYS.length;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if(CUR_PAGE < 1) CUR_PAGE = 1;
+  if(CUR_PAGE > totalPages) CUR_PAGE = totalPages;
+
+  const start = (CUR_PAGE-1)*PAGE_SIZE;
+  const end   = Math.min(start + PAGE_SIZE, total);
+  const pageKeys = new Set(FILTERED_KEYS.slice(start, end));
+
+  // show/hide for card view
+  if(VIEW_MODE==='cards'){
+    for(const card of cards){
+      const show = pageKeys.has(card.dataset.key);
+      card.style.display = show ? '' : 'none';
+    }
+    document.getElementById('groups').style.display = 'none';
+    document.getElementById('cardswrap').style.display = '';
+  }else{
+    // group view
+    buildGroups(pageKeys);
+    document.getElementById('groups').style.display = '';
+    document.getElementById('cardswrap').style.display = 'none';
+  }
+
+  // pager UI
+  document.getElementById('pg_info').textContent = `ページ ${CUR_PAGE} / ${totalPages}（1ページ ${PAGE_SIZE}件）`;
+  document.getElementById('pg_prev').disabled = (CUR_PAGE<=1);
+  document.getElementById('pg_first').disabled = (CUR_PAGE<=1);
+  document.getElementById('pg_next').disabled = (CUR_PAGE>=totalPages);
+  document.getElementById('pg_last').disabled = (CUR_PAGE>=totalPages);
+
+  // selection helper
+  document.getElementById('sel_all').checked = false;
+}
+
+function gotoPage(w){
+  if(w==='first') CUR_PAGE = 1;
+  else if(w==='prev') CUR_PAGE -= 1;
+  else if(w==='next') CUR_PAGE += 1;
+  else if(w==='last'){ const totalPages = Math.max(1, Math.ceil(FILTERED_KEYS.length / PAGE_SIZE)); CUR_PAGE = totalPages; }
+  renderPage();
+}
+function changePageSize(sel){ PAGE_SIZE = parseInt(sel.value||'20',10); CUR_PAGE = 1; renderPage(); }
+function setView(mode){
+  VIEW_MODE = mode;
+  document.querySelectorAll('.viewseg button').forEach(b=>b.classList.remove('active'));
+  document.querySelector(`.viewseg button[data-mode="${mode}"]`).classList.add('active');
+  renderPage();
+}
+
+// === grouping ===
+function buildGroups(pageKeys){
+  const items = [...document.querySelectorAll('.card[data-key]')].filter(c=>pageKeys.has(c.dataset.key))
+                 .map(c=>({q:c.dataset.q, a:c.dataset.a, ts:c.dataset.ts, source:c.dataset.source}));
+  const map = new Map();
+  for(const r of items){
+    const k = norm(r.q);
+    if(!map.has(k)) map.set(k, {q:r.q, items:[], first:r.ts, last:r.ts});
+    const g = map.get(k);
+    g.items.push(r);
+    if(new Date(r.ts) < new Date(g.first)) g.first = r.ts;
+    if(new Date(r.ts) > new Date(g.last))  g.last  = r.ts;
+  }
+  const groups = Array.from(map.values()).sort((a,b)=>new Date(b.last)-new Date(a.last));
+  const html = groups.map(g=>{
+    const body = g.items.map(it=>`
+      <div class="g-item">
+        <div class="g-q">[${it.source.toUpperCase()}] ${fmt(it.ts)}</div>
+        <div class="label">Q.</div><div class="box">${escapeHtml(it.q)}</div>
+        <div class="label">A.</div><div class="box">${escapeHtml(it.a)}</div>
+      </div>`).join('');
+    return `<details class="group">
+      <summary>${escapeHtml(g.q)} <span class="g-meta">（${g.items.length}件｜最古 ${fmt(g.first)} ／ 最新 ${fmt(g.last)}）</span></summary>
+      <div class="g-list">${body}</div>
+    </details>`;
+  }).join('');
+  document.getElementById('groups').innerHTML = html || '<div class="empty">該当がありません。</div>';
+}
+
+// === selection ===
+function toggleSelectAll(box){
+  const pageSet = new Set(FILTERED_KEYS.slice((CUR_PAGE-1)*PAGE_SIZE, (CUR_PAGE-1)*PAGE_SIZE + PAGE_SIZE));
+  document.querySelectorAll('.card[data-key]').forEach(c=>{
+    if(pageSet.has(c.dataset.key)){
+      const cb = c.querySelector('input.sel');
+      cb.checked = box.checked;
+    }
+  });
+}
+function getSelected(){
+  const rows = [];
+  document.querySelectorAll('.card[data-key]').forEach(c=>{
+    const cb = c.querySelector('input.sel');
+    if(cb && cb.checked && c.style.display!=='none'){
+      rows.push({
+        timestamp: c.dataset.ts,
+        source: c.dataset.source,
+        question: c.dataset.q,
+        answer: c.dataset.a
+      });
+    }
+  });
+  return rows;
+}
+
+// === exports ===
+function exportJSON(){
+  const rows = collectFilteredRows();
+  const blob = new Blob([JSON.stringify(rows, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  download(url, 'unhit_filtered.json');
+}
+function exportCSV(){
+  const rows = collectFilteredRows();
+  const head = ['timestamp','source','question','answer'];
+  const esc = s => `"${(s??'').toString().replace(/"/g,'""').replace(/\r?\n/g,'\\n')}"`;
+  const lines = [head.join(',')].concat(rows.map(r=>[r.timestamp,r.source,r.question,r.answer].map(esc).join(',')));
+  const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  download(url, 'unhit_filtered.csv');
+}
+function exportCSVForEntries(){
+  // entries_edit の CSV 取り込み用スキーマ
+  const rows = getSelected();
+  if(!rows.length){ alert('エクスポートする項目を選択してください（左のチェックボックス）'); return; }
+  const head = ['category','title','desc','address','map','tags','areas','links'];
+  const esc = s => `"${(s??'').toString().replace(/"/g,'""').replace(/\r?\n/g,'\\n')}"`;
+  const lines = [head.join(',')].concat(rows.map(r=>[
+    '観光', r.question.slice(0,80), (r.answer||'').slice(0,400), '', '', '', '', ''
+  ].map(esc).join(',')));
+  const blob = new Blob([lines.join('\n')], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  download(url, 'entries_import_from_unhit.csv');
+  alert('CSVをダウンロードしました。「観光データ一括編集」画面のCSV取り込みで追加できます。');
+}
+function collectFilteredRows(){
+  const cards = [...document.querySelectorAll('.card[data-key]')].filter(c=>c.style.display!=='none');
+  return cards.map(c=>({
+    timestamp:c.dataset.ts, source:c.dataset.source, question:c.dataset.q, answer:c.dataset.a
+  }));
+}
+function download(url, filename){
+  const a = document.createElement('a'); a.href=url; a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
 }
 
 // === per-card handlers ===
@@ -141,8 +330,7 @@ async function genSummary(btn, idx){
   if(!src){ alert('説明/本文を先に入力してください'); return; }
   btn.disabled = true; const orig = btn.textContent; btn.textContent = '要約中…';
   try{
-    const fd = new FormData();
-    fd.append('text', src);
+    const fd = new FormData(); fd.append('text', src);
     const res = await fetch('{{ url_for("api_text_summarize") }}', {method:'POST', body:fd});
     const data = await res.json();
     if(!data.ok){ alert(data.error || '要約に失敗しました'); }
@@ -173,18 +361,23 @@ function openEntryWithPrefill(idx){
   window.open(base + '?' + params.toString(), '_blank');
 }
 
+function markDone(cb, key){
+  if(cb.checked){ DONE.add(key); } else { DONE.delete(key); }
+  _saveDone(DONE);
+  if(document.getElementById('f_hide_done').checked) filterCards();
+}
+
 document.addEventListener('DOMContentLoaded', ()=>{
+  // init stamps/keys
   document.querySelectorAll('[data-tslabel]').forEach(el=>{ el.textContent = fmt(el.getAttribute('data-tslabel')); });
-  document.querySelectorAll('[id^="card-"]').forEach((card, i)=>{ setMode(i, 'db'); });
-  // data保存フォームのサブミット時に text_full 未入力なら desc を転用（サーバ側もフェイルセーフあり）
-  document.querySelectorAll('.box.txt form').forEach(f=>{
-    f.addEventListener('submit', ()=>{
-      const full = f.querySelector('textarea[name="text_full"]');
-      const desc = f.querySelector('textarea[name="desc"]');
-      if(full && !full.value.trim() && desc){ full.value = desc.value; }
-    });
+  document.querySelectorAll('.card[data-key]').forEach((card, i)=>{
+    setMode(i, 'db');
+    const key = card.dataset.key;
+    const chk = card.querySelector('input.donebox');
+    if(chk){ chk.checked = DONE.has(key); }
   });
-  filterCards();
+
+  filterCards(); // will compute paging
 });
 </script>
 </head>
@@ -206,7 +399,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
     <h1>未ヒット質問一覧</h1>
     <div class="muted">未ヒット（DBに該当がない）ログから、観光DB追加 または data への要約テキスト保存を行えます。</div>
 
-    <!-- フィルタ -->
+    <!-- フィルタ＆ビュー＆エクスポート -->
     <div class="toolbar">
       <input type="text" id="f_q" placeholder="キーワード（質問/回答/メタ）" oninput="filterCards()">
       <select id="f_src" onchange="filterCards()">
@@ -217,168 +410,236 @@ document.addEventListener('DOMContentLoaded', ()=>{
       <span class="muted">期間：</span>
       <input type="date" id="f_from" onchange="filterCards()">〜
       <input type="date" id="f_to" onchange="filterCards()">
-      <span class="badge">表示件数：<span id="f_count">0</span></span>
+      <label style="display:inline-flex;align-items:center;gap:6px">
+        <input type="checkbox" id="f_hide_done" onchange="filterCards()"> 処理済みを隠す
+      </label>
+      <span class="badge">表示：<span id="f_count">0</span>件</span>
+
+      <div class="viewseg" style="margin-left:auto;display:inline-flex;border:1px solid #cfe1ef;border-radius:10px;overflow:hidden">
+        <button type="button" data-mode="cards" class="active" onclick="setView('cards')" style="background:#fff;color:var(--brand);border:none;padding:7px 12px">カード</button>
+        <button type="button" data-mode="group" onclick="setView('group')" style="background:#fff;color:var(--brand);border:none;padding:7px 12px">質問でグループ</button>
+      </div>
+      <button class="btn ghost" type="button" onclick="exportJSON()">JSON出力</button>
+      <button class="btn ghost" type="button" onclick="exportCSV()">CSV出力</button>
+    </div>
+
+    <!-- ページャ -->
+    <div class="pager">
+      <label>1ページ件数：
+        <select onchange="changePageSize(this)">
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="30">30</option>
+          <option value="50">50</option>
+        </select>
+      </label>
+      <button id="pg_first" class="btn ghost" type="button" onclick="gotoPage('first')">≪ 最初</button>
+      <button id="pg_prev"  class="btn ghost" type="button" onclick="gotoPage('prev')">‹ 前へ</button>
+      <span class="muted" id="pg_info">ページ 1 / 1（1ページ 20件）</span>
+      <button id="pg_next" class="btn ghost" type="button" onclick="gotoPage('next')">次へ ›</button>
+      <button id="pg_last" class="btn ghost" type="button" onclick="gotoPage('last')">最後 ≫</button>
+
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <label style="display:inline-flex;gap:6px;align-items:center"><input id="sel_all" type="checkbox" onclick="toggleSelectAll(this)"> このページを全選択</label>
+        <button class="btn ghost" type="button" onclick="exportCSVForEntries()">選択→CSV（DB取り込み用）</button>
+      </div>
     </div>
 
     {% if not unhit_logs %}
       <div class="empty">未ヒット質問はありません。</div>
     {% else %}
-      {% for log in unhit_logs|reverse %}
-        {% set ts = log.timestamp or log.get('timestamp','') %}
-        {% set source = log.source or log.get('source','web') %}
-        {% set q = log.question or log.get('question','') %}
-        {% set a = log.answer or log.get('answer','') %}
-        {% set extra = log.extra or log.get('extra', {}) %}
 
-        <div class="card" id="card-{{ loop.index0 }}"
-             data-text="{{ (q ~ ' ' ~ a ~ ' ' ~ source ~ ' ' ~ (extra|tojson))|lower }}"
-             data-source="{{ source }}"
-             data-ts="{{ ts }}">
+      <!-- カード一覧 -->
+      <div id="cardswrap">
+        {% for log in unhit_logs|reverse %}
+          {% set ts = log.timestamp or log.get('timestamp','') %}
+          {% set source = log.source or log.get('source','web') %}
+          {% set q = log.question or log.get('question','') %}
+          {% set a = log.answer or log.get('answer','') %}
+          {% set extra = log.extra or log.get('extra', {}) %}
+          {% set _key = (ts ~ '||' ~ source ~ '||' ~ q) %}
 
-          <div class="right ts">
-            <span>{{ source|upper }} ｜ <span data-tslabel="{{ ts }}"></span></span>
-            <button type="button" class="btn ghost" onclick="copyText(`{{ q|replace('`','\\`') }}`)">質問コピー</button>
-            {% if a %}<button type="button" class="btn ghost" onclick="copyText(`{{ a|replace('`','\\`') }}`)">回答コピー</button>{% endif %}
-          </div>
-
-          <div class="q">Q. {{ q }}</div>
-
-          <div class="mode">
-            <span class="muted">保存先：</span>
-            <div class="seg">
-              <button type="button" data-mode="db"  class="active" onclick="setMode({{ loop.index0 }}, 'db')">観光DB</button>
-              <button type="button" data-mode="txt"               onclick="setMode({{ loop.index0 }}, 'txt')">テキスト（data）</button>
+          <div class="card"
+               id="card-{{ loop.index0 }}"
+               data-key="{{ _key|b64encode }}"
+               data-q="{{ q }}"
+               data-a="{{ a }}"
+               data-source="{{ source }}"
+               data-ts="{{ ts }}"
+               data-text="{{ (q ~ ' ' ~ a ~ ' ' ~ source ~ ' ' ~ (extra|tojson))|lower }}">
+            <div class="row-head">
+              <div class="row-left">
+                <input class="sel" type="checkbox" title="選択">
+                <div class="done">
+                  <input class="donebox" type="checkbox" onchange="markDone(this, '{{ _key|b64encode }}')" id="done-{{ loop.index0 }}">
+                  <label for="done-{{ loop.index0 }}" class="muted">処理済み</label>
+                </div>
+              </div>
+              <div class="right ts">
+                <span>{{ source|upper }} ｜ <span data-tslabel="{{ ts }}"></span></span>
+                <button type="button" class="btn ghost" onclick="copyText(`{{ q|replace('`','\\`') }}`)">質問コピー</button>
+                {% if a %}<button type="button" class="btn ghost" onclick="copyText(`{{ a|replace('`','\\`') }}`)">回答コピー</button>{% endif %}
+              </div>
             </div>
-          </div>
 
-          <!-- 観光DB 登録ボックス -->
-          <div class="box db">
-            <form method="post" action="{{ url_for('admin_add_entry') }}">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <input type="hidden" name="__q" value="{{ q }}">
+            <div class="q">Q. {{ q }}</div>
 
-              <label>タイトル（登録名）</label>
-              <input type="text" name="title" value="{{ q[:80] }}" required>
-
-              <label>説明（短文・FAQ文でも可）</label>
-              <textarea name="desc" placeholder="ここに説明（FAQでも可）">{{ a }}</textarea>
-
-              <div class="row3">
-                <div>
-                  <label>タグ（カンマ区切り）</label>
-                  <input type="text" name="tags" placeholder="例: 教会, 展望, 温泉">
-                </div>
-                <div>
-                  <label>エリア（カンマ区切り）</label>
-                  <input type="text" name="areas" placeholder="例: 五島市, 新上五島町">
-                </div>
-                <div>
-                  <label>カテゴリ</label>
-                  <input type="text" name="category" placeholder="例: 観光">
-                </div>
+            <div class="mode">
+              <span class="muted">保存先：</span>
+              <div class="seg">
+                <button type="button" data-mode="db"  class="active" onclick="setMode({{ loop.index0 }}, 'db')">観光DB</button>
+                <button type="button" data-mode="txt"               onclick="setMode({{ loop.index0 }}, 'txt')">テキスト（data）</button>
               </div>
+            </div>
 
-              <div class="row2">
-                <div>
-                  <label>住所</label>
-                  <input type="text" name="address" placeholder="任意">
-                </div>
-                <div>
-                  <label>地図URL</label>
-                  <input type="text" name="map" placeholder="https://...">
-                </div>
-              </div>
+            <!-- 観光DB 登録ボックス -->
+            <div class="box db">
+              <form method="post" action="{{ url_for('admin_add_entry') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="__q" value="{{ q }}">
 
-              <div class="row2">
-                <div>
-                  <label>座標コピペ欄（URL / 緯度,経度 / DMS）</label>
-                  <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/...">
-                </div>
-                <div>
-                  <label>緯度・経度（任意）</label>
-                  <input type="text" name="latlng" placeholder="32.695123, 128.845678">
-                </div>
-              </div>
+                <label>タイトル（登録名）</label>
+                <input type="text" name="title" value="{{ q[:80] }}" required>
 
-              <div class="btns">
-                <button type="submit" class="btn">DBに追加</button>
-                <button type="button" class="btn ghost" onclick="openEntryWithPrefill({{ loop.index0 }})">詳細を編集画面で開く</button>
-                <button type="button" class="btn secondary" onclick="genFAQ(this, {{ loop.index0 }})">AIでFAQ案</button>
-              </div>
-            </form>
-          </div>
+                <label>説明（短文・FAQ文でも可）</label>
+                <textarea name="desc" placeholder="ここに説明（FAQでも可）">{{ a }}</textarea>
 
-          <!-- data 保存ボックス -->
-          <div class="box txt" style="display:none">
-            <form method="post" action="{{ url_for('admin_unhit_save_text') }}">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <input type="hidden" name="original_question" value="{{ q }}">
-              <!-- サーバ側は dtype/slug を無視してもOK（将来の拡張用に送るだけ） -->
-              <div class="row3">
-                <div>
-                  <label>タイプ</label>
-                  <select name="dtype">
-                    <option value="faq">FAQ（短文回答）</option>
-                    <option value="course">コース/モデルプラン</option>
-                    <option value="tips">コツ/注意点/その他</option>
-                  </select>
-                </div>
-                <div>
-                  <label>保存名（スラッグ）</label>
-                  <input type="text" name="slug" placeholder="自動生成可">
-                  <div class="hint"><button type="button" class="btn ghost" onclick="fillSlug({{ loop.index0 }})">自動生成</button></div>
-                </div>
-                <div>
-                  <label>タグ（カンマ区切り）</label>
-                  <input type="text" name="tags" placeholder="例: 祭り, 家族向け">
-                </div>
-              </div>
-
-              <div class="row2">
-                <div>
-                  <label>対象エリア（任意・カンマ区切り）</label>
-                  <input type="text" name="areas" placeholder="例: 五島市, 新上五島町">
-                </div>
-                <div class="path" style="align-self:end">
-                  実ファイルは <b>data/</b> に保存されます（ファイル名はサーバ側で自動採番）
-                </div>
-              </div>
-
-              <label>本文（詳細・長文 / サーバ送信名: text_full）</label>
-              <textarea name="text_full" placeholder="長文本文。空でも送信可（空なら『説明』を本文として転用）"></textarea>
-
-              <div class="row2">
-                <div>
-                  <label>説明（短文・要約元に利用可）</label>
-                  <textarea name="desc">{{ a }}</textarea>
-                </div>
-                <div>
-                  <label>要約（回答用の短文 / サーバ送信名: text_short）</label>
-                  <textarea name="text_short" placeholder="300〜600字目安。『AIで要約』可。"></textarea>
-                  <div class="btns" style="margin-top:6px">
-                    <button type="button" class="btn secondary" onclick="genSummary(this, {{ loop.index0 }})">AIで要約</button>
+                <div class="row3">
+                  <div>
+                    <label>タグ（カンマ区切り）</label>
+                    <input type="text" name="tags" placeholder="例: 教会, 展望, 温泉">
+                  </div>
+                  <div>
+                    <label>エリア（カンマ区切り）</label>
+                    <input type="text" name="areas" placeholder="例: 五島市, 新上五島町">
+                  </div>
+                  <div>
+                    <label>カテゴリ</label>
+                    <input type="text" name="category" placeholder="例: 観光">
                   </div>
                 </div>
-              </div>
 
-              <div class="btns">
-                <button type="submit" class="btn">data に保存</button>
-                <button type="button" class="btn ghost" onclick="copyText((this.closest('form').querySelector('textarea[name=text_short]').value||'').trim())">要約をコピー</button>
-              </div>
+                <div class="row2">
+                  <div>
+                    <label>住所</label>
+                    <input type="text" name="address" placeholder="任意">
+                  </div>
+                  <div>
+                    <label>地図URL</label>
+                    <input type="text" name="map" placeholder="https://...">
+                  </div>
+                </div>
 
-              <!-- 既定：タイトルは質問から（サーバが必須） -->
-              <input type="hidden" name="title" value="{{ q[:80] }}">
-            </form>
+                <div class="row2">
+                  <div>
+                    <label>座標コピペ欄（URL / 緯度,経度 / DMS）</label>
+                    <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/...">
+                  </div>
+                  <div>
+                    <label>緯度・経度（任意）</label>
+                    <input type="text" name="latlng" placeholder="32.695123, 128.845678">
+                  </div>
+                </div>
 
-            {% if a %}
-              <div class="answer-preview">
-                <b>参考ログの回答（元テキスト）</b>\n{{ a }}
-              </div>
-            {% endif %}
+                <div class="btns">
+                  <button type="submit" class="btn">DBに追加</button>
+                  <button type="button" class="btn ghost" onclick="openEntryWithPrefill({{ loop.index0 }})">詳細を編集画面で開く</button>
+                  <button type="button" class="btn secondary" onclick="genFAQ(this, {{ loop.index0 }})">AIでFAQ案</button>
+                </div>
+              </form>
+            </div>
+
+            <!-- data 保存ボックス -->
+            <div class="box txt" style="display:none">
+              <form method="post" action="{{ url_for('admin_unhit_save_text') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="original_question" value="{{ q }}">
+                <div class="row3">
+                  <div>
+                    <label>タイプ</label>
+                    <select name="dtype">
+                      <option value="faq">FAQ（短文回答）</option>
+                      <option value="course">コース/モデルプラン</option>
+                      <option value="tips">コツ/注意点/その他</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>保存名（スラッグ）</label>
+                    <input type="text" name="slug" placeholder="自動生成可">
+                    <div class="hint"><button type="button" class="btn ghost" onclick="fillSlug({{ loop.index0 }})">自動生成</button></div>
+                  </div>
+                  <div>
+                    <label>タグ（カンマ区切り）</label>
+                    <input type="text" name="tags" placeholder="例: 祭り, 家族向け">
+                  </div>
+                </div>
+
+                <div class="row2">
+                  <div>
+                    <label>対象エリア（任意・カンマ区切り）</label>
+                    <input type="text" name="areas" placeholder="例: 五島市, 新上五島町">
+                  </div>
+                  <div class="path" style="align-self:end">
+                    実ファイルは <b>data/</b> に保存されます（ファイル名はサーバ側で自動採番）
+                  </div>
+                </div>
+
+                <label>本文（詳細・長文 / サーバ送信名: text_full）</label>
+                <textarea name="text_full" placeholder="長文本文。空でも送信可（空なら『説明』を本文として転用）"></textarea>
+
+                <div class="row2">
+                  <div>
+                    <label>説明（短文・要約元に利用可）</label>
+                    <textarea name="desc">{{ a }}</textarea>
+                  </div>
+                  <div>
+                    <label>要約（回答用の短文 / サーバ送信名: text_short）</label>
+                    <textarea name="text_short" placeholder="300〜600字目安。『AIで要約』可。"></textarea>
+                    <div class="btns" style="margin-top:6px">
+                      <button type="button" class="btn secondary" onclick="genSummary(this, {{ loop.index0 }})">AIで要約</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="btns">
+                  <button type="submit" class="btn">data に保存</button>
+                  <button type="button" class="btn ghost" onclick="copyText((this.closest('form').querySelector('textarea[name=text_short]').value||'').trim())">要約をコピー</button>
+                </div>
+
+                <!-- 既定：タイトルは質問から -->
+                <input type="hidden" name="title" value="{{ q[:80] }}">
+              </form>
+
+              {% if a %}
+                <div class="answer-preview">
+                  <b>参考ログの回答（元テキスト）</b>\n{{ a }}
+                </div>
+              {% endif %}
+            </div>
           </div>
-        </div>
-      {% endfor %}
+        {% endfor %}
+      </div>
+
+      <!-- グループ表示エリア -->
+      <div id="groups" style="display:none"></div>
+
     {% endif %}
+
+    <!-- 下部ページャ -->
+    <div class="pager">
+      <button id="pg_first2" class="btn ghost" type="button" onclick="gotoPage('first')">≪ 最初</button>
+      <button id="pg_prev2"  class="btn ghost" type="button" onclick="gotoPage('prev')">‹ 前へ</button>
+      <span class="muted" id="pg_info2"><script>document.getElementById && (document.getElementById('pg_info2').textContent=document.getElementById('pg_info')?.textContent||'');</script></span>
+      <button id="pg_next2" class="btn ghost" type="button" onclick="gotoPage('next')">次へ ›</button>
+      <button id="pg_last2" class="btn ghost" type="button" onclick="gotoPage('last')">最後 ≫</button>
+    </div>
+    <script>
+      // 下部も上部の状態をミラー（簡易）
+      const mirror = ()=>{ const s=document.getElementById('pg_info'); const t=document.getElementById('pg_info2'); if(s&&t){ t.textContent=s.textContent; } };
+      const _ob = new MutationObserver(mirror);
+      _ob.observe(document.getElementById('pg_info'), {childList:true,subtree:true});
+    </script>
+
   </div>
 </body>
 </html>
