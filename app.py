@@ -100,6 +100,12 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+from config import get_config
+app.config.from_object(get_config())
+
+# 以降のメッセージ等で使うため、上限MBを設定から参照
+MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
+
 @app.template_filter("b64encode")
 def jinja_b64encode(s):
     if s is None:
@@ -143,10 +149,6 @@ def _no_cache_admin(resp):
         resp.headers["Expires"]       = "0"
     return resp
 # ==================================================================
-
-# ---- アップロード上限（MB）を環境変数で可変に。デフォルト64MB ----
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "64"))
-app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 # === サーバ内スナップショット（ZIP）: 生成 / 一覧 / 復元 / DL ===================
 
@@ -297,13 +299,6 @@ def _inject_template_helpers():
         "current_app": _flask_current_app,
         "has_endpoint": has_endpoint,
     }
-
-
-# 413: サイズ超過時のメッセージ
-@app.errorhandler(RequestEntityTooLarge)
-def handle_file_too_large(e):
-    flash("ファイルサイズが大きすぎます（最大64MB）。")
-    return redirect(request.referrer or url_for("admin_entries_edit"))
 
 # 既に前の回答で入れていれば流用されます
 MYMAP_MID = os.getenv("MYMAP_MID", "")
@@ -2321,32 +2316,20 @@ def _ratelimit_handler(e):
 @app.errorhandler(RequestEntityTooLarge)
 @app.errorhandler(413)
 def _too_large(e):
-    # API っぽいリクエストは JSON、それ以外は画面に戻す
     wants_json = (
         request.is_json
         or "application/json" in (request.headers.get("Accept","") or "")
         or request.path.startswith("/api/")
     )
-
-    # 例外説明に "pixels" が含まれていれば画像のピクセル上限超過とみなす
     desc = (getattr(e, "description", "") or "").lower()
     is_pixels = "pixel" in desc or "pixels" in desc
 
     if wants_json:
         if is_pixels:
-            return jsonify({
-                "error": "Image too large",
-                "reason": "pixels",
-                "max_image_pixels": MAX_IMAGE_PIXELS
-            }), 413
+            return jsonify({"error":"Image too large","reason":"pixels","max_image_pixels":MAX_IMAGE_PIXELS}), 413
         else:
-            return jsonify({
-                "error": "File too large",
-                "reason": "body",
-                "limit_mb": MAX_UPLOAD_MB
-            }), 413
+            return jsonify({"error":"File too large","reason":"body","limit_mb":MAX_UPLOAD_MB}), 413
 
-    # HTML系はフラッシュして元画面へ
     if is_pixels:
         flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
     else:
@@ -9552,6 +9535,49 @@ def healthz():
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-store",
     })
+
+@app.route("/readyz", methods=["GET"])
+def readyz():
+    problems = []
+
+    # Redis（レート制限などで使用している場合）
+    try:
+        uri = app.config.get("RATE_STORAGE_URI")
+        if uri and uri not in ("memory://",):
+            import redis  # pip install redis
+            r = redis.from_url(uri)
+            r.ping()
+    except Exception as ex:
+        problems.append(f"redis:{ex}")
+
+    # DB（SQLAlchemyを使っている場合のみ）
+    try:
+        db = globals().get("db")
+        if db:
+            # SQLAlchemy 2.x でも通るように text を使う
+            try:
+                from sqlalchemy import text as _sql_text
+                db.session.execute(_sql_text("SELECT 1"))
+            except Exception:
+                # SQLAlchemyを使っていない・未インストールでもここは素通り
+                db.session.execute("SELECT 1")
+    except Exception as ex:
+        problems.append(f"db:{ex}")
+
+    # mediaディレクトリに書き込めるか
+    import os, tempfile
+    try:
+        mdir = app.config.get("MEDIA_DIR", ".")
+        os.makedirs(mdir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=mdir, delete=True) as _:
+            pass
+    except Exception as ex:
+        problems.append(f"media:{ex}")
+
+    if problems:
+        return {"status": "degraded", "errors": problems}, 503
+    return {"status": "ready"}, 200
+
 
 
 @app.route("/_debug/test_transport")
