@@ -2,9 +2,10 @@
   {
     "user_id": "fully",
     "name": "管理者",
-    "password_hash": "scrypt:32768:8:1$vQaBOanzLi6rNXDU$ded9f03ee639a51bf8a1153cd7e13e2f58d24f1c663efccf75fa85f31deaaf32a1911438810c751060ff7db8613d8997616a8e19fce485d002f3dc21128b6bc3",
+    "password_hash": "scrypt:32768:8:1$SjM4BAvBXjYbWmKp$9e7c6a4832092dd5f9cc533c471ed3b07b01fb3383b6a68a2397f64e137498111e734ad546b732b33178272f1f024854a849936ea28b3792dc8ee095bc6651c6",
     "role": "admin",
-    "active": true
+    "active": true,
+    "email": "info@fullygoto.com"
   },
   {
     "user_id": "shop001",
