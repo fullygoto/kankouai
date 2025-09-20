@@ -10,4 +10,5 @@ except Exception as e:
 if _create_app:
     app = _create_app()
 else:
+    # 既存の app インスタンスにフォールバック
     from app import app as app  # type: ignore
