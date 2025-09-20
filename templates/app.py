@@ -1772,7 +1772,6 @@ SUGGEST_UNHIT = os.environ.get("SUGGEST_UNHIT", "1").lower() in {"1", "true", "o
 ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1", "true", "on", "yes"}
 
 # OpenAI v1 クライアント
-client = OpenAI(timeout=15)
 
 
 # --- OpenAIラッパ（モデル切替を一元管理：正規版） ---
