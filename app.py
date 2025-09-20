@@ -48,3 +48,42 @@ except Exception:
 
 # --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
     # Pillow のランチョス補間（無ければ BICUBIC）
+# ==== TEMP: health endpoints & app-factory shim ====
+try:
+    # 既存 app が未定義なら作る
+    app
+except NameError:
+    from flask import Flask
+    app = Flask(__name__)
+
+from flask import jsonify
+
+@app.get("/healthz")
+def _healthz():
+    return "ok", 200
+
+@app.get("/readyz")
+def _readyz():
+    import os, pathlib
+    errors = []
+    if not os.getenv("OPENAI_API_KEY"):
+        errors.append("missing_env:OPENAI_API_KEY")
+    base = pathlib.Path(os.getenv("DATA_BASE_DIR", "."))
+    users = base / "users.json"
+    if not users.exists():
+        errors.append(f"missing_file:{users}")
+    elif not users.is_file():
+        errors.append(f"not_a_file:{users}")
+    status = 200 if not errors else 503
+    payload = {
+        "ok": not errors,
+        "errors": errors,
+        "env": os.getenv("APP_ENV", "dev"),
+        "version": os.getenv("APP_VERSION", "dev"),
+    }
+    return jsonify(payload), status
+
+def create_app():
+    # 後で本格対応に差し替える。いまは既存 app を返すだけ
+    return app
+# ==== /TEMP ====
