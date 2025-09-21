@@ -374,7 +374,7 @@ function fillSlug(idx){
 }
 function openEntryWithPrefill(idx){
   const root = document.getElementById('card-'+idx);
-  const base = '{{ url_for("admin_entry") }}';
+  const base = '{{ url_for("main.admin_entry") }}';
   const params = new URLSearchParams({
     prefill: 1,
     title: root.querySelector('input[name="title"]').value || '',
@@ -449,14 +449,14 @@ document.addEventListener('DOMContentLoaded', ()=>{
   <div class="container">
     <div class="nav" style="float:right;">
       <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
-      <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-      <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-      <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
-      <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-      <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-      <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
+      <a href="{{ url_for('main.admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+      <a href="{{ url_for('main.admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+      <a href="{{ url_for('main.admin_synonyms') }}">[類義語辞書管理]</a>
+      <a href="{{ url_for('main.admin_backup') }}">[全体バックアップ]</a>
+      <a href="{{ url_for('main.admin_entries_edit') }}">[観光データ一括編集]</a>
+      <a href="{{ url_for('main.admin_notices') }}">[お知らせ管理]</a>
       <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
-      <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+      <a href="{{ url_for('main.admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
     </div>
 
     <h1>未ヒット質問一覧</h1>
@@ -558,7 +558,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
             <!-- 観光DB 登録ボックス -->
             <div class="box db">
-              <form method="post" action="{{ url_for('admin_add_entry') }}">
+              <form method="post" action="{{ url_for('main.admin_add_entry') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="__q" value="{{ q }}">
 
@@ -615,7 +615,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
             <!-- data 保存ボックス -->
             <div class="box txt" style="display:none">
-              <form method="post" action="{{ url_for('admin_unhit_save_text') }}">
+              <form method="post" action="{{ url_for('main.admin_unhit_save_text') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="original_question" value="{{ q }}">
                 <div class="row3">
@@ -1096,7 +1096,7 @@ function fillSlug(idx){
 }
 function openEntryWithPrefill(idx){
   const root = document.getElementById('card-'+idx);
-  const base = '{{ url_for("admin_entry") }}';
+  const base = '{{ url_for("main.admin_entry") }}';
   const params = new URLSearchParams({
     prefill: 1,
     title: root.querySelector('input[name="title"]').value || '',
@@ -1171,14 +1171,14 @@ document.addEventListener('DOMContentLoaded', ()=>{
   <div class="container">
     <div class="nav" style="float:right;">
       <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
-      <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-      <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-      <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
-      <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-      <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-      <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
+      <a href="{{ url_for('main.admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+      <a href="{{ url_for('main.admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+      <a href="{{ url_for('main.admin_synonyms') }}">[類義語辞書管理]</a>
+      <a href="{{ url_for('main.admin_backup') }}">[全体バックアップ]</a>
+      <a href="{{ url_for('main.admin_entries_edit') }}">[観光データ一括編集]</a>
+      <a href="{{ url_for('main.admin_notices') }}">[お知らせ管理]</a>
       <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
-      <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+      <a href="{{ url_for('main.admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
     </div>
 
     <h1>未ヒット質問一覧</h1>
@@ -1280,7 +1280,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
             <!-- 観光DB 登録ボックス -->
             <div class="box db">
-              <form method="post" action="{{ url_for('admin_add_entry') }}">
+              <form method="post" action="{{ url_for('main.admin_add_entry') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="__q" value="{{ q }}">
 
@@ -1337,7 +1337,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
             <!-- data 保存ボックス -->
             <div class="box txt" style="display:none">
-              <form method="post" action="{{ url_for('admin_unhit_save_text') }}">
+              <form method="post" action="{{ url_for('main.admin_unhit_save_text') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="original_question" value="{{ q }}">
                 <div class="row3">

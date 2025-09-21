@@ -82,7 +82,7 @@ async function previewDedupe(){
   box.innerHTML = '読み込み中…';
   meta.textContent = '';
   try{
-    const r = await fetch('{{ url_for("admin_entries_dedupe") }}', {credentials:'same-origin'});
+    const r = await fetch('{{ url_for("main.admin_entries_dedupe") }}', {credentials:'same-origin'});
     const j = await r.json();
     if(!j || !j.ok){
       box.innerHTML = 'プレビュー取得に失敗しました。';
@@ -139,14 +139,14 @@ function escapeHtml(s){
   <div class="card">
     <h2>サーバ内スナップショット（ZIP）</h2>
     <div class="row" style="margin-bottom:8px">
-      <form method="post" action="{{ url_for('admin_snapshot_create') }}">
+      <form method="post" action="{{ url_for('main.admin_snapshot_create') }}">
         <button class="btn" type="submit">📦 スナップショットを作成</button>
       </form>
       <span class="note">データ（data/）、画像（static/uploads/・images/）、entries.json をZIPで保存します（アップロード不要）。</span>
     </div>
     {% if snapshots and snapshots|length %}
       <div class="row" style="gap:8px;align-items:center;margin-bottom:8px">
-        <form method="post" action="{{ url_for('admin_snapshot_restore') }}"
+        <form method="post" action="{{ url_for('main.admin_snapshot_restore') }}"
               onsubmit="return confirm('選択したスナップショットで復元します。現在の内容は上書きされます。よろしいですか？');">
           <select name="fname">
             {% for s in snapshots %}
@@ -163,7 +163,7 @@ function escapeHtml(s){
         <li>
           <code>{{ s.name }}</code>
           <span class="note"> — {{ (s.size/1048576)|round(1) }} MB / {{ s.mtime.strftime('%Y-%m-%d %H:%M') }}</span>
-          <a class="btn ghost" style="margin-left:8px" href="{{ url_for('admin_snapshot_download', fname=s.name) }}">⬇ ダウンロード</a>
+          <a class="btn ghost" style="margin-left:8px" href="{{ url_for('main.admin_snapshot_download', fname=s.name) }}">⬇ ダウンロード</a>
         </li>
         {% endfor %}
       </ul>
@@ -176,39 +176,39 @@ function escapeHtml(s){
     <h2>タイトル重複の統合（AI最適化）</h2>
     <div class="row" style="margin-bottom:8px">
       <button class="btn ghost" type="button" onclick="previewDedupe()">👀 プレビューを取得</button>
-      <form id="dedupe_form" method="post" action="{{ url_for('admin_entries_dedupe') }}">
+      <form id="dedupe_form" method="post" action="{{ url_for('main.admin_entries_dedupe') }}">
         <button class="btn" type="button" onclick="runDedupe()">✨ 統合を実行</button>
       </form>
-      <span class="note">※ 説明文はAIで最適化（環境変数 <code>DEDUPE_USE_AI=1</code> 時）。実行前に <a class="btn ghost" href="{{ url_for('admin_backup') }}">バックアップ</a> を推奨。</span>
+      <span class="note">※ 説明文はAIで最適化（環境変数 <code>DEDUPE_USE_AI=1</code> 時）。実行前に <a class="btn ghost" href="{{ url_for('main.admin_backup') }}">バックアップ</a> を推奨。</span>
     </div>
     <div id="dedupe_meta" class="note" style="margin-bottom:6px"></div>
     <div id="dedupe_preview" class="preview">（プレビュー未取得）</div>
   </div>
 
-  <form class="csvbar" method="post" action="{{ url_for('admin_entries_import_csv') }}" enctype="multipart/form-data">
+  <form class="csvbar" method="post" action="{{ url_for('main.admin_entries_import_csv') }}" enctype="multipart/form-data">
     <input type="file" name="csv_file" accept=".csv">
     <button class="btn" type="submit">CSVを取り込む（既存に追加）</button>
     <span class="note">列：category,title,desc,address,map,tags,areas,links,extras,extra_○○…（title/desc/areas必須）</span>
-    <a class="btn ghost" href="{{ url_for('admin_entries_edit') }}">最新の内容を再読込</a>
+    <a class="btn ghost" href="{{ url_for('main.admin_entries_edit') }}">最新の内容を再読込</a>
   </form>
 
   <details class="jsonbox">
     <summary>JSON全文上書き（上級者向け）を開く</summary>
     <div class="panel">
-      <form method="post" action="{{ url_for('admin_entries_edit') }}">
+      <form method="post" action="{{ url_for('main.admin_entries_edit') }}">
         <p class="note">このエリアに <code>[{{'{'}} ... {{'}'}}]</code> 形式で <b>entries.json</b> の配列を貼り付けて「上書き保存」を押すと、DBを丸ごと置き換えます。</p>
         <textarea name="entries_raw" placeholder='[
   {"category":"観光","title":"例","desc":"説明","areas":["五島市"],"tags":["教会"],"address":"","map":"","links":[]}
 ]'></textarea>
         <div style="margin-top:8px;display:flex;gap:8px;">
           <button class="btn danger" type="submit">⚠ JSONで上書き保存</button>
-          <a class="btn ghost" href="{{ url_for('admin_entries_edit') }}">やめる（再読込）</a>
+          <a class="btn ghost" href="{{ url_for('main.admin_entries_edit') }}">やめる（再読込）</a>
         </div>
       </form>
     </div>
   </details>
 
-  <form method="post" action="{{ url_for('admin_entries_edit') }}">
+  <form method="post" action="{{ url_for('main.admin_entries_edit') }}">
     <div class="table-wrap">
       <table>
         <colgroup>
@@ -430,7 +430,7 @@ async function previewDedupe(){
   box.innerHTML = '読み込み中…';
   meta.textContent = '';
   try{
-    const r = await fetch('{{ url_for("admin_entries_dedupe") }}', {credentials:'same-origin'});
+    const r = await fetch('{{ url_for("main.admin_entries_dedupe") }}', {credentials:'same-origin'});
     const j = await r.json();
     if(!j || !j.ok){
       box.innerHTML = 'プレビュー取得に失敗しました。';
@@ -487,14 +487,14 @@ function escapeHtml(s){
   <div class="card">
     <h2>サーバ内スナップショット（ZIP）</h2>
     <div class="row" style="margin-bottom:8px">
-      <form method="post" action="{{ url_for('admin_snapshot_create') }}">
+      <form method="post" action="{{ url_for('main.admin_snapshot_create') }}">
         <button class="btn" type="submit">📦 スナップショットを作成</button>
       </form>
       <span class="note">データ（data/）、画像（static/uploads/・images/）、entries.json をZIPで保存します（アップロード不要）。</span>
     </div>
     {% if snapshots and snapshots|length %}
       <div class="row" style="gap:8px;align-items:center;margin-bottom:8px">
-        <form method="post" action="{{ url_for('admin_snapshot_restore') }}"
+        <form method="post" action="{{ url_for('main.admin_snapshot_restore') }}"
               onsubmit="return confirm('選択したスナップショットで復元します。現在の内容は上書きされます。よろしいですか？');">
           <select name="fname">
             {% for s in snapshots %}
@@ -511,7 +511,7 @@ function escapeHtml(s){
         <li>
           <code>{{ s.name }}</code>
           <span class="note"> — {{ (s.size/1048576)|round(1) }} MB / {{ s.mtime.strftime('%Y-%m-%d %H:%M') }}</span>
-          <a class="btn ghost" style="margin-left:8px" href="{{ url_for('admin_snapshot_download', fname=s.name) }}">⬇ ダウンロード</a>
+          <a class="btn ghost" style="margin-left:8px" href="{{ url_for('main.admin_snapshot_download', fname=s.name) }}">⬇ ダウンロード</a>
         </li>
         {% endfor %}
       </ul>
@@ -524,39 +524,39 @@ function escapeHtml(s){
     <h2>タイトル重複の統合（AI最適化）</h2>
     <div class="row" style="margin-bottom:8px">
       <button class="btn ghost" type="button" onclick="previewDedupe()">👀 プレビューを取得</button>
-      <form id="dedupe_form" method="post" action="{{ url_for('admin_entries_dedupe') }}">
+      <form id="dedupe_form" method="post" action="{{ url_for('main.admin_entries_dedupe') }}">
         <button class="btn" type="button" onclick="runDedupe()">✨ 統合を実行</button>
       </form>
-      <span class="note">※ 説明文はAIで最適化（環境変数 <code>DEDUPE_USE_AI=1</code> 時）。実行前に <a class="btn ghost" href="{{ url_for('admin_backup') }}">バックアップ</a> を推奨。</span>
+      <span class="note">※ 説明文はAIで最適化（環境変数 <code>DEDUPE_USE_AI=1</code> 時）。実行前に <a class="btn ghost" href="{{ url_for('main.admin_backup') }}">バックアップ</a> を推奨。</span>
     </div>
     <div id="dedupe_meta" class="note" style="margin-bottom:6px"></div>
     <div id="dedupe_preview" class="preview">（プレビュー未取得）</div>
   </div>
 
-  <form class="csvbar" method="post" action="{{ url_for('admin_entries_import_csv') }}" enctype="multipart/form-data">
+  <form class="csvbar" method="post" action="{{ url_for('main.admin_entries_import_csv') }}" enctype="multipart/form-data">
     <input type="file" name="csv_file" accept=".csv">
     <button class="btn" type="submit">CSVを取り込む（既存に追加）</button>
     <span class="note">列：category,title,desc,address,map,tags,areas,links,extras,extra_○○…（title/desc/areas必須）</span>
-    <a class="btn ghost" href="{{ url_for('admin_entries_edit') }}">最新の内容を再読込</a>
+    <a class="btn ghost" href="{{ url_for('main.admin_entries_edit') }}">最新の内容を再読込</a>
   </form>
 
   <details class="jsonbox">
     <summary>JSON全文上書き（上級者向け）を開く</summary>
     <div class="panel">
-      <form method="post" action="{{ url_for('admin_entries_edit') }}">
+      <form method="post" action="{{ url_for('main.admin_entries_edit') }}">
         <p class="note">このエリアに <code>[{{'{'}} ... {{'}'}}]</code> 形式で <b>entries.json</b> の配列を貼り付けて「上書き保存」を押すと、DBを丸ごと置き換えます。</p>
         <textarea name="entries_raw" placeholder='[
   {"category":"観光","title":"例","desc":"説明","areas":["五島市"],"tags":["教会"],"address":"","map":"","links":[]}
 ]'></textarea>
         <div style="margin-top:8px;display:flex;gap:8px;">
           <button class="btn danger" type="submit">⚠ JSONで上書き保存</button>
-          <a class="btn ghost" href="{{ url_for('admin_entries_edit') }}">やめる（再読込）</a>
+          <a class="btn ghost" href="{{ url_for('main.admin_entries_edit') }}">やめる（再読込）</a>
         </div>
       </form>
     </div>
   </details>
 
-  <form method="post" action="{{ url_for('admin_entries_edit') }}">
+  <form method="post" action="{{ url_for('main.admin_entries_edit') }}">
     <div class="table-wrap">
       <table>
         <colgroup>

@@ -371,7 +371,7 @@ def admin_snapshot_create():
     except Exception as e:
         app.logger.exception("snapshot create failed")
         flash(f"スナップショット作成に失敗しました: {e}")
-    return redirect(url_for("admin_entries_edit"))
+    return redirect(url_for("main.admin_entries_edit"))
 
 @bp.route("/admin/snapshot/download/<path:fname>")
 @login_required
@@ -395,7 +395,7 @@ def admin_snapshot_restore():
     fname = (request.form.get("fname") or "").strip()
     if not fname:
         flash("スナップショットが選択されていません。")
-        return redirect(url_for("admin_entries_edit"))
+        return redirect(url_for("main.admin_entries_edit"))
     try:
         path = _snapshot_restore_internal(fname)
         from os.path import basename
@@ -403,7 +403,7 @@ def admin_snapshot_restore():
     except Exception as e:
         app.logger.exception("snapshot restore failed")
         flash(f"復元に失敗しました: {e}")
-    return redirect(url_for("admin_entries_edit"))
+    return redirect(url_for("main.admin_entries_edit"))
 # ========================================================================
 
 @bp.app_context_processor
@@ -1225,7 +1225,7 @@ def serve_image(filename):
 def _preferred_media_url(fn: str) -> str:
     try:
         # 既に admin_media_img があればそれを使う
-        return url_for("admin_media_img", filename=fn)
+        return url_for("main.admin_media_img", filename=fn)
     except Exception:
         # 無い場合は /media/img (=serve_image) を使う
         return safe_url_for("serve_image", filename=fn)
@@ -6491,7 +6491,7 @@ def admin_entry():
             flash("エリアは1つ以上選択してください")
             # ★ 失敗時も編集中行を維持
             if idx_edit is not None:
-                return redirect(url_for("admin_entry", edit=idx_edit))
+                return redirect(url_for("main.admin_entry", edit=idx_edit))
             return redirect(url_for("main.admin_entry"))
 
         # 新規エントリの骨格
@@ -6530,7 +6530,7 @@ def admin_entry():
             except RequestEntityTooLarge:
                 flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
                 if idx_edit is not None:
-                    return redirect(url_for("admin_entry", edit=idx_edit))
+                    return redirect(url_for("main.admin_entry", edit=idx_edit))
                 return redirect(url_for("main.admin_entry"))
             except Exception:
                 result_final = None
@@ -6553,7 +6553,7 @@ def admin_entry():
             except RequestEntityTooLarge:
                 flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
                 if idx_edit is not None:
-                    return redirect(url_for("admin_entry", edit=idx_edit))
+                    return redirect(url_for("main.admin_entry", edit=idx_edit))
                 return redirect(url_for("main.admin_entry"))
             except Exception:
                 result = None
@@ -6633,7 +6633,7 @@ def admin_entry():
             pass
 
         # ★ 保存後も編集中の行を開いた状態に戻す
-        return redirect(url_for("admin_entry", edit=idx_after))
+        return redirect(url_for("main.admin_entry", edit=idx_after))
 
     # ---- 一覧用: “サムネ/容量/サイズ” を各エントリに付加（テンプレ未使用なら無害） ----
     entries_view = []
@@ -6772,7 +6772,7 @@ def admin_wm_diag():
       </tr>
       {% endfor %}
     </table>
-    <p style="margin-top:10px;"><a href="{{ url_for('admin_entry', edit=idx) }}">← このエントリを編集に戻る</a></p>
+    <p style="margin-top:10px;"><a href="{{ url_for('main.admin_entry', edit=idx) }}">← このエントリを編集に戻る</a></p>
     """
     return render_template_string(
         html,
@@ -7101,7 +7101,7 @@ def admin_entries_edit():
             data = [_norm_entry(e) for e in data]
             save_entries(data)
             flash("entries.jsonを上書きしました")
-            return redirect(url_for("admin_entries_edit"))
+            return redirect(url_for("main.admin_entries_edit"))
         except Exception as e:
             flash("JSONエラー: " + str(e))
 
@@ -7204,7 +7204,7 @@ def admin_entries_edit():
 
         save_entries(new_entries)
         flash(f"{len(new_entries)} 件保存しました（未表示フィールドは保持）")
-        return redirect(url_for("admin_entries_edit"))
+        return redirect(url_for("main.admin_entries_edit"))
 
     # GET（またはPOSTエラー後の再表示）
     entries = [_norm_entry(x) for x in old_entries]
@@ -7312,7 +7312,7 @@ def admin_entries_import_csv():
     file = request.files.get("csv_file")
     if not file:
         flash("CSVファイルが選択されていません")
-        return redirect(url_for("admin_entries_edit"))
+        return redirect(url_for("main.admin_entries_edit"))
 
     import csv, io as _io, json as _json
 
@@ -7320,7 +7320,7 @@ def admin_entries_import_csv():
     raw = file.read()  # bytes
     if not raw:
         flash("アップロードされたCSVが空です")
-        return redirect(url_for("admin_entries_edit"))
+        return redirect(url_for("main.admin_entries_edit"))
 
     enc_tried = ["utf-8-sig", "utf-8", "cp932", "shift_jis"]
     decoded = None
@@ -7394,7 +7394,7 @@ def admin_entries_import_csv():
 
     if not new_entries:
         flash(f"CSVから有効な行が見つかりませんでした（title/desc/areas 必須）［encoding: {used_enc}］")
-        return redirect(url_for("admin_entries_edit"))
+        return redirect(url_for("main.admin_entries_edit"))
 
     entries = load_entries()
     entries.extend(new_entries)
@@ -7406,7 +7406,7 @@ def admin_entries_import_csv():
     except Exception:
         flash(f"CSVから {len(new_entries)} 件を追加（encoding: {used_enc}／シノニム自動更新は失敗）")
 
-    return redirect(url_for("admin_entries_edit"))
+    return redirect(url_for("main.admin_entries_edit"))
 
 # =========================
 #  管理: JSONインポート（entries / synonyms）
@@ -7469,7 +7469,7 @@ def admin_import():
             except Exception as e:
                 flash(f"synonyms.json の読み込みに失敗: {e}")
 
-        return redirect(url_for("admin_import"))
+        return redirect(url_for("main.admin_import"))
 
     # GET: 画面表示
     return render_template("admin_import.html")
@@ -7657,7 +7657,7 @@ def admin_add_entry():
 
     if not title or not desc:
         flash("タイトルと説明は必須です")
-        return redirect(url_for("admin_unhit_questions"))
+        return redirect(url_for("main.admin_unhit_questions"))
 
     entry = _norm_entry({
         "title": title,
@@ -7985,13 +7985,13 @@ def admin_restore_from_url():
     backup_url = (request.form.get("backup_url") or "").strip()
     if not backup_url:
         flash("URLが指定されていません")
-        return redirect(url_for("admin_backup"))
+        return redirect(url_for("main.admin_backup"))
 
     # http/https のみ許可
     parsed = urlparse(backup_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         flash("有効な http/https のURLを指定してください")
-        return redirect(url_for("admin_backup"))
+        return redirect(url_for("main.admin_backup"))
 
     # SSRF対策：内部/ローカル向けIPは拒否
     try:
@@ -8001,10 +8001,10 @@ def admin_restore_from_url():
         if (ipobj.is_private or ipobj.is_loopback or ipobj.is_link_local
                 or ipobj.is_reserved or ipobj.is_multicast):
             flash("内部ネットワーク向けのURLは使用できません")
-            return redirect(url_for("admin_backup"))
+            return redirect(url_for("main.admin_backup"))
     except Exception:
         flash("URLのホスト名解決に失敗しました")
-        return redirect(url_for("admin_backup"))
+        return redirect(url_for("main.admin_backup"))
 
     # サイズ上限（既定200MB／環境変数 RESTORE_URL_MAX_MB で調整可）
     try:
@@ -8026,7 +8026,7 @@ def admin_restore_from_url():
                 mb = int(int(cl) / 1024 / 1024)
                 lim = int(MAX_BYTES / 1024 / 1024)
                 flash(f"ZIPが大きすぎます（{mb}MB > 許容 {lim}MB）")
-                return redirect(url_for("admin_backup"))
+                return redirect(url_for("main.admin_backup"))
             while True:
                 chunk = resp.read(64 * 1024)
                 if not chunk:
@@ -8034,7 +8034,7 @@ def admin_restore_from_url():
                 total += len(chunk)
                 if total > MAX_BYTES:
                     flash("ダウンロードサイズが上限を超えました（RESTORE_URL_MAX_MB を増やせます）")
-                    return redirect(url_for("admin_backup"))
+                    return redirect(url_for("main.admin_backup"))
                 wf.write(chunk)
 
         # 既存の安全展開関数で復元
@@ -8052,7 +8052,7 @@ def admin_restore_from_url():
         except Exception:
             pass
 
-    return redirect(url_for("admin_backup"))
+    return redirect(url_for("main.admin_backup"))
 
 @bp.route("/internal/backup", methods=["POST"])
 def internal_backup():
@@ -8106,7 +8106,7 @@ def admin_line_mutes():
         if tid:
             _set_muted_target(tid, False, who="admin")
             flash(f"ミュート解除: {tid}")
-        return redirect(url_for("admin_line_mutes"))
+        return redirect(url_for("main.admin_line_mutes"))
     # 画面を追加したくない場合は JSON で確認できるようにしておく
     m = _load_mutes()
     rows = [{"target_id": k, **(v or {})} for k, v in m.items()]
@@ -8176,7 +8176,7 @@ def admin_synonyms():
 
         save_synonyms(new_synonyms)
         flash("類義語辞書を保存しました")
-        return redirect(url_for("admin_synonyms"))
+        return redirect(url_for("main.admin_synonyms"))
 
     synonyms = load_synonyms()
     # 追加: 進捗とキュー残
@@ -8219,7 +8219,7 @@ def admin_synonyms_queue_reset():
     }
     _save_syn_queue(data)
     flash(f"AI生成キューを作成: {len(pending)} 件")
-    return redirect(url_for("admin_synonyms"))
+    return redirect(url_for("main.admin_synonyms"))
 
 
 @bp.route("/admin/synonyms/queue/status")
@@ -8251,7 +8251,7 @@ def admin_synonyms_import():
             new_dict = json.loads(text)
         else:
             flash("JSONファイルまたはテキストを指定してください")
-            return redirect(url_for("admin_synonyms"))
+            return redirect(url_for("main.admin_synonyms"))
 
         if not isinstance(new_dict, dict):
             raise ValueError('JSONは {"タグ": ["別名", ...]} の形にしてください')
@@ -8277,7 +8277,7 @@ def admin_synonyms_import():
         app.logger.exception("synonyms import failed")
         flash("インポートに失敗: " + str(e))
 
-    return redirect(url_for("admin_synonyms"))
+    return redirect(url_for("main.admin_synonyms"))
 
 
 # ========== 類義語：エクスポート（ダウンロード） ==========
@@ -8304,7 +8304,7 @@ def admin_synonyms_autogen():
             abort(403)
         if not OPENAI_API_KEY:
             flash("OPENAI_API_KEY が未設定です")
-            return redirect(url_for("admin_synonyms"))
+            return redirect(url_for("main.admin_synonyms"))
 
         target = request.values.get("target", "missing")      # "missing" or "all"
         mode   = request.values.get("mode", "append")         # "append" or "overwrite"
@@ -8341,7 +8341,7 @@ def admin_synonyms_autogen():
 
         if not target_tags:
             flash("処理対象のタグがありません（未生成なし or キュー空）")
-            return redirect(url_for("admin_synonyms"))
+            return redirect(url_for("main.admin_synonyms"))
 
         # 成功したタグのみ収集（→ この分だけキューから消す）
         success_results: Dict[str, List[str]] = {}
@@ -8435,12 +8435,12 @@ def admin_synonyms_autogen():
             else:
                 flash(f"AI生成: {updated} タグ分を{'上書き' if mode=='overwrite' else '追記'}しました")
 
-        return redirect(url_for("admin_synonyms"))
+        return redirect(url_for("main.admin_synonyms"))
 
     except Exception as e:
         app.logger.exception("autogen endpoint fatal error: %s", e)
         flash("内部エラーが発生しました（ログを確認してください）。")
-        return redirect(url_for("admin_synonyms"))
+        return redirect(url_for("main.admin_synonyms"))
 
 
 # （互換用：以前のエンドポイント名を使っていた場合のエイリアス）
@@ -9674,14 +9674,14 @@ def admin_watermark():
         for display_name, abs_path in targets:
             try:
                 out = _generate_variants(abs_path, force=force, kinds=kinds)
-                r = {"src": display_name, "url_src": url_for("admin_media_img", filename=display_name)}
+                r = {"src": display_name, "url_src": url_for("main.admin_media_img", filename=display_name)}
 
                 if make_none and out.get("none"):
-                    r["url_none"] = url_for("admin_media_img", filename=out["none"])
+                    r["url_none"] = url_for("main.admin_media_img", filename=out["none"])
                 if make_goto and out.get("goto"):
-                    r["url_goto"] = url_for("admin_media_img", filename=out["goto"])
+                    r["url_goto"] = url_for("main.admin_media_img", filename=out["goto"])
                 if make_fully and out.get("fully"):
-                    r["url_fully"] = url_for("admin_media_img", filename=out["fully"])
+                    r["url_fully"] = url_for("main.admin_media_img", filename=out["fully"])
 
                 results.append(r)
             except Exception as e:
@@ -10223,16 +10223,16 @@ def admin_data_files():
             safe = _safe_txt_name(edit)
             if not safe:
                 flash("不正なファイル名です")
-                return redirect(url_for("admin_data_files"))
+                return redirect(url_for("main.admin_data_files"))
             path = os.path.join(DATA_DIR, safe)
             if not _ensure_in_data_dir(path) or not os.path.exists(path):
                 flash("指定ファイルが見つかりません")
-                return redirect(url_for("admin_data_files"))
+                return redirect(url_for("main.admin_data_files"))
             content, used_enc = _read_text_any(path)
         except Exception as e:
             app.logger.exception("[admin_data_files] load failed: %r -> %s", edit, e)
             flash("ファイル読込でエラーが発生しました。ダウンロードで内容確認か、ファイル名を短くして再試行してください。")
-            return redirect(url_for("admin_data_files"))
+            return redirect(url_for("main.admin_data_files"))
     return render_template(
         "admin_data_files.html",
         files=files, edit=edit, content=content, used_enc=used_enc
@@ -10277,7 +10277,7 @@ def admin_data_files_upload():
         count += 1
 
     flash(f"{count} ファイルをアップロードしました")
-    return redirect(url_for("admin_data_files"))
+    return redirect(url_for("main.admin_data_files"))
 
 @bp.route("/admin/data_files/new", methods=["POST"])
 @login_required
@@ -10288,20 +10288,20 @@ def admin_data_files_new():
     safe = _safe_txt_name(name)
     if not safe:
         flash("ファイル名が不正です（拡張子は .txt / .md のみ）")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
 
     path = os.path.join(DATA_DIR, safe)
     if not _ensure_in_data_dir(path):
         flash("保存先が不正です")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
 
     if os.path.exists(path):
         flash("同名ファイルが既にあります")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
 
     _write_text(path, "", encoding="utf-8")
     flash("新規ファイルを作成しました")
-    return redirect(url_for("admin_data_files", edit=safe))
+    return redirect(url_for("main.admin_data_files", edit=safe))
 
 @bp.route("/admin/data_files/save", methods=["POST"])
 @login_required
@@ -10316,12 +10316,12 @@ def admin_data_files_save():
     safe = _safe_txt_name(name)
     if not safe:
         flash("ファイル名が不正です")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
 
     path = os.path.join(DATA_DIR, safe)
     if not _ensure_in_data_dir(path):
         flash("保存先エラー")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
 
     try:
         used_enc, note = _write_text(path, content, encoding=encoding)
@@ -10332,7 +10332,7 @@ def admin_data_files_save():
     except Exception as e:
         app.logger.exception("[admin_data_files_save] failed: %s", e)
         flash("保存に失敗しました")
-    return redirect(url_for("admin_data_files", edit=safe))
+    return redirect(url_for("main.admin_data_files", edit=safe))
 
 @bp.route("/admin/data_files/delete", methods=["POST"])
 @login_required
@@ -10343,18 +10343,18 @@ def admin_data_files_delete():
     safe = _safe_txt_name(name)
     if not safe:
         flash("ファイル名が不正です")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
     path = os.path.join(DATA_DIR, safe)
     if not _ensure_in_data_dir(path) or not os.path.exists(path):
         flash("ファイルが見つかりません")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
     try:
         os.remove(path)
         flash("削除しました")
     except Exception as e:
         app.logger.exception("delete failed")
         flash("削除に失敗しました: " + str(e))
-    return redirect(url_for("admin_data_files"))
+    return redirect(url_for("main.admin_data_files"))
 
 @bp.route("/admin/data_files/download")
 @login_required
@@ -10365,7 +10365,7 @@ def admin_data_files_download():
     safe = _safe_txt_name(name)
     if not safe:
         flash("ファイル名が不正です")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
     # send_from_directory はパス検証込みで安全
     return send_from_directory(DATA_DIR, safe, as_attachment=True)
 
@@ -10380,18 +10380,18 @@ def admin_data_files_rename():
     new_s = _safe_txt_name(new)
     if not old_s or not new_s:
         flash("ファイル名が不正です")
-        return redirect(url_for("admin_data_files", edit=old_s))
+        return redirect(url_for("main.admin_data_files", edit=old_s))
     src = os.path.join(DATA_DIR, old_s)
     dst = os.path.join(DATA_DIR, new_s)
     if not (_ensure_in_data_dir(src) and _ensure_in_data_dir(dst)) or not os.path.exists(src):
         flash("リネーム対象が見つかりません")
-        return redirect(url_for("admin_data_files"))
+        return redirect(url_for("main.admin_data_files"))
     if os.path.exists(dst):
         flash("指定の新ファイル名は既に存在します")
-        return redirect(url_for("admin_data_files", edit=old_s))
+        return redirect(url_for("main.admin_data_files", edit=old_s))
     os.rename(src, dst)
     flash("名前を変更しました")
-    return redirect(url_for("admin_data_files", edit=new_s))
+    return redirect(url_for("main.admin_data_files", edit=new_s))
 # ======== ▲▲▲ 追記ここまで ▲▲▲
 
 @bp.route("/_debug/quick")
@@ -11089,7 +11089,7 @@ def admin_notices():
             notices.append(notice)
             flash("お知らせを追加しました")
         save_notices(notices)
-        return redirect(url_for("admin_notices"))
+        return redirect(url_for("main.admin_notices"))
     return render_template("admin_notices.html", notices=notices, edit_notice=edit_notice)
 
 
@@ -11103,7 +11103,7 @@ def delete_notice(idx):
     notices = [n for n in notices if n.get("id") != idx]
     save_notices(notices)
     flash("お知らせを削除しました")
-    return redirect(url_for("admin_notices"))
+    return redirect(url_for("main.admin_notices"))
 
 
 @bp.route("/notices")

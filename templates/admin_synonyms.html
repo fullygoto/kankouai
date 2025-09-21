@@ -205,7 +205,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
     <div class="card">
       <h2>インポート / エクスポート</h2>
       <div class="row">
-        <form method="post" action="{{ url_for('admin_synonyms_import') }}" enctype="multipart/form-data">
+        <form method="post" action="{{ url_for('main.admin_synonyms_import') }}" enctype="multipart/form-data">
           <label>ファイルから（synonyms.json）</label>
           <input type="file" name="json_file" accept=".json">
           <div class="tools">
@@ -213,7 +213,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
             <span class="muted">※既存は上書きされます</span>
           </div>
         </form>
-        <form method="post" action="{{ url_for('admin_synonyms_import') }}">
+        <form method="post" action="{{ url_for('main.admin_synonyms_import') }}">
           <label>テキストで貼り付け</label>
           <textarea name="json_text" placeholder='{"タグ":[ "別名", "同義語" ], ...}'></textarea>
           <div class="tools">
@@ -223,7 +223,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
         </form>
       </div>
       <div class="tools">
-        <a class="btn" href="{{ url_for('admin_synonyms_export') }}">エクスポート（ダウンロード）</a>
+        <a class="btn" href="{{ url_for('main.admin_synonyms_export') }}">エクスポート（ダウンロード）</a>
         <span class="muted">編集前にバックアップ推奨</span>
       </div>
     </div>
@@ -231,7 +231,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
     <!-- AI 自動生成（現行機能維持） -->
     <div class="card">
       <h2>AIで自動生成（登録タグに沿って）</h2>
-      <form method="post" action="{{ url_for('admin_synonyms_autogen') }}">
+      <form method="post" action="{{ url_for('main.admin_synonyms_autogen') }}">
         <div class="row">
           <div>
             <label>対象</label><br>
@@ -252,7 +252,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
     </div>
 
     <!-- 編集（新機能） -->
-    <form method="post" action="{{ url_for('admin_synonyms') }}" onsubmit="confirmSave(event)">
+    <form method="post" action="{{ url_for('main.admin_synonyms') }}" onsubmit="confirmSave(event)">
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <h2>現在の辞書（<span id="tag_count">{{ (synonyms|length) if synonyms else 0 }}</span> タグ）— 直接編集できます</h2>
@@ -516,7 +516,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
     <div class="card">
       <h2>インポート / エクスポート</h2>
       <div class="row">
-        <form method="post" action="{{ url_for('admin_synonyms_import') }}" enctype="multipart/form-data">
+        <form method="post" action="{{ url_for('main.admin_synonyms_import') }}" enctype="multipart/form-data">
           <label>ファイルから（synonyms.json）</label>
           <input type="file" name="json_file" accept=".json">
           <div class="tools">
@@ -524,7 +524,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
             <span class="muted">※既存は上書きされます</span>
           </div>
         </form>
-        <form method="post" action="{{ url_for('admin_synonyms_import') }}">
+        <form method="post" action="{{ url_for('main.admin_synonyms_import') }}">
           <label>テキストで貼り付け</label>
           <textarea name="json_text" placeholder='{"タグ":[ "別名", "同義語" ], ...}'></textarea>
           <div class="tools">
@@ -534,7 +534,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
         </form>
       </div>
       <div class="tools">
-        <a class="btn" href="{{ url_for('admin_synonyms_export') }}">エクスポート（ダウンロード）</a>
+        <a class="btn" href="{{ url_for('main.admin_synonyms_export') }}">エクスポート（ダウンロード）</a>
         <span class="muted">編集前にバックアップ推奨</span>
       </div>
     </div>
@@ -542,7 +542,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
     <!-- AI 自動生成（現行機能維持） -->
     <div class="card">
       <h2>AIで自動生成（登録タグに沿って）</h2>
-      <form method="post" action="{{ url_for('admin_synonyms_autogen') }}">
+      <form method="post" action="{{ url_for('main.admin_synonyms_autogen') }}">
         <div class="row">
           <div>
             <label>対象</label><br>
@@ -563,7 +563,7 @@ window.addEventListener('DOMContentLoaded', updateCount);
     </div>
 
     <!-- 編集（新機能） -->
-    <form method="post" action="{{ url_for('admin_synonyms') }}" onsubmit="confirmSave(event)">
+    <form method="post" action="{{ url_for('main.admin_synonyms') }}" onsubmit="confirmSave(event)">
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
           <h2>現在の辞書（<span id="tag_count">{{ (synonyms|length) if synonyms else 0 }}</span> タグ）— 直接編集できます</h2>

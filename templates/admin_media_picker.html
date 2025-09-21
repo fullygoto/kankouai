@@ -41,7 +41,7 @@
               <div class="name">{{ f.name }}</div>
               <div class="muted" style="margin-top:4px">{{ f.count }} 件</div>
               <a class="btn small" style="margin-top:8px"
-                 href="{{ url_for('admin_media_picker', folder=f.name, return_to=return_to) }}">開く</a>
+                 href="{{ url_for('main.admin_media_picker', folder=f.name, return_to=return_to) }}">開く</a>
             </div>
           {% endfor %}
         {% else %}
@@ -50,15 +50,15 @@
       </div>
     {% else %}
       <div class="row">
-        <a class="btn ghost small" href="{{ url_for('admin_media_picker', return_to=return_to) }}">← フォルダ一覧</a>
+        <a class="btn ghost small" href="{{ url_for('main.admin_media_picker', return_to=return_to) }}">← フォルダ一覧</a>
         <span class="muted" style="margin-left:8px">フォルダ：<b>{{ folder }}</b>（登録日の新しい順）</span>
       </div>
       <div class="grid">
         {% if files and files|length %}
           {% for f in files %}
             <div class="card">
-              <a href="{{ url_for('admin_media_img', filename=f.rel) }}" target="_blank" rel="noopener">
-                <img src="{{ url_for('admin_media_img', filename=f.rel) }}" alt="{{ f.name }}" loading="lazy">
+              <a href="{{ url_for('main.admin_media_img', filename=f.rel) }}" target="_blank" rel="noopener">
+                <img src="{{ url_for('main.admin_media_img', filename=f.rel) }}" alt="{{ f.name }}" loading="lazy">
               </a>
               <div class="name">{{ f.rel }}</div>
               <div class="variants">
@@ -75,7 +75,7 @@
         {% endif %}
       </div>
       <div class="row" style="margin-top:12px">
-        <a class="btn ghost" href="{{ url_for('admin_media_picker', return_to=return_to) }}">← フォルダ一覧へ</a>
+        <a class="btn ghost" href="{{ url_for('main.admin_media_picker', return_to=return_to) }}">← フォルダ一覧へ</a>
         <a class="btn ghost" href="{{ return_to }}" style="margin-left:6px">編集画面に戻る</a>
       </div>
     {% endif %}
@@ -125,7 +125,7 @@
               <div class="name">{{ f.name }}</div>
               <div class="muted" style="margin-top:4px">{{ f.count }} 件</div>
               <a class="btn small" style="margin-top:8px"
-                 href="{{ url_for('admin_media_picker', folder=f.name, return_to=return_to) }}">開く</a>
+                 href="{{ url_for('main.admin_media_picker', folder=f.name, return_to=return_to) }}">開く</a>
             </div>
           {% endfor %}
         {% else %}
@@ -134,15 +134,15 @@
       </div>
     {% else %}
       <div class="row">
-        <a class="btn ghost small" href="{{ url_for('admin_media_picker', return_to=return_to) }}">← フォルダ一覧</a>
+        <a class="btn ghost small" href="{{ url_for('main.admin_media_picker', return_to=return_to) }}">← フォルダ一覧</a>
         <span class="muted" style="margin-left:8px">フォルダ：<b>{{ folder }}</b>（登録日の新しい順）</span>
       </div>
       <div class="grid">
         {% if files and files|length %}
           {% for f in files %}
             <div class="card">
-              <a href="{{ url_for('admin_media_img', filename=f.rel) }}" target="_blank" rel="noopener">
-                <img src="{{ url_for('admin_media_img', filename=f.rel) }}" alt="{{ f.name }}" loading="lazy">
+              <a href="{{ url_for('main.admin_media_img', filename=f.rel) }}" target="_blank" rel="noopener">
+                <img src="{{ url_for('main.admin_media_img', filename=f.rel) }}" alt="{{ f.name }}" loading="lazy">
               </a>
               <div class="name">{{ f.rel }}</div>
               <div class="variants">
@@ -159,7 +159,7 @@
         {% endif %}
       </div>
       <div class="row" style="margin-top:12px">
-        <a class="btn ghost" href="{{ url_for('admin_media_picker', return_to=return_to) }}">← フォルダ一覧へ</a>
+        <a class="btn ghost" href="{{ url_for('main.admin_media_picker', return_to=return_to) }}">← フォルダ一覧へ</a>
         <a class="btn ghost" href="{{ return_to }}" style="margin-left:6px">編集画面に戻る</a>
       </div>
     {% endif %}

@@ -25,15 +25,15 @@
     <div class="topbar">
       <h1 style="margin:0">透かし編集</h1>
       <div class="row">
-        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧へ</a>
+        <a class="btn ghost" href="{{ url_for('main.admin_watermark') }}">← 一覧へ</a>
       </div>
     </div>
 
     <div class="row">
       <div style="flex:1;min-width:260px">
         <div class="muted">元画像</div>
-        <a href="{{ url_for('admin_media_img', filename=filename) }}" target="_blank" rel="noopener">
-          <img src="{{ url_for('admin_media_img', filename=filename) }}" loading="lazy" alt="{{ filename }}">
+        <a href="{{ url_for('main.admin_media_img', filename=filename) }}" target="_blank" rel="noopener">
+          <img src="{{ url_for('main.admin_media_img', filename=filename) }}" loading="lazy" alt="{{ filename }}">
         </a>
         <div class="muted" style="margin-top:6px;word-break:break-all">{{ filename }}</div>
       </div>
@@ -49,7 +49,7 @@
       {% endif %}
     </div>
 
-    <form method="post" action="{{ url_for('admin_watermark_edit_apply') }}" style="margin-top:12px">
+    <form method="post" action="{{ url_for('main.admin_watermark_edit_apply') }}" style="margin-top:12px">
       <input type="hidden" name="filename" value="{{ filename }}">
       <fieldset>
         <legend>生成する透かし</legend>
@@ -68,7 +68,7 @@
       </fieldset>
       <div style="margin-top:12px" class="row">
         <button class="btn" type="submit">再生成する</button>
-        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">キャンセル</a>
+        <a class="btn ghost" href="{{ url_for('main.admin_watermark') }}">キャンセル</a>
       </div>
     </form>
   </div>
@@ -101,15 +101,15 @@
     <div class="topbar">
       <h1 style="margin:0">透かし編集</h1>
       <div class="row">
-        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧へ</a>
+        <a class="btn ghost" href="{{ url_for('main.admin_watermark') }}">← 一覧へ</a>
       </div>
     </div>
 
     <div class="row">
       <div style="flex:1;min-width:260px">
         <div class="muted">元画像</div>
-        <a href="{{ url_for('admin_media_img', filename=filename) }}" target="_blank" rel="noopener">
-          <img src="{{ url_for('admin_media_img', filename=filename) }}" loading="lazy" alt="{{ filename }}">
+        <a href="{{ url_for('main.admin_media_img', filename=filename) }}" target="_blank" rel="noopener">
+          <img src="{{ url_for('main.admin_media_img', filename=filename) }}" loading="lazy" alt="{{ filename }}">
         </a>
         <div class="muted" style="margin-top:6px;word-break:break-all">{{ filename }}</div>
       </div>
@@ -125,7 +125,7 @@
       {% endif %}
     </div>
 
-    <form method="post" action="{{ url_for('admin_watermark_edit_apply') }}" style="margin-top:12px">
+    <form method="post" action="{{ url_for('main.admin_watermark_edit_apply') }}" style="margin-top:12px">
       <input type="hidden" name="filename" value="{{ filename }}">
       <fieldset>
         <legend>生成する透かし</legend>
@@ -144,7 +144,7 @@
       </fieldset>
       <div style="margin-top:12px" class="row">
         <button class="btn" type="submit">再生成する</button>
-        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">キャンセル</a>
+        <a class="btn ghost" href="{{ url_for('main.admin_watermark') }}">キャンセル</a>
       </div>
     </form>
   </div>
