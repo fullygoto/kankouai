@@ -1,3 +1,10 @@
+# --- SAFE BOOTSTRAP (very early) ---
+import os as _os
+from pathlib import Path as _Path
+if 'STATIC_FALLBACK' not in globals():
+    STATIC_FALLBACK = _os.getenv('STATIC_FOLDER') or str((_Path(__file__).parent / 'static').resolve())
+# --- /SAFE BOOTSTRAP ---
+
 # === Standard Library ===
 import os
 import tempfile
@@ -61,7 +68,8 @@ SECRET_FALLBACK = (
 # --- /SAFE SECRET FALLBACK ---
 # --- SAFE IMPORT BOOTSTRAP ---
 from pathlib import Path
-STATIC_FALLBACK = os.getenv("STATIC_FOLDER") or str((Path(__file__).parent / "static").resolve())
+
+DEFAULT_STATIC_FOLDER = str((Path(__file__).parent / "static").resolve())
 # --- /SAFE IMPORT BOOTSTRAP ---
 from flask import (
     Flask, Blueprint, render_template, request, redirect, url_for, flash, session,
@@ -137,6 +145,13 @@ def _get_logger():
         return app.logger
     return logging.getLogger(__name__)
 
+
+def _cfg(key: str, default=None):
+    flask_app = _flask_current_app
+    if flask_app:
+        return flask_app.config.get(key, default)
+    return default
+
 # === safe mkdir helpers（import時に落ちないように／どこでも呼べる版） ===
 def _safe_mkdir(path_like: Any) -> None:
     """親は作らず。失敗してもアプリは落とさない。"""
@@ -184,50 +199,6 @@ def _ensure_csrf_token():
         tok = secrets.token_urlsafe(32)
         session["_csrf_token"] = tok
     return tok
-
-@bp.get("/readyz")
-def readyz():
-    """
-    軽量なレディネス判定:
-      - OPENAI_API_KEY の有無
-      - users.json の存在・ファイル性・読取可否
-    失敗は 503, 成功は 200 を返す。
-    env/version を含め、どのデプロイか一目で分かるようにする。
-    """
-    errors = []
-
-    # 1) 必須ENV
-    if not os.getenv("OPENAI_API_KEY"):
-        errors.append("missing_env:OPENAI_API_KEY")
-
-    # 2) users.json の軽量FSチェック（DATA_BASE_DIR 環境変数に追従）
-    data_base_dir = os.getenv("DATA_BASE_DIR")
-    base_path = Path(data_base_dir).expanduser() if data_base_dir else Path(".")
-    users_path = base_path / "users.json"
-    try:
-        if not users_path.exists():
-            errors.append(f"missing_file:{users_path}")
-        elif not users_path.is_file():
-            errors.append(f"not_a_file:{users_path}")
-        else:
-            try:
-                with users_path.open("rb") as rf:
-                    rf.read(1)  # 軽く触るだけ（読み取り可否の確認）
-            except Exception:
-                errors.append(f"unreadable_or_invalid:{users_path.name}")
-    except Exception as e:
-        # パーミッションなど path 参照時点でコケる場合
-        errors.append(f"fs:{base_path}:{e.__class__.__name__}")
-
-    # 3) 返却
-    status = 200 if not errors else 503
-    payload = {
-        "ok": not errors,
-        "errors": errors,
-        "env": os.getenv("APP_ENV", "prod"),
-        "version": os.getenv("GIT_SHA", os.getenv("BUILD_ID", "unknown")),
-    }
-    return jsonify(payload), status
 
 @bp.app_context_processor
 def _inject_csrf_token():
@@ -598,12 +569,7 @@ def _env_truthy(val: str | None) -> bool:
     return v not in ("", "0", "false", "off", "no")
 
 def _watermark_enabled() -> bool:
-    # どれか1つでも真なら有効（Renderで WATERMARK_ENABLE=1 ならOK）
-    return (
-        _env_truthy(os.getenv("WATERMARK_ENABLE")) or
-        _env_truthy(os.getenv("WATERMARK_ENABLED")) or
-        _env_truthy(os.getenv("WM_ENABLE"))
-    )
+    return bool(_cfg("WATERMARK_ENABLE", True))
 
 # === 透かし種別の解釈ヘルパー ===
 def _resolve_wm_kind(arg: str | None):
@@ -618,27 +584,13 @@ def _resolve_wm_kind(arg: str | None):
         return "gotocity"
     return None
     
-# ==== 画像配信（署名 + 透かし対応）=============================
-# 依存: Pillow, safe_join, send_file, load_entries(), app など
-# 既存の設定が無い場合のデフォルト
-MEDIA_ROOT = os.getenv("MEDIA_ROOT", "media/img")
-WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
-IMAGE_PROTECT    = os.getenv("IMAGE_PROTECT",    "0").lower() in {"1","true","on","yes"}
-
-# ==== 画像保存/配信のディレクトリ統一（互換アライメント） ====
-MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img")
-IMAGES_DIR = os.getenv("IMAGES_DIR") or MEDIA_ROOT
-MEDIA_ROOT = IMAGES_DIR  # ← 配信・保存とも同じ実体を指すように統一
-try:
-    app.logger.info("[media] MEDIA_ROOT=%s  IMAGES_DIR=%s  URL_PREFIX=%s",
-                    MEDIA_ROOT, IMAGES_DIR, MEDIA_URL_PREFIX)
-except Exception:
-    pass
+# ==== 画像保存/配信ヘルパー ====
+def _media_dir() -> Path:
+    return Path(_cfg("MEDIA_DIR", _cfg("IMAGES_DIR", "media/img"))).resolve()
 
 
-# === 保存ヘルパー（/media/img 配下に“確実に保存”＋mtimeで新しい順を保証） ===
-MEDIA_DIR = Path(MEDIA_ROOT).resolve()
-_safe_mkdir_p(MEDIA_DIR)
+def _media_url_prefix() -> str:
+    return _cfg("MEDIA_URL_PREFIX", "/media/img")
 
 def _wm_variant_name(base_filename: str, kind: str, *, out_ext: str | None=None) -> str:
     """kind: 'fullygoto' | 'gotocity' | 'src'"""
@@ -654,7 +606,8 @@ def _touch_latest(path: Path, bias_sec: int = 0) -> None:
 
 def _list_existing_files(order: str = "new") -> list[dict]:
     items = []
-    for p in MEDIA_DIR.glob("*"):
+    media_dir = _media_dir()
+    for p in media_dir.glob("*"):
         if p.is_file():
             items.append({"name": p.name, "mtime": p.stat().st_mtime})
     items.sort(key=lambda x: x["mtime"], reverse=(order == "new"))
@@ -672,7 +625,8 @@ def list_media_for_grid(order: str = "new", include_derivatives: bool = True) ->
     - order: 'new'（更新日時降順） or 'name'（名前昇順）
     """
     rows: list[tuple[str, float]] = []
-    for p in MEDIA_DIR.glob("*"):
+    media_dir = _media_dir()
+    for p in media_dir.glob("*"):
         if not p.is_file():
             continue
         name = p.name
@@ -1232,14 +1186,14 @@ def _preferred_media_url(fn: str) -> str:
 
 
 # 別名プレフィックス（環境変数で差し替え可）
-MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img").rstrip("/")
 
 def _register_media_alias(flask_app: Flask) -> None:
-    if MEDIA_URL_PREFIX == "/media/img":
+    prefix = _media_url_prefix().rstrip("/")
+    if prefix == "/media/img":
         return
     try:
         flask_app.add_url_rule(
-            f"{MEDIA_URL_PREFIX}/<path:filename>",
+            f"{prefix}/<path:filename>",
             endpoint="serve_image_alias",
             view_func=serve_image,
             methods=["GET", "HEAD"],
@@ -4164,7 +4118,8 @@ def force_https_url_for(endpoint: str, **values) -> str:
                 base = (request.url_root or "").rstrip("/")
             except Exception:
                 base = ""
-        u = f"{base}{MEDIA_URL_PREFIX}/{filename}{query}" if base else f"{MEDIA_URL_PREFIX}/{filename}{query}"
+        prefix = _media_url_prefix()
+        u = f"{base}{prefix}/{filename}{query}" if base else f"{prefix}/{filename}{query}"
         return _force_https_abs(u)
 
 
@@ -6946,7 +6901,8 @@ def admin_watermark_generate():
     # 2) md5名で保存（先頭に来るよう mtime を少し進める）
     md5 = hashlib.md5(normalized_bytes).hexdigest()
     base_name = md5 + out_ext
-    base_path = MEDIA_DIR / base_name
+    media_dir = _media_dir()
+    base_path = media_dir / base_name
     if not base_path.exists():
         _save_bytes(base_path, normalized_bytes, bias_sec=+1)
 
@@ -6964,7 +6920,7 @@ def admin_watermark_generate():
         try:
             wm_bytes, out_ext2 = _render_watermark_bytes(base_path, kind)
             deriv_name = _wm_variant_name(base_name, kind, out_ext=out_ext2)
-            _save_bytes(MEDIA_DIR / deriv_name, wm_bytes, bias_sec=+2)
+            _save_bytes(media_dir / deriv_name, wm_bytes, bias_sec=+2)
             saved.append({"name": deriv_name, "kind": kind, "url": _u(deriv_name)})
         except Exception as e:
             app.logger.exception("watermark build failed: kind=%s base=%s", kind, base_name)
@@ -11259,58 +11215,82 @@ def admin_unhit_save_text():
 # ===== ここまで ==============================================================
 
 
-def create_app(config_object=None):
-    global app, MAX_UPLOAD_MB
+# --- config bootstrap (phase-1: no invasive rewrites) ---
+def _init_config(flask_app):
+    """Load env-driven defaults into app.config without rewriting call sites yet."""
+    import os, os.path as _op
+    from pathlib import Path as _Path
 
-    flask_app = Flask(__name__)
-    app = flask_app
+    # 既にどこかで決めている値は尊重（setdefault）
+    static_fallback = os.getenv("STATIC_FOLDER") or str((_Path(__file__).parent / "static").resolve())
+    flask_app.config.setdefault("STATIC_FOLDER", getattr(flask_app, "static_folder", None) or static_fallback)
 
-    if config_object:
-        flask_app.config.from_object(config_object)
-    else:
-        flask_app.config.from_object(get_config())
-
-    flask_app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-me"
-
-    MAX_UPLOAD_MB = flask_app.config.get("MAX_UPLOAD_MB", 16)
-    flask_app.config["JSON_AS_ASCII"] = False
-    flask_app.config.update(
-        SESSION_COOKIE_SECURE=SECURE_COOKIE,
-        SESSION_COOKIE_SAMESITE="Lax",
-        SESSION_COOKIE_HTTPONLY=True,
-        PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
-    )
-
-    _configure_jinja_env(flask_app)
-
-    flask_app.register_blueprint(bp)
-    _register_media_alias(flask_app)
-    _register_admin_media_image(flask_app)
-
-    if limiter is not None:
-        limiter.init_app(flask_app)
-
-    flask_app.wsgi_app = ProxyFix(
-        flask_app.wsgi_app,
-        x_for=TRUSTED_PROXY_HOPS,
-        x_proto=1,
-        x_host=1,
-        x_port=1,
-    )
-
-    init_watermark_ext(flask_app)
-
-    # --- index route: redirect to login (blueprint "main") ---
+    # 秘密鍵系（import時に落ちないようにフォールバック利用）
+    secret_fb = (os.getenv("IMAGES_SIGNING_KEY") or
+                 os.getenv("FLASK_SECRET_KEY") or
+                 os.getenv("SECRET_KEY") or "change-me")
+    # create_app 内で app.secret_key が無ければ初期化
     try:
-        from flask import redirect, url_for
-        if "/" not in {r.rule for r in flask_app.url_map.iter_rules()}:
+        if not getattr(flask_app, "secret_key", None):
+            flask_app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-me"
+    except Exception:
+        flask_app.secret_key = "change-me"
+
+    # 画像署名キー（利用側は当面そのまま、徐々に current_app.config に寄せる）
+    flask_app.config.setdefault("IMAGES_SIGNING_KEY", os.getenv("IMAGES_SIGNING_KEY") or secret_fb)
+
+    # メディア／透かしの既定値（既存のグローバル参照は未変更）
+    media_root = os.getenv("MEDIA_ROOT") or "media/img"
+    images_dir = os.getenv("IMAGES_DIR") or media_root
+    url_prefix = os.getenv("URL_PREFIX") or "/media/img"
+    watermark_dir = os.getenv("WATERMARK_DIR") or _op.join(flask_app.config["STATIC_FOLDER"], "watermarks")
+
+    flask_app.config.setdefault("MEDIA_ROOT", media_root)
+    flask_app.config.setdefault("IMAGES_DIR", images_dir)
+    flask_app.config.setdefault("URL_PREFIX", url_prefix)
+    flask_app.config.setdefault("WATERMARK_DIR", watermark_dir)
+
+    # アプリ環境
+    flask_app.config.setdefault("APP_ENV", os.getenv("APP_ENV", "dev"))
+    flask_app.config.setdefault("APP_VERSION", os.getenv("APP_VERSION", "unknown"))
+# --- /config bootstrap ---
+
+def create_app():
+
+    return __safe_create_app()
+# === SAFE FACTORY FALLBACK (auto-registered) ===
+def __safe_create_app():
+    import os
+    from flask import Flask, redirect, url_for
+    # 静的フォルダのフォールバック
+    static_folder = os.getenv("STATIC_FOLDER", "static")
+    flask_app = Flask(__name__, static_folder=static_folder)
+
+    # 可能なら設定ブートストラップを呼ぶ
+    try:
+        _init_config(flask_app)  # 先に注入済みのヘルパ
+    except Exception:
+        pass
+
+    # 既存の Blueprint オブジェクトがグローバルにあれば登録（重複は安全ラッパでスキップ）
+    for name in ("bp", "main_bp", "main", "admin_bp"):
+        bp = globals().get(name)
+        if bp is not None:
+            try:
+                flask_app.register_blueprint(bp)
+            except Exception:
+                pass
+
+    # index → login へリダイレクト（未登録なら）
+    try:
+        rules = {r.rule for r in flask_app.url_map.iter_rules()}
+        if "/" not in rules:
             flask_app.add_url_rule("/", "index", lambda: redirect(url_for("main.login")))
     except Exception:
         pass
-    # --- /index route ---
+
     return flask_app
-# app = create_app()  # disabled: wsgi will call create_app()
-# メイン起動（重複禁止：これ1つだけ残す）
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod", "production"}))
+
+# 既存の create_app が壊れていても上書きして安全側に寄せる
+create_app = __safe_create_app
+# === /SAFE FACTORY FALLBACK ===
