@@ -44,3 +44,4 @@ ngrok.exe
 __pycache__/
 *.pyc
 templates/*.bak
+!wsgi.py
