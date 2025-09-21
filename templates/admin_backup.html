@@ -67,7 +67,7 @@ async function showStorage(){
   {% include '_back_to_data.html' %}
   <div class="container">
     <div class="nav" style="float:right;">
-      <a href="{{ url_for('admin_logs') }}">[質問・回答ログ]</a>
+      <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
       <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
       <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
       <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
@@ -192,7 +192,7 @@ https://dl.dropboxusercontent.com/s/ABCDEFG12345/my-backup.zip</code></pre>
     </div>
 
     <div style="margin-top:8px">
-      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← データ管理に戻る</a>
+      <a class="btn ghost" href="{{ url_for('main.admin_entry') }}">← データ管理に戻る</a>
     </div>
   </div>
 </body>
@@ -266,7 +266,7 @@ async function showStorage(){
   {% include '_back_to_data.html' %}
   <div class="container">
     <div class="nav" style="float:right;">
-      <a href="{{ url_for('admin_logs') }}">[質問・回答ログ]</a>
+      <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
       <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
       <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
       <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
@@ -391,7 +391,7 @@ https://dl.dropboxusercontent.com/s/ABCDEFG12345/my-backup.zip</code></pre>
     </div>
 
     <div style="margin-top:8px">
-      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← データ管理に戻る</a>
+      <a class="btn ghost" href="{{ url_for('main.admin_entry') }}">← データ管理に戻る</a>
     </div>
   </div>
 </body>

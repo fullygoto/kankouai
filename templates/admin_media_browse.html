@@ -28,7 +28,7 @@
     <h1>画像一覧：{{ folder }}</h1>
     <div class="row">
       <a class="btn" href="{{ url_for('admin_media_folders', picker=picker or 0) }}">← フォルダ一覧へ</a>
-      <a class="btn" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+      <a class="btn" href="{{ url_for('main.admin_entry') }}">データ管理に戻る</a>
     </div>
   </div>
 
@@ -118,7 +118,7 @@
     <h1>画像一覧：{{ folder }}</h1>
     <div class="row">
       <a class="btn" href="{{ url_for('admin_media_folders', picker=picker or 0) }}">← フォルダ一覧へ</a>
-      <a class="btn" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+      <a class="btn" href="{{ url_for('main.admin_entry') }}">データ管理に戻る</a>
     </div>
   </div>
 

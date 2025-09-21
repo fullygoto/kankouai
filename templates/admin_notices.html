@@ -31,7 +31,7 @@
 {% include '_back_to_data.html' %}
 <body>
 <div class="container">
-    <a href="{{ url_for('admin_entry') }}" class="top-btn">← 管理画面トップに戻る</a>
+    <a href="{{ url_for('main.admin_entry') }}" class="top-btn">← 管理画面トップに戻る</a>
     <h1>お知らせ・イベント・特売管理</h1>
     {% with messages = get_flashed_messages() %}
       {% if messages %}
@@ -141,7 +141,7 @@
 {% include '_back_to_data.html' %}
 <body>
 <div class="container">
-    <a href="{{ url_for('admin_entry') }}" class="top-btn">← 管理画面トップに戻る</a>
+    <a href="{{ url_for('main.admin_entry') }}" class="top-btn">← 管理画面トップに戻る</a>
     <h1>お知らせ・イベント・特売管理</h1>
     {% with messages = get_flashed_messages() %}
       {% if messages %}
