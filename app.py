@@ -29,20 +29,45 @@ import secrets          # ← これを追加
 from dotenv import load_dotenv
 load_dotenv()
 
+
+
+
+# --- SAFE: avoid duplicate blueprint registration ---
+try:
+    from flask import Flask as _Flask
+    _orig_register_bp = _Flask.register_blueprint
+    def _register_blueprint_safe(self, bp, *args, **kwargs):
+        # すでに同名が登録済みならスキップ
+        if bp.name in self.blueprints:
+            return
+        try:
+            return _orig_register_bp(self, bp, *args, **kwargs)
+        except AssertionError as e:
+            # "overwriting an existing endpoint function" は重複登録なので無視
+            if "overwriting an existing endpoint function" in str(e):
+                return
+            raise
+    _Flask.register_blueprint = _register_blueprint_safe
+except Exception:
+    pass
+# --- /SAFE ---
+# --- SAFE SECRET FALLBACK (import-time safe) ---
+SECRET_FALLBACK = (
+    os.getenv("IMAGES_SIGNING_KEY")
+    or os.getenv("FLASK_SECRET_KEY")
+    or os.getenv("SECRET_KEY")
+    or "change-me"
+)
+# --- /SAFE SECRET FALLBACK ---
+# --- SAFE IMPORT BOOTSTRAP ---
+from pathlib import Path
+STATIC_FALLBACK = os.getenv("STATIC_FOLDER") or str((Path(__file__).parent / "static").resolve())
+# --- /SAFE IMPORT BOOTSTRAP ---
 from flask import (
-    Flask, render_template, request, redirect, url_for, flash, session,
+    Flask, Blueprint, render_template, request, redirect, url_for, flash, session,
     jsonify, send_file, abort, send_from_directory, render_template_string, Response,
     current_app as _flask_current_app,  # ← これを追加
 )
-
-# --- Flask app instance (top-level; required for `from app import app`) ---
-app = Flask(__name__)
-
-# secret_key が未設定でも動くようにフォールバック
-try:
-    app.secret_key  # 既に設定済みなら何もしない
-except Exception:
-    app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-me"
 
 # --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
 try:
@@ -101,6 +126,17 @@ from linebot.models import (
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
+# --- Blueprint / App globals ---
+bp = Blueprint("main", __name__)
+app: Flask | None = None
+MAX_UPLOAD_MB = 16
+
+
+def _get_logger():
+    if isinstance(app, Flask):
+        return app.logger
+    return logging.getLogger(__name__)
+
 # === safe mkdir helpers（import時に落ちないように／どこでも呼べる版） ===
 def _safe_mkdir(path_like: Any) -> None:
     """親は作らず。失敗してもアプリは落とさない。"""
@@ -129,12 +165,8 @@ def _safe_mkdir_p(path_like: Any) -> None:
 #  Flask / 設定
 # =========================
 from config import get_config
-app.config.from_object(get_config())
 
-# 以降のメッセージ等で使うため、上限MBを設定から参照
-MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
-
-@app.template_filter("b64encode")
+@bp.app_template_filter("b64encode")
 def jinja_b64encode(s):
     if s is None:
         return ""
@@ -153,7 +185,7 @@ def _ensure_csrf_token():
         session["_csrf_token"] = tok
     return tok
 
-@app.get("/readyz")
+@bp.get("/readyz")
 def readyz():
     """
     軽量なレディネス判定:
@@ -197,7 +229,7 @@ def readyz():
     }
     return jsonify(payload), status
 
-@app.context_processor
+@bp.app_context_processor
 def _inject_csrf_token():
     # テンプレートで csrf_token() が常に呼べるようになる
     return dict(csrf_token=_ensure_csrf_token)
@@ -207,12 +239,12 @@ def _inject_csrf_token():
 BUILD_ID = os.getenv("BUILD_ID") or datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
 
 # Jinja から {{ BUILD_ID }} を使えるように注入
-@app.context_processor
+@bp.app_context_processor
 def _inject_build_id():
     return dict(BUILD_ID=BUILD_ID)
 
 # 管理系や運用系ページは常に最新を返す（ブラウザキャッシュ無効化）
-@app.after_request
+@bp.after_app_request
 def _no_cache_admin(resp):
     p = (request.path or "")
     if p.startswith(("/admin", "/notices")):
@@ -309,7 +341,7 @@ def _snapshot_restore_internal(fname: str):
     return path
 
 
-@app.route("/admin/snapshot/create", methods=["POST"])
+@bp.route("/admin/snapshot/create", methods=["POST"])
 @login_required
 def admin_snapshot_create():
     if session.get("role") != "admin":
@@ -324,7 +356,7 @@ def admin_snapshot_create():
         flash(f"スナップショット作成に失敗しました: {e}")
     return redirect(url_for("admin_entries_edit"))
 
-@app.route("/admin/snapshot/download/<path:fname>")
+@bp.route("/admin/snapshot/download/<path:fname>")
 @login_required
 def admin_snapshot_download(fname):
     if session.get("role") != "admin":
@@ -337,7 +369,7 @@ def admin_snapshot_download(fname):
         _abort(404)
     return send_from_directory(base, op.basename(path), as_attachment=True)
 
-@app.route("/admin/snapshot/restore", methods=["POST"])
+@bp.route("/admin/snapshot/restore", methods=["POST"])
 @login_required
 def admin_snapshot_restore():
     if session.get("role") != "admin":
@@ -357,7 +389,7 @@ def admin_snapshot_restore():
     return redirect(url_for("admin_entries_edit"))
 # ========================================================================
 
-@app.context_processor
+@bp.app_context_processor
 def _inject_template_helpers():
     def has_endpoint(name: str) -> bool:
         try:
@@ -695,7 +727,7 @@ def _render_watermark_bytes(src_path: Path, mode: str) -> tuple[bytes, str]:
         return buf.read(), out_ext
 
 # --- Watermark assets (static/watermarks 以下) ---
-WATERMARK_DIR = os.getenv("WATERMARK_DIR") or os.path.join(app.static_folder, "watermarks")
+WATERMARK_DIR = os.getenv("WATERMARK_DIR") or os.path.join(STATIC_FALLBACK, "watermarks")
 WATERMARK_FILES = {
     "fullygoto": "wm_fullygoto.png",
     "gotocity":  "wm_gotocity.png",
@@ -892,7 +924,7 @@ def _wm_normalize(v) -> str | None:
 
 
 
-@app.route("/media/img/<path:filename>")
+@bp.route("/media/img/<path:filename>")
 def serve_image(filename):
     """
     署名検証 → 実ファイル解決 → 透かしモード決定（URL優先→エントリ既定） → 返却。
@@ -1202,14 +1234,15 @@ def _preferred_media_url(fn: str) -> str:
 # 別名プレフィックス（環境変数で差し替え可）
 MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img").rstrip("/")
 
-# 上の serve_image を 1つだけ残した状態で、この追記を入れる
-if MEDIA_URL_PREFIX != "/media/img":
+def _register_media_alias(flask_app: Flask) -> None:
+    if MEDIA_URL_PREFIX == "/media/img":
+        return
     try:
-        app.add_url_rule(
+        flask_app.add_url_rule(
             f"{MEDIA_URL_PREFIX}/<path:filename>",
-            endpoint="serve_image_alias",   # ← エンドポイント名は重複させない
-            view_func=serve_image,          # ← 上で定義済みの関数を再利用
-            methods=["GET", "HEAD"]
+            endpoint="serve_image_alias",
+            view_func=serve_image,
+            methods=["GET", "HEAD"],
         )
     except AssertionError:
         pass
@@ -1896,7 +1929,7 @@ def _mode_to_cats(mode: str):
     return None  # all
 
 
-@app.route("/api/nearby", methods=["GET"])
+@bp.route("/api/nearby", methods=["GET"])
 def api_nearby():
     """
     例: /api/nearby?lat=32.7&lng=128.8&r=2000&cat=観光,飲食&limit=20
@@ -2230,7 +2263,6 @@ CATEGORIES = [
     "生活",
     "趣味・習い事",
 ]
-app.jinja_env.globals["CATEGORIES"] = CATEGORIES  # テンプレートから参照できるようにする
 
 
 # --- LINE 応答制御フラグ（環境変数で上書き可） ---
@@ -2243,13 +2275,19 @@ LINE_ASK_AREA_FIRST = os.getenv("LINE_ASK_AREA_FIRST", "1").lower() in {"1", "tr
 # LINE は使わない環境では callback を閉じる/無効化でもOK
 
 # --- Jinja2 互換用: 'string' / 'mapping' テストが無い環境向け ---
-if 'string' not in app.jinja_env.tests:
-    app.jinja_env.tests['string'] = lambda v: isinstance(v, str)
-if 'mapping' not in app.jinja_env.tests:
-    from collections.abc import Mapping
-    app.jinja_env.tests['mapping'] = lambda v: isinstance(v, Mapping)
+def _configure_jinja_env(flask_app: Flask) -> None:
+    if 'string' not in flask_app.jinja_env.tests:
+        flask_app.jinja_env.tests['string'] = lambda v: isinstance(v, str)
+    if 'mapping' not in flask_app.jinja_env.tests:
+        from collections.abc import Mapping
+        flask_app.jinja_env.tests['mapping'] = lambda v: isinstance(v, Mapping)
+    flask_app.jinja_env.globals["CATEGORIES"] = CATEGORIES
+    flask_app.jinja_env.globals["safe_url_for"] = safe_url_for
+    flask_app.jinja_env.globals["signed_image_url"] = lambda fn, wm=False: build_signed_image_url(fn, wm=wm, external=False)
 
-app.config["JSON_AS_ASCII"] = False  # 日本語をJSONでそのまま返す
+
+# 本番では必ず環境変数で設定
+# セッション設定などは create_app 内で適用
 
 
 # === 透かしコマンド／ユーザー選好ユーティリティ =========================
@@ -2316,16 +2354,8 @@ def parse_wm_command(text: str):
 # ======================================================================
 
 # 本番では必ず環境変数で設定
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
-
-# セッション設定
+# セッション設定は create_app で反映
 SECURE_COOKIE = os.environ.get("SESSION_COOKIE_SECURE", "1").lower() in {"1", "true", "on", "yes"}
-app.config.update(
-    SESSION_COOKIE_SECURE=SECURE_COOKIE,
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_HTTPONLY=True,
-    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
-)
 # ==== Rate limit setup (put right after Flask settings) ====
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -2338,8 +2368,6 @@ _APP_ENV_EARLY = os.getenv("APP_ENV", "dev").lower()
 # 本番で ProxyHop が 0 以下は危険なのでブロック
 if _APP_ENV_EARLY in {"prod", "production"} and TRUSTED_PROXY_HOPS <= 0:
     raise RuntimeError("TRUSTED_PROXY_HOPS must be >= 1 in production")
-
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
 
 # flask-limiter が無い環境でも落ちないように（util も含めて try）
 try:
@@ -2366,25 +2394,28 @@ if _APP_ENV_EARLY in {"prod", "production"} and (not RATE_STORAGE_URI or RATE_ST
     raise RuntimeError("In production, set RATE_STORAGE_URI to a shared backend (e.g., redis://...)")
 
 if Limiter:
-    # ★一度だけ初期化し、必要なら後からデコレータで利用
     limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URI)
-    limiter.init_app(app)
-    limit_deco = limiter.limit
+
+    def limit_deco(*a, **k):  # type: ignore
+        return limiter.limit(*a, **k)
 else:
     limiter = None
-    def limit_deco(*a, **k):
-        def _wrap(f): return f
+
+    def limit_deco(*a, **k):  # type: ignore
+        def _wrap(f):
+            return f
+
         return _wrap
 
 LOGIN_LIMITS = os.getenv("LOGIN_LIMITS", "10/minute;100/day")
 
-@app.errorhandler(429)
+@bp.app_errorhandler(429)
 def _ratelimit_handler(e):
     return jsonify({"error": "Too Many Requests", "detail": "Rate limit exceeded."}), 429
 # ==== /Rate limit setup ====
 
-@app.errorhandler(RequestEntityTooLarge)
-@app.errorhandler(413)
+@bp.app_errorhandler(RequestEntityTooLarge)
+@bp.app_errorhandler(413)
 def _too_large(e):
     wants_json = (
         request.is_json
@@ -2511,7 +2542,7 @@ CSRF_STRICT = (os.getenv("CSRF_STRICT", "1").lower() in {"1","true","on","yes"})
 
 
 
-@app.before_request
+@bp.before_app_request
 def _csrf_referer_origin_guard():
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return
@@ -2559,8 +2590,8 @@ def _load_admin_nets():
 
 _ADMIN_NETS = _load_admin_nets()
 # ログ
-app.logger.info("[admin-ip] allowlist=%s  APP_ENV=%s",
-                ", ".join(map(str, _ADMIN_NETS)) or "(empty)", APP_ENV)
+_get_logger().info("[admin-ip] allowlist=%s  APP_ENV=%s",
+                   ", ".join(map(str, _ADMIN_NETS)) or "(empty)", APP_ENV)
 
 def _admin_ip_ok(ip: str) -> bool:
     # 本番は未設定＝拒否、開発系は未設定でも許可
@@ -2572,7 +2603,7 @@ def _admin_ip_ok(ip: str) -> bool:
         return False
     return any(ipobj in n for n in _ADMIN_NETS)
 
-@app.before_request
+@bp.before_app_request
 def _restrict_admin_ip():
     if not ADMIN_IP_ENFORCE:
         return  # ← 開発中はここで早期リターン＝IP制限OFF
@@ -2583,7 +2614,7 @@ def _restrict_admin_ip():
         if not _admin_ip_ok(client_ip):
             abort(403, description="Forbidden: your IP is not allowed for admin/shop.")
 # ===== ここまで =====
-@app.route("/nearby", methods=["GET"])
+@bp.route("/nearby", methods=["GET"])
 def nearby_page():
     html = """
 <!DOCTYPE html><html lang="ja"><head>
@@ -2672,7 +2703,7 @@ btn.addEventListener("click", ()=>{
     return render_template_string(html)
 
 
-@app.route("/_debug/ip")
+@bp.route("/_debug/ip")
 def _debug_ip():
     if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
         abort(404)
@@ -2688,7 +2719,7 @@ def login_required(fn):
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
             flash("ログインしてください")
-            return redirect(url_for("login"))
+            return redirect(url_for("main.login"))
         return fn(*args, **kwargs)
     return wrapper
 
@@ -2768,12 +2799,9 @@ def safe_url_for(endpoint, **values):
         except Exception:
             return "#"
 
-# Jinja から直接呼べるように（既に設定済ならこの行で上書きされます）
-app.jinja_env.globals["safe_url_for"] = safe_url_for
-# 明示的に署名URLを作りたいときはこれも使えます（任意）
-app.jinja_env.globals["signed_image_url"] = lambda fn, wm=False: build_signed_image_url(fn, wm=wm, external=False)
 
-@app.route("/admin/_sign_image", methods=["GET"])
+
+@bp.route("/admin/_sign_image", methods=["GET"])
 @login_required
 def admin_sign_image():
     """
@@ -2972,15 +3000,15 @@ try:
             return WAIT_MESSAGES[idx]
 
         # ---------------------------------------------------------------------------
-        app.logger.info("LINE enabled")
+        _get_logger().info("LINE enabled")
     else:
         line_bot_api = None
         handler = None
-        app.logger.warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
+        _get_logger().warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
 except Exception as e:
     line_bot_api = None
     handler = None
-    app.logger.exception("LINE init failed: %s", e)
+    _get_logger().exception("LINE init failed: %s", e)
 
 # === 出典フッター強制付与ラッパ（すべての reply/push を横取り） ===
 
@@ -3167,6 +3195,27 @@ if _line_enabled() and handler:
         return False
 
 # ==== ここから：統合した TextMessage ハンドラ（1本だけ残す・修正版） ====
+
+# --- LINE No-Op fallback (when env not provided) ---
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+if not (LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET):
+    class _NoopHandler:
+        def add(self, *a, **k):
+            def _wrap(f):
+                return f
+            return _wrap
+        def handle(self, *a, **k):
+            return None
+    class _NoopAPI:
+        def __getattr__(self, name):
+            def _noop(*a, **k):
+                return None
+            return _noop
+    handler = _NoopHandler()
+    line_bot_api = _NoopAPI()
+# --- /LINE No-Op fallback ---
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     try:
@@ -3823,7 +3872,7 @@ ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 # ---- 画像アクセス保護（署名付きURL + 透かし）----
 IMAGE_PROTECT = os.getenv("IMAGE_PROTECT","1").lower() in {"1","true","on","yes"}
-IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or app.secret_key or "change-me").encode("utf-8")
+IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or SECRET_FALLBACK or "change-me").encode("utf-8")
 SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
 # 署名URLのキャッシュ安全マージン（exp までの残時間から引く秒数）
 SIGNED_IMAGE_CACHE_SAFETY_SEC = int(os.getenv("SIGNED_IMAGE_CACHE_SAFETY_SEC", "300"))  # 既定: 5分
@@ -5144,8 +5193,9 @@ def _ensure_json(path, default_obj):
             json.dump(default_obj, f, ensure_ascii=False, indent=2)
 
 def _bootstrap_files_and_admin():
-    app.logger.info(f"[boot] BASE_DIR={BASE_DIR}")
-    app.logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
+    logger = _get_logger()
+    logger.info(f"[boot] BASE_DIR={BASE_DIR}")
+    logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
 
     _ensure_json(ENTRIES_FILE, [])
     _ensure_json(SYNONYM_FILE, {})
@@ -5171,14 +5221,14 @@ def _bootstrap_files_and_admin():
             }]
             with open(USERS_FILE, "w", encoding="utf-8") as f:
                 json.dump(users, f, ensure_ascii=False, indent=2)
-            app.logger.warning(
+            logger.warning(
                 "users.json を新規作成し、管理者ユーザー '%s' を作成しました。初回ログイン後 ADMIN_INIT_PASSWORD を環境変数から削除してください。",
                 ADMIN_INIT_USER,
             )
         else:
             with open(USERS_FILE, "w", encoding="utf-8") as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
-            app.logger.warning(
+            logger.warning(
                 "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
             )
 
@@ -5186,9 +5236,9 @@ _bootstrap_files_and_admin()
 
 # 必須キーが未設定なら警告（起動は継続）
 if not OPENAI_API_KEY:
-    app.logger.warning("OPENAI_API_KEY が未設定です。OpenAI 呼び出しは失敗します。")
+    _get_logger().warning("OPENAI_API_KEY が未設定です。OpenAI 呼び出しは失敗します。")
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    app.logger.warning("LINE_CHANNEL_* が未設定です。/callback は正常動作しません。")
+    _get_logger().warning("LINE_CHANNEL_* が未設定です。/callback は正常動作しません。")
 
 # === OpenAIの出力から安全にJSONオブジェクトを取り出すユーティリティ ===
 def _extract_json_object(text: str):
@@ -6209,7 +6259,7 @@ def _image_meta(img_name: str | None):
 # =========================
 #  管理画面: 観光データ登録・編集
 # =========================
-@app.route("/admin/entry", methods=["GET", "POST"])
+@bp.route("/admin/entry", methods=["GET", "POST"])
 @login_required
 def admin_entry():
     import os  # ローカルimportで安全に
@@ -6591,7 +6641,7 @@ def admin_entry():
 
 
 # ==== 管理画面用：画像メタAPI（要ログイン） ====
-@app.get("/admin/_img_meta")
+@bp.get("/admin/_img_meta")
 @login_required
 def admin_img_meta():
     fn = (request.args.get("filename") or "").strip()
@@ -6603,7 +6653,7 @@ def admin_img_meta():
     return jsonify(ok=True, **meta)
 # ==== / 管理画面用API ====
 
-@app.route("/admin/_wm_diag", methods=["GET"])
+@bp.route("/admin/_wm_diag", methods=["GET"])
 @login_required
 def admin_wm_diag():
     """
@@ -6716,8 +6766,8 @@ def admin_wm_diag():
     )
 
 
-@app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
-@app.route("/admin/entry/delete/<int:idx>", methods=["POST"])
+@bp.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
+@bp.route("/admin/entry/delete/<int:idx>", methods=["POST"])
 @login_required
 def delete_entry(idx):
     if session.get("role") != "admin":
@@ -6820,18 +6870,20 @@ def _admin_media_img_impl(filename: str):
     )
 
 # 既に登録済みなら追加しない（重複エラー回避）
-if "admin_media_img" not in app.view_functions:
-    app.add_url_rule(
+def _register_admin_media_image(flask_app: Flask) -> None:
+    if "admin_media_img" in flask_app.view_functions:
+        return
+    flask_app.add_url_rule(
         "/admin/_media_img/<path:filename>",
         endpoint="admin_media_img",
         view_func=login_required(_admin_media_img_impl),
-        methods=["GET"]
+        methods=["GET"],
     )
 
 
 
 # === 新規アップロード→透かし生成→保存（統一版） ============================
-@app.post("/admin/_watermark_generate")
+@bp.post("/admin/_watermark_generate")
 @login_required
 def admin_watermark_generate():
     """
@@ -6920,7 +6972,7 @@ def admin_watermark_generate():
     return jsonify(ok=True, saved=saved)
 
 
-@app.route("/shop/entry", methods=["GET", "POST"])
+@bp.route("/shop/entry", methods=["GET", "POST"])
 @login_required
 def shop_entry():
     if session.get("role") != "shop":
@@ -7009,7 +7061,7 @@ def shop_entry():
     shop_entry_data = _norm_entry(shop_entry_data) if shop_entry_data else None
     return render_template("shop_entry.html", role="shop", shop_edit=shop_entry_data)
 
-@app.route("/admin/entries_edit", methods=["GET", "POST"])
+@bp.route("/admin/entries_edit", methods=["GET", "POST"])
 @login_required
 def admin_entries_edit():
     if session.get("role") != "admin":
@@ -7168,7 +7220,7 @@ def admin_entries_edit():
     )
 
 
-@app.route("/admin/entries_dedupe", methods=["GET", "POST"])
+@bp.route("/admin/entries_dedupe", methods=["GET", "POST"])
 @login_required
 def admin_entries_dedupe():
     if session.get("role") != "admin":
@@ -7233,7 +7285,7 @@ def admin_entries_dedupe():
 # =========================
 #  CSV取り込み（既存に追加）
 # =========================
-@app.route("/admin/entries_import_csv", methods=["POST"])
+@bp.route("/admin/entries_import_csv", methods=["POST"])
 @login_required
 def admin_entries_import_csv():
     if session.get("role") != "admin":
@@ -7341,7 +7393,7 @@ def admin_entries_import_csv():
 # =========================
 #  管理: JSONインポート（entries / synonyms）
 # =========================
-@app.route("/admin/import", methods=["GET", "POST"])
+@bp.route("/admin/import", methods=["GET", "POST"])
 @login_required
 def admin_import():
     if session.get("role") != "admin":
@@ -7448,7 +7500,7 @@ def _parse_ts(ts_str: str):
     return _dt.min
 
 
-@app.route("/admin/logs")
+@bp.route("/admin/logs")
 @login_required
 def admin_logs():
     if session.get("role") != "admin":
@@ -7492,7 +7544,7 @@ def admin_logs():
     return render_template("admin_logs.html", logs=logs, q=q, limit=limit, role=session.get("role",""))
 
 
-@app.route("/admin/unhit_questions")
+@bp.route("/admin/unhit_questions")
 @login_required
 def admin_unhit_questions():
     if session.get("role") != "admin":
@@ -7554,7 +7606,7 @@ def admin_unhit_questions():
     )
 
 
-@app.route("/api/faq_suggest", methods=["POST"])
+@bp.route("/api/faq_suggest", methods=["POST"])
 @limit_deco(ASK_LIMITS)   # レート制限は維持
 @login_required
 def api_faq_suggest():
@@ -7573,7 +7625,7 @@ def api_faq_suggest():
     return jsonify({"ok": True, "text": text})
 
 
-@app.route("/admin/add_entry", methods=["POST"])
+@bp.route("/admin/add_entry", methods=["POST"])
 @login_required
 def admin_add_entry():
     if session.get("role") != "admin":
@@ -7788,7 +7840,7 @@ def _stream_backup_targz():
         yield chunk
 # ===== /backup helpers =================================================
 
-@app.route("/admin/backup")
+@bp.route("/admin/backup")
 @login_required
 def admin_backup():
     if session.get("role") != "admin":
@@ -7849,7 +7901,7 @@ def admin_backup():
     }
     return render_template("admin_backup.html", stats=stats)
 
-@app.route("/admin/storage_stats")
+@bp.route("/admin/storage_stats")
 @login_required
 def admin_storage_stats():
     if session.get("role") != "admin":
@@ -7888,7 +7940,7 @@ def admin_storage_stats():
 
     return jsonify(out)
 
-@app.route("/admin/restore", methods=["POST"])
+@bp.route("/admin/restore", methods=["POST"])
 @login_required
 def admin_restore():
     if session.get("role") != "admin":
@@ -7902,7 +7954,7 @@ def admin_restore():
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
 
-@app.route("/admin/restore_from_url", methods=["POST"])
+@bp.route("/admin/restore_from_url", methods=["POST"])
 @login_required
 def admin_restore_from_url():
     if session.get("role") != "admin":
@@ -7984,7 +8036,7 @@ def admin_restore_from_url():
 
     return redirect(url_for("admin_backup"))
 
-@app.route("/internal/backup", methods=["POST"])
+@bp.route("/internal/backup", methods=["POST"])
 def internal_backup():
     token = request.headers.get("X-Backup-Token", "")
     if token != os.environ.get("BACKUP_JOB_TOKEN"):
@@ -8011,14 +8063,14 @@ def internal_backup():
 
 
 # === 管理者ボタン：最優先で停止/再開 ==========================================
-@app.post("/admin/line/pause")
+@bp.post("/admin/line/pause")
 def admin_line_pause():  # 既存の endpoint 名が admin_line_pause ならそちらに合わせて
     _pause_set_admin(True)   # 管理者停止ON
     # 利用者停止はそのままでもOK（残しておく）。必要なら同時に消すなら _pause_set_user(False)
     flash("LINE応答を一時停止しました（管理者）")
     return redirect(url_for("admin_entry"))
 
-@app.post("/admin/line/resume")
+@bp.post("/admin/line/resume")
 def admin_line_resume():  # 既存の endpoint 名が admin_line_resume ならそちらに合わせて
     _pause_set_admin(False)  # 管理者停止OFF
     _pause_set_user(False)   # ついでに利用者停止も全解除（“全ての返事を再開”）
@@ -8026,7 +8078,7 @@ def admin_line_resume():  # 既存の endpoint 名が admin_line_resume なら�
     return redirect(url_for("admin_entry"))
 # ============================================================================
 
-@app.route("/admin/line/mutes", methods=["GET","POST"])
+@bp.route("/admin/line/mutes", methods=["GET","POST"])
 @login_required
 def admin_line_mutes():
     if session.get("role") != "admin":
@@ -8045,7 +8097,7 @@ def admin_line_mutes():
 # =========================
 #  認証
 # =========================
-@app.route("/login", methods=["GET", "POST"])
+@bp.route("/login", methods=["GET", "POST"])
 @limit_deco(LOGIN_LIMITS)   # ← これを付けるだけ
 def login():
     if request.method == "POST":
@@ -8066,17 +8118,17 @@ def login():
             flash("ユーザーIDまたはパスワードが違います")
     return render_template("login.html")
 
-@app.route("/logout")
+@bp.route("/logout")
 def logout():
     session.clear()
     flash("ログアウトしました")
-    return redirect(url_for("login"))
+    return redirect(url_for("main.login"))
 
 
 # =========================
 #  マスター管理（復活＆強化）
 # =========================
-@app.route("/admin/synonyms", methods=["GET", "POST"])
+@bp.route("/admin/synonyms", methods=["GET", "POST"])
 @login_required
 def admin_synonyms():
     if session.get("role") != "admin":
@@ -8120,7 +8172,7 @@ def admin_synonyms():
         queue_pending=pending_count
     )
 
-@app.route("/admin/synonyms/export_missing")
+@bp.route("/admin/synonyms/export_missing")
 @login_required
 def admin_synonyms_export_missing():
     if session.get("role") != "admin":
@@ -8134,7 +8186,7 @@ def admin_synonyms_export_missing():
                      mimetype="application/json")
 
 
-@app.route("/admin/synonyms/queue/reset")
+@bp.route("/admin/synonyms/queue/reset")
 @login_required
 def admin_synonyms_queue_reset():
     if session.get("role") != "admin":
@@ -8152,7 +8204,7 @@ def admin_synonyms_queue_reset():
     return redirect(url_for("admin_synonyms"))
 
 
-@app.route("/admin/synonyms/queue/status")
+@bp.route("/admin/synonyms/queue/status")
 @login_required
 def admin_synonyms_queue_status():
     if session.get("role") != "admin":
@@ -8163,7 +8215,7 @@ def admin_synonyms_queue_status():
 
 
 # ========== 類義語：インポート（上書き） ==========
-@app.route("/admin/synonyms/import", methods=["POST"])
+@bp.route("/admin/synonyms/import", methods=["POST"])
 @login_required
 def admin_synonyms_import():
     if session.get("role") != "admin":
@@ -8211,7 +8263,7 @@ def admin_synonyms_import():
 
 
 # ========== 類義語：エクスポート（ダウンロード） ==========
-@app.route("/admin/synonyms/export", methods=["GET", "POST"])
+@bp.route("/admin/synonyms/export", methods=["GET", "POST"])
 @login_required
 def admin_synonyms_export():
     if session.get("role") != "admin":
@@ -8223,7 +8275,7 @@ def admin_synonyms_export():
 
 
 # ========== 類義語：AI自動生成（missing/all × append/overwrite） ==========
-@app.route("/admin/synonyms/autogen", methods=["POST", "GET"])
+@bp.route("/admin/synonyms/autogen", methods=["POST", "GET"])
 @login_required
 def admin_synonyms_autogen():
     """
@@ -8374,7 +8426,7 @@ def admin_synonyms_autogen():
 
 
 # （互換用：以前のエンドポイント名を使っていた場合のエイリアス）
-@app.route("/admin/synonyms/auto", methods=["POST"])
+@bp.route("/admin/synonyms/auto", methods=["POST"])
 @login_required
 def admin_synonyms_auto():
     return admin_synonyms_autogen()
@@ -8391,7 +8443,7 @@ LAST_SEND_ERROR = ""
 SEND_ERROR_COUNT = 0
 SEND_FAIL_COUNT = 0 
 
-@app.route("/_debug/line_status")
+@bp.route("/_debug/line_status")
 def _debug_line_status():
     """
     LINEの稼働状況を確認するデバッグ用エンドポイント。
@@ -8423,7 +8475,7 @@ def _debug_line_status():
     })
 
 # LINE webhook（可視化＆Rate Limit付き・1本化）
-@app.route("/callback", methods=["POST"])
+@bp.route("/callback", methods=["POST"])
 @limit_deco(ASK_LIMITS)  # ← ここで Rate Limit を適用（limiter無い環境ではノーオペ関数）
 def callback():
     """
@@ -8468,7 +8520,7 @@ def callback():
     return "OK", 200
 
 # 管理者用：任意ユーザーに push して疎通確認（userId はログやLINEの開発者ツールで取得）
-@app.route("/admin/line/test_push", methods=["POST","GET"])
+@bp.route("/admin/line/test_push", methods=["POST","GET"])
 @login_required
 def admin_line_test_push():
     if session.get("role") != "admin":
@@ -9310,7 +9362,7 @@ def get_mobility_reply(text: str):
     # 何も該当しない
     return "", False
 # =====================================================================
-@app.route("/admin/upload_image", methods=["POST"])
+@bp.route("/admin/upload_image", methods=["POST"])
 @login_required
 def admin_upload_image():
     if session.get("role") not in {"admin", "shop"}:
@@ -9530,7 +9582,7 @@ def _list_source_images():
     files.sort()
     return files
 
-@app.route("/admin/watermark", methods=["GET", "POST"])
+@bp.route("/admin/watermark", methods=["GET", "POST"])
 @login_required
 def admin_watermark():
     # 権限: admin / shop のどちらでも利用可
@@ -9632,20 +9684,20 @@ def admin_watermark():
     )
 
 
-@app.route("/_debug/where")
+@bp.route("/_debug/where")
 def _debug_where():
     import os
     return jsonify({"app_file": __file__, "cwd": os.getcwd()})
 
 
-@app.route("/_debug/test_weather")
+@bp.route("/_debug/test_weather")
 def _debug_test_weather():
     q = request.args.get("q", "") or ""
     m, ok = get_weather_reply(q)
     return jsonify({"ok": ok, "answer": m})
 
 
-@app.route("/healthz", methods=["GET", "HEAD"])
+@bp.route("/healthz", methods=["GET", "HEAD"])
 def healthz():
     return jsonify({"ok": True}), 200
 
@@ -9655,7 +9707,7 @@ def healthz():
 # import os, tempfile
 # from flask import jsonify
 
-@app.route("/readyz", methods=["GET"])
+@bp.route("/readyz", methods=["GET"])
 def readyz():
     errors = []
 
@@ -9686,7 +9738,7 @@ def readyz():
     return jsonify(payload), status, {"Content-Type": "application/json; charset=utf-8"}
 
 
-@app.route("/_debug/test_transport")
+@bp.route("/_debug/test_transport")
 def _debug_test_transport():
     q = request.args.get("q", "") or ""
     m, ok = get_transport_reply(q)
@@ -9994,7 +10046,7 @@ def _answer_from_entries_rich(question: str):
     txt = "\n".join(lines)
     return [TextSendMessage(text=p) for p in _split_for_line(txt, LINE_SAFE_CHARS)], True
 
-@app.route("/admin/manual")
+@bp.route("/admin/manual")
 @login_required
 def admin_manual():
     if session.get("role") != "admin":
@@ -10139,7 +10191,7 @@ def _answer_from_data_txt(question: str) -> str:
         return ""
 
 # ② 例外を握ってログ＋フラッシュにして 500 を防ぐ
-@app.route("/admin/data_files", methods=["GET"])
+@bp.route("/admin/data_files", methods=["GET"])
 @login_required
 def admin_data_files():
     if session.get("role") != "admin":
@@ -10168,7 +10220,7 @@ def admin_data_files():
         files=files, edit=edit, content=content, used_enc=used_enc
     )
 
-@app.route("/admin/data_files/upload", methods=["POST"])
+@bp.route("/admin/data_files/upload", methods=["POST"])
 @login_required
 def admin_data_files_upload():
     if session.get("role") != "admin":
@@ -10209,7 +10261,7 @@ def admin_data_files_upload():
     flash(f"{count} ファイルをアップロードしました")
     return redirect(url_for("admin_data_files"))
 
-@app.route("/admin/data_files/new", methods=["POST"])
+@bp.route("/admin/data_files/new", methods=["POST"])
 @login_required
 def admin_data_files_new():
     if session.get("role") != "admin":
@@ -10233,7 +10285,7 @@ def admin_data_files_new():
     flash("新規ファイルを作成しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
-@app.route("/admin/data_files/save", methods=["POST"])
+@bp.route("/admin/data_files/save", methods=["POST"])
 @login_required
 def admin_data_files_save():
     if session.get("role") != "admin":
@@ -10264,7 +10316,7 @@ def admin_data_files_save():
         flash("保存に失敗しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
-@app.route("/admin/data_files/delete", methods=["POST"])
+@bp.route("/admin/data_files/delete", methods=["POST"])
 @login_required
 def admin_data_files_delete():
     if session.get("role") != "admin":
@@ -10286,7 +10338,7 @@ def admin_data_files_delete():
         flash("削除に失敗しました: " + str(e))
     return redirect(url_for("admin_data_files"))
 
-@app.route("/admin/data_files/download")
+@bp.route("/admin/data_files/download")
 @login_required
 def admin_data_files_download():
     if session.get("role") != "admin":
@@ -10299,7 +10351,7 @@ def admin_data_files_download():
     # send_from_directory はパス検証込みで安全
     return send_from_directory(DATA_DIR, safe, as_attachment=True)
 
-@app.route("/admin/data_files/rename", methods=["POST"])
+@bp.route("/admin/data_files/rename", methods=["POST"])
 @login_required
 def admin_data_files_rename():
     if session.get("role") != "admin":
@@ -10324,7 +10376,7 @@ def admin_data_files_rename():
     return redirect(url_for("admin_data_files", edit=new_s))
 # ======== ▲▲▲ 追記ここまで ▲▲▲
 
-@app.route("/_debug/quick")
+@bp.route("/_debug/quick")
 def _debug_quick():
     # 本番はトークン必須にしたい場合は下を有効化
     # if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
@@ -10362,7 +10414,7 @@ def _debug_quick():
 # =========================
 #  トップ/ヘルスチェック
 # =========================
-@app.route("/")
+@bp.route("/")
 def home():
     return "<a href='/admin/entry'>[観光データ管理]</a>"
 
@@ -10701,7 +10753,7 @@ def smart_search_answer_with_hitflag(question):
 # =========================
 #  API: /ask
 # =========================
-@app.route("/ask", methods=["POST"])
+@bp.route("/ask", methods=["POST"])
 @limit_deco(ASK_LIMITS)
 def ask():
     data = request.get_json(silent=True) or {}
@@ -10756,7 +10808,7 @@ def ask():
     return jsonify({"answer": answer, "hit_db": hit_db, "meta": meta})
 
 
-@app.route("/admin/unhit_report")
+@bp.route("/admin/unhit_report")
 @login_required
 def admin_unhit_report():
     if session.get("role") != "admin":
@@ -10956,13 +11008,13 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
 # =========================
 #  お知らせ管理
 # =========================
-@app.route("/admin/notices", methods=["GET", "POST"])
+@bp.route("/admin/notices", methods=["GET", "POST"])
 @login_required
 def admin_notices():
     # 必要なら _require_admin() を使ってもOK
     if session.get("role") != "admin":
         flash("権限がありません")
-        return redirect(url_for("login"))
+        return redirect(url_for("main.login"))
     notices = load_notices()
     edit_id = request.values.get("edit")
     edit_notice = None
@@ -11023,12 +11075,12 @@ def admin_notices():
     return render_template("admin_notices.html", notices=notices, edit_notice=edit_notice)
 
 
-@app.route("/admin/notices/delete/<int:idx>", methods=["POST"])
+@bp.route("/admin/notices/delete/<int:idx>", methods=["POST"])
 @login_required
 def delete_notice(idx):
     if session.get("role") != "admin":
         flash("権限がありません")
-        return redirect(url_for("login"))
+        return redirect(url_for("main.login"))
     notices = load_notices()
     notices = [n for n in notices if n.get("id") != idx]
     save_notices(notices)
@@ -11036,7 +11088,7 @@ def delete_notice(idx):
     return redirect(url_for("admin_notices"))
 
 
-@app.route("/notices")
+@bp.route("/notices")
 def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
@@ -11109,11 +11161,10 @@ try:
             return e
 except Exception:
     # ここで失敗してもアプリ動作は継続
-    app.logger.exception("norm-entry post patch failed")
+    _get_logger().exception("norm-entry post patch failed")
 # ===== ここまでパッチ =====
-# ... 全ての @app.route(...) 定義が終わった一番最後に置く
+# ... 全ての @bp.route(...) 定義が終わった一番最後に置く
 from watermark_ext import init_watermark_ext
-init_watermark_ext(app)
 
 
 # ===== 未ヒット：テキスト保存＆要約API（admin専用） =========================
@@ -11125,7 +11176,7 @@ def _slug_for_filename(s: str, max_len: int = 40) -> str:
     s = re.sub(r"_+", "_", s).strip("_")
     return (s or "text")[:max_len]
 
-@app.post("/api/text_summarize")
+@bp.post("/api/text_summarize")
 @login_required
 @limit_deco(ASK_LIMITS)   # 既存のレート制限デコレータ
 def api_text_summarize():
@@ -11155,7 +11206,7 @@ def api_text_summarize():
 
     return jsonify({"ok": True, "summary": summary})
 
-@app.post("/admin/unhit/save_text")
+@bp.post("/admin/unhit/save_text")
 @login_required
 def admin_unhit_save_text():
     # 管理者のみ
@@ -11208,7 +11259,58 @@ def admin_unhit_save_text():
 # ===== ここまで ==============================================================
 
 
+def create_app(config_object=None):
+    global app, MAX_UPLOAD_MB
+
+    flask_app = Flask(__name__)
+    app = flask_app
+
+    if config_object:
+        flask_app.config.from_object(config_object)
+    else:
+        flask_app.config.from_object(get_config())
+
+    flask_app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-me"
+
+    MAX_UPLOAD_MB = flask_app.config.get("MAX_UPLOAD_MB", 16)
+    flask_app.config["JSON_AS_ASCII"] = False
+    flask_app.config.update(
+        SESSION_COOKIE_SECURE=SECURE_COOKIE,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_HTTPONLY=True,
+        PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
+    )
+
+    _configure_jinja_env(flask_app)
+
+    flask_app.register_blueprint(bp)
+    _register_media_alias(flask_app)
+    _register_admin_media_image(flask_app)
+
+    if limiter is not None:
+        limiter.init_app(flask_app)
+
+    flask_app.wsgi_app = ProxyFix(
+        flask_app.wsgi_app,
+        x_for=TRUSTED_PROXY_HOPS,
+        x_proto=1,
+        x_host=1,
+        x_port=1,
+    )
+
+    init_watermark_ext(flask_app)
+
+    # --- index route: redirect to login (blueprint "main") ---
+    try:
+        from flask import redirect, url_for
+        if "/" not in {r.rule for r in flask_app.url_map.iter_rules()}:
+            flask_app.add_url_rule("/", "index", lambda: redirect(url_for("main.login")))
+    except Exception:
+        pass
+    # --- /index route ---
+    return flask_app
+# app = create_app()  # disabled: wsgi will call create_app()
 # メイン起動（重複禁止：これ1つだけ残す）
 if __name__ == "__main__":
-    port = int(os.getenv("PORT","5000"))
-    app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod", "production"}))
