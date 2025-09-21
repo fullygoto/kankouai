@@ -11358,6 +11358,8 @@ def __safe_create_app():
             return _noop_decorator(*a, **kw)
     # -- /LINE init --
     __register_admin_media_folders_alias(flask_app)
+    __register_admin_media_browse_alias(flask_app)
+
 
 
     return flask_app
@@ -11400,3 +11402,23 @@ def __register_admin_media_folders_alias(flask_app):
         # 何があっても落とさない
         pass
 # --- /admin media folders alias ---
+
+# --- admin media browse alias (safe & idempotent) ---
+def __register_admin_media_browse_alias(flask_app):
+    """
+    互換: /admin/media/browse -> /admin/data_files（暫定302）
+    既に /admin/media/browse がある場合は何もしない。
+    """
+    try:
+        rules = [r.rule for r in flask_app.url_map.iter_rules()]
+        if "/admin/media/browse" in rules:
+            return
+        from flask import redirect, url_for
+        def _alias_view():
+            return redirect(url_for("main.admin_data_files"), code=302)
+        endpoint = "admin_media_browse_alias"; i = 1
+        while endpoint in flask_app.view_functions:
+            i += 1; endpoint = f"admin_media_browse_alias_{i}"
+        flask_app.add_url_rule("/admin/media/browse", endpoint=endpoint, view_func=_alias_view, methods=["GET","HEAD"])
+    except Exception:
+        pass
