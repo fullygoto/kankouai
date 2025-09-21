@@ -11357,9 +11357,46 @@ def __safe_create_app():
         def _line_add(*a, **kw):
             return _noop_decorator(*a, **kw)
     # -- /LINE init --
+    __register_admin_media_folders_alias(flask_app)
+
 
     return flask_app
 
 # 既存の create_app が壊れていても上書きして安全側に寄せる
 create_app = __safe_create_app
 # === /SAFE FACTORY FALLBACK ===
+
+
+# --- admin media folders alias (safe & idempotent) ---
+def __register_admin_media_folders_alias(flask_app):
+    """
+    互換: /admin/media/folders -> /admin/data_files へリダイレクト。
+    既に /admin/media/folders がある場合は何もしない。
+    """
+    try:
+        rules = [r.rule for r in flask_app.url_map.iter_rules()]
+        if "/admin/media/folders" in rules:
+            return  # 既に存在
+
+        from flask import redirect, url_for
+
+        def _alias_view():
+            # 永続のURLに寄せたいなら 301、暫定なら 302（ここでは 302 にします）
+            return redirect(url_for("main.admin_data_files"), code=302)
+
+        endpoint = "admin_media_folders_alias"
+        i = 1
+        while endpoint in flask_app.view_functions:
+            i += 1
+            endpoint = f"admin_media_folders_alias_{i}"
+
+        flask_app.add_url_rule(
+            "/admin/media/folders",
+            endpoint=endpoint,
+            view_func=_alias_view,
+            methods=["GET", "HEAD"],
+        )
+    except Exception:
+        # 何があっても落とさない
+        pass
+# --- /admin media folders alias ---
