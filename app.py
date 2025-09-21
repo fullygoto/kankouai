@@ -170,7 +170,7 @@ def _get_logger():
 # --- media/watermark accessors (read-only phase) ---
 def get_media_root(app_like=None):
     """
-    MEDIA_ROOT の取得（未設定時は static の兄弟 'media/img' を既定）
+    _cfg(None, "MEDIA_ROOT", _cfg(None, "MEDIA_ROOT", MEDIA_ROOT)) の取得（未設定時は static の兄弟 'media/img' を既定）
     """
     try:
         base = _cfg(app_like, "MEDIA_ROOT", None)
@@ -184,7 +184,7 @@ def get_media_root(app_like=None):
 
 def get_watermark_dir(app_like=None):
     """
-    WATERMARK_DIR の取得（未設定時は static/watermarks）
+    _cfg(None, "WATERMARK_DIR", _cfg(None, "WATERMARK_DIR", WATERMARK_DIR)) の取得（未設定時は static/watermarks）
     """
     default = str(__import__("os").path.join(STATIC_FALLBACK, "watermarks"))
     try:
@@ -737,7 +737,7 @@ def _wm_overlay_path(mode: str) -> str | None:
     fn = WATERMARK_FILES.get((mode or "").strip().lower())
     if not fn:
         return None
-    p = os.path.join(WATERMARK_DIR, fn)
+    p = os.path.join(_cfg(None, "WATERMARK_DIR", _cfg(None, "WATERMARK_DIR", _cfg(None, "WATERMARK_DIR", WATERMARK_DIR))), fn)
     return p if os.path.isfile(p) else None
 
 
@@ -4337,14 +4337,14 @@ WM_VARIANTS = {
 
 def _ensure_wm_variants(basename: str) -> dict:
     """
-    IMAGES_DIR/<basename> を元に、3種の静的ファイルを作る。
+    _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))/<basename> を元に、3種の静的ファイルを作る。
     戻り値: {"none": "xxx.jpg", "gotocity": "...", "fullygoto": "..."}
     """
     import os
     from PIL import Image
 
     root, ext = os.path.splitext(basename)
-    src = os.path.join(IMAGES_DIR, basename)
+    src = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), basename)
     out = {}
 
     if not os.path.isfile(src):
@@ -4353,7 +4353,7 @@ def _ensure_wm_variants(basename: str) -> dict:
     im = Image.open(src).convert("RGB")
     for key, spec in WM_VARIANTS.items():
         fn  = root + spec["suffix"] + ext
-        dst = os.path.join(IMAGES_DIR, fn)
+        dst = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), fn)
         try:
             if spec["text"]:
                 im2 = _apply_text_watermark(im, spec["text"])
@@ -4524,7 +4524,7 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
                 best = encode(75, cur)
 
         # 保存（.jpg 固定）
-        _safe_mkdir(IMAGES_DIR)
+        _safe_mkdir(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR)))
         new_name = f"{uuid.uuid4().hex}.jpg"
         save_path = os.path.join(_images_dir, new_name)
         with open(save_path, "wb") as wf:
@@ -4702,7 +4702,7 @@ def _get_image_meta(filename: str):
     if not filename:
         return None
     try:
-        path = os.path.join(IMAGES_DIR, filename)
+        path = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), filename)
         size_b = os.path.getsize(path)
     except Exception:
         return None
@@ -6215,7 +6215,7 @@ def _image_meta(img_name: str | None):
         except Exception:
             url = ""
 
-        path = os.path.join(IMAGES_DIR, img_name)
+        path = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), img_name)
         if not os.path.isfile(path):
             # 存在しない場合も、UIが扱いやすい形で返す
             return {
@@ -9538,7 +9538,7 @@ def _wm_save(im: Image.Image, dest: str, quality=85):
 
 def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, margin=0.02, quality=85):
     """
-    1枚のオリジナルから __none / __goto / __fullygoto を IMAGES_DIR に生成。
+    1枚のオリジナルから __none / __goto / __fullygoto を _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR)) に生成。
     既存があればスキップ（force=Trueで上書き）。
     戻り値: {"none":fn, "goto":fn, "fully":fn}
     """
@@ -9550,9 +9550,9 @@ def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, m
 
     stem, _ext = os.path.splitext(os.path.basename(src_path))
     out_ext = ".jpg"  # ここを固定しないと PNG 等で quality 指定が例外になる
-    out_none = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_NONE}{out_ext}")
-    out_goto = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_GOTO}{out_ext}")
-    out_full = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_FULLY}{out_ext}")
+    out_none = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), f"{stem}{WM_SUFFIX_NONE}{out_ext}")
+    out_goto = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), f"{stem}{WM_SUFFIX_GOTO}{out_ext}")
+    out_full = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), f"{stem}{WM_SUFFIX_FULLY}{out_ext}")
 
     if force or not os.path.exists(out_none):
         _wm_save_jpeg(im, out_none, quality=quality)
@@ -9570,9 +9570,9 @@ def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, m
 def _list_source_images():
     """IMAGES_DIR から『元画像っぽいもの（__none/__goto/__fullygotoが付いてない）』だけ列挙"""
     files = []
-    if not os.path.isdir(IMAGES_DIR):
+    if not os.path.isdir(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))):
         return files
-    for fn in os.listdir(IMAGES_DIR):
+    for fn in os.listdir(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))):
         if fn.startswith("."): 
             continue
         root, ext = os.path.splitext(fn)
@@ -9622,7 +9622,7 @@ def admin_watermark():
         targets = []
         for name in selected:
             name = os.path.basename(name)
-            targets.append((name, os.path.join(IMAGES_DIR, name)))
+            targets.append((name, os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), name)))
 
         for f in uploads:
             if not f or not f.filename:
@@ -9632,7 +9632,7 @@ def admin_watermark():
                 if not saved:
                     errors.append(f"{f.filename}: 保存に失敗")
                     continue
-                targets.append((saved, os.path.join(IMAGES_DIR, saved)))
+                targets.append((saved, os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), saved)))
             except Exception as e:
                 errors.append(f"{f.filename}: {e}")
 
