@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -87,3 +88,94 @@
 </script>
 </body>
 </html>
+=======
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>画像一覧：{{ folder }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{--bg:#f6faf9;--card:#fff;--line:#e7eef5;--brand:#2a8ed8;--muted:#567}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
+  .container{background:var(--card);max-width:1100px;margin:0 auto;padding:18px 20px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  h1{margin:0}
+  .muted{color:var(--muted);font-size:.92em}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px;margin-top:12px}
+  .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
+  .name{display:block;margin:6px 0;font-size:.9em;color:#345;word-break:break-all}
+  img{width:100%;height:160px;object-fit:cover;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+  .row{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .btn{padding:7px 12px;border-radius:8px;border:1px solid #b7d3e0;background:#fff;color:#2a8ed8;cursor:pointer;text-decoration:none}
+  .btn.primary{background:#2a8ed8;color:#fff;border-color:#2a8ed8}
+  .btn.danger{background:#fff;color:#c33;border-color:#e8bcbc}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="topbar">
+    <h1>画像一覧：{{ folder }}</h1>
+    <div class="row">
+      <a class="btn" href="{{ url_for('admin_media_folders', picker=picker or 0) }}">← フォルダ一覧へ</a>
+      <a class="btn" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+    </div>
+  </div>
+
+  {% set picker = (request.args.get('picker') if request is defined else (picker if picker is defined else 0)) %}
+  {% set has_mtime = (items and items[0] and (items[0].mtime is defined)) %}
+  {% set list_sorted = (items|sort(attribute='mtime', reverse=True)) if has_mtime else (items or files or []) %}
+
+  <div class="muted">表示：{{ list_sorted|length if list_sorted else 0 }} 枚（新しい順）</div>
+
+  <div class="grid">
+    {% if list_sorted and list_sorted|length %}
+      {% for it in list_sorted %}
+        {% set fn = (it.fn if it.fn is defined else (it.name if it.name is defined else it)) %}
+        <div class="card">
+          <div class="muted">プレビュー（透かし：なし）</div>
+          {% if '.' in fn %}
+            <img src="{{ url_for('admin_media_img', filename=fn[:-fn.rfind('.')-1] ~ '__none' ~ fn[fn.rfind('.'):]) }}" alt="{{ fn }}" loading="lazy">
+          {% else %}
+            <img src="{{ url_for('admin_media_img', filename=fn) }}" alt="{{ fn }}" loading="lazy">
+          {% endif %}
+          <span class="name">{{ fn }}</span>
+
+          {% if picker|int == 1 %}
+          <div class="row">
+            <button class="btn"        onclick="pick('{{ fn|escapejs }}','none')">選ぶ（なし）</button>
+            <button class="btn"        onclick="pick('{{ fn|escapejs }}','fullygoto')">選ぶ（＠fullyGOTO）</button>
+            <button class="btn"        onclick="pick('{{ fn|escapejs }}','gotocity')">選ぶ（＠Goto City）</button>
+          </div>
+          {% endif %}
+
+          <div class="row">
+            <a class="btn" href="{{ url_for('admin_watermark_one', src=fn) }}">編集</a>
+            <form method="post" action="{{ url_for('admin_media_delete') }}" onsubmit="return confirm('本当に削除しますか？');">
+              <input type="hidden" name="filename" value="{{ fn }}">
+              <button type="submit" class="btn danger">削除</button>
+            </form>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="muted">画像がありません。</div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+  // ピッカーで選択 → 親へ返す
+  function pick(filename, kind){
+    try{
+      if(window.opener){
+        window.opener.postMessage({type:'wm-pick', filename, kind}, '*');
+      }
+    }finally{
+      window.close();
+    }
+  }
+</script>
+</body>
+</html>
+>>>>>>> origin/import/windows-snapshot

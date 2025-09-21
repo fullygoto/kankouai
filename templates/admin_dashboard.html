@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <!DOCTYPE html>
 <html>
 <head>
@@ -37,3 +38,44 @@
     </div>
 </body>
 </html>
+=======
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>管理ダッシュボード</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { background: #f5f9f8; font-family: 'Segoe UI', 'Noto Sans JP', sans-serif; margin:0;}
+        .container { max-width: 440px; margin:60px auto 0 auto; background:#fff; border-radius:15px; box-shadow:0 4px 22px rgba(22,180,150,0.08); padding: 36px 26px 32px 26px;}
+        h1 { text-align:center; font-size:1.33em; color:#18a772; margin-bottom:30px;}
+        .nav-menu { display: flex; flex-direction:column; gap:22px; }
+        .nav-link {
+            display:flex; align-items:center; gap:17px;
+            background:linear-gradient(90deg, #19a87a 0%, #80e7c1 100%);
+            color:#fff; border-radius:9px; padding:17px 18px; text-decoration:none; font-weight:600;
+            font-size:1.08em; transition:background 0.15s; box-shadow:0 2px 8px rgba(40,200,140,0.07);
+        }
+        .nav-link:hover { background:linear-gradient(90deg,#16cfa8 0%,#28a49b 100%); color:#fff;}
+        .desc {color:#27725a; font-size:0.98em; margin-bottom:19px; text-align:center;}
+        .logout-link { text-align:right; margin-bottom:10px;}
+        .logout-link a { color:#aaa; text-decoration:none; font-size:0.96em;}
+        @media (max-width:500px) {.container {margin:16px 1vw; padding:12px 2vw 10px 2vw;}}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logout-link"><a href="{{ url_for('logout') }}">ログアウト</a></div>
+        <h1>観光AI 管理ダッシュボード</h1>
+        <div class="desc">
+            ようこそ！下記メニューから各管理機能に移動できます。
+        </div>
+        <div class="nav-menu">
+            <a href="{{ url_for('admin_entry') }}" class="nav-link">観光データ登録・編集</a>
+            <a href="{{ url_for('admin_category') }}" class="nav-link">カテゴリー管理</a>
+            <!-- 必要に応じてここに他の管理機能メニューを追加 -->
+        </div>
+    </div>
+</body>
+</html>
+>>>>>>> origin/import/windows-snapshot

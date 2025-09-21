@@ -1,1 +1,23 @@
-[]
+[
+  {
+    "user_id": "shop001",
+    "name": "五島カフェ",
+    "password_hash": "scrypt:32768:8:1$2WnzLOcIletVL9sC$44531ac4b768c8aaaf1377f2cee4bb328920fcf96f9d49e7a52e72ee0b8d46a907621544ec0e316e360f647f39b73c07bcd00645a35d4e481fc05a3fae7ccc49",
+    "role": "shop"
+  },
+  {
+    "user_id": "info@fullygoto.com",
+    "name": "管理者",
+    "password_hash": "scrypt:32768:8:1$eYGcegLwXNkc2Rd9$0af14ea0595c84e9e7d23344b6cb8d9848c0d97ef7015a075a78cb191224055cebb9e35b01ee140086aff8118625efda9a638c2c4d7378c3d0ee20a6a999a49c",
+    "role": "admin",
+    "active": true
+  },
+  {
+    "user_id": "fully",
+    "email": "info@fullygoto.com",
+    "name": "管理者",
+    "password_hash": "scrypt:32768:8:1$EOr9jz12rh6rF19Q$56b86ffef20574bc7d4d31a62492014a991687d41d421d29c1faac9cf53fe7d9bccbba3f5fb0d071cab8c516538040ec72cea3fa927aa99b3ebf7af9f8a3863b",
+    "role": "admin",
+    "active": true
+  }
+]

@@ -9,3 +9,4 @@ flask-talisman>=1.1
 portalocker>=2.8
 redis>=5.0
 Pillow==10.4.0
+pytest>=8.0
