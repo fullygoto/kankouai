@@ -1,3 +1,15 @@
+# --- LINE DECORATOR SAFE BOOTSTRAP (very early) ---
+if '_noop_decorator' not in globals():
+    def _noop_decorator(*a, **kw):
+        def _wrap(fn):
+            return fn
+        return _wrap
+if '_line_add' not in globals():
+    # import時は no-op。create_app 内で本物に差し替える。
+    def _line_add(*a, **kw):
+        return _noop_decorator(*a, **kw)
+# --- /LINE DECORATOR SAFE BOOTSTRAP ---
+
 # --- SAFE BOOTSTRAP (very early) ---
 import os as _os
 from pathlib import Path as _Path
@@ -35,6 +47,14 @@ import secrets          # ← これを追加
 # === Third-Party ===
 from dotenv import load_dotenv
 load_dotenv()
+
+# --- LINE no-op decorator (import-time safe) ---
+def _noop_decorator(*a, **kw):
+    def _wrap(fn):
+        return fn
+    return _wrap
+# --- /LINE no-op ---
+
 
 
 
@@ -146,6 +166,32 @@ def _get_logger():
     return logging.getLogger(__name__)
 
 
+
+# --- media/watermark accessors (read-only phase) ---
+def get_media_root(app_like=None):
+    """
+    MEDIA_ROOT の取得（未設定時は static の兄弟 'media/img' を既定）
+    """
+    try:
+        base = _cfg(app_like, "MEDIA_ROOT", None)
+    except Exception:
+        base = None
+    if base:
+        return base
+    # STATIC_FALLBACK は既に先頭で定義済み
+    from pathlib import Path as __Path
+    return str((__Path(STATIC_FALLBACK).parent / "media" / "img"))
+
+def get_watermark_dir(app_like=None):
+    """
+    WATERMARK_DIR の取得（未設定時は static/watermarks）
+    """
+    default = str(__import__("os").path.join(STATIC_FALLBACK, "watermarks"))
+    try:
+        return _cfg(app_like, "WATERMARK_DIR", default)
+    except Exception:
+        return default
+# --- /media/watermark accessors ---
 def _cfg(key: str, default=None):
     flask_app = _flask_current_app
     if flask_app:
@@ -1012,9 +1058,9 @@ def serve_image(filename):
     from werkzeug.utils import safe_join
     def _find_image_path(fn: str) -> str | None:
         candidates = []
-        if "MEDIA_ROOT" in globals() and globals().get("MEDIA_ROOT"):
-            candidates.append(globals()["MEDIA_ROOT"])
-        for d in {globals().get("IMAGES_DIR"), os.getenv("MEDIA_ROOT", "media/img"), "media/img", "media"}:
+        if "get_media_root(None)" in globals() and globals().get("get_media_root(None)"):
+            candidates.append(globals()["get_media_root(None)"])
+        for d in {globals().get("get_media_root(None)"), os.getenv("get_media_root(None)", "media/img"), "media/img", "media"}:
             if d and d not in candidates:
                 candidates.append(d)
         for base in candidates:
@@ -3170,7 +3216,7 @@ if not (LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET):
     line_bot_api = _NoopAPI()
 # --- /LINE No-Op fallback ---
 
-@handler.add(MessageEvent, message=TextMessage)
+@_line_add(MessageEvent, message=TextMessage)
 def handle_message(event):
     try:
         text = getattr(event.message, "text", "") or ""
@@ -3495,7 +3541,7 @@ def handle_message(event):
 # ==== ここまで：統合ハンドラ ====
 
 
-@handler.add(FollowEvent)
+@_line_add(FollowEvent)
 def on_follow(event):
     """
     友だち追加（またはブロック解除）時の最初の挨拶メッセージを送る。
@@ -3542,7 +3588,7 @@ def on_follow(event):
             app.logger.error(f"[follow] reply failed: {e}")
 
 # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
-@handler.add(MessageEvent, message=LocationMessage)
+@_line_add(MessageEvent, message=LocationMessage)
 def on_location(event):
     # 0) ミュート／一時停止ゲート（先頭で早期return）
     try:
@@ -3627,7 +3673,7 @@ def on_location(event):
 
 from urllib.parse import parse_qs
 
-@handler.add(PostbackEvent)
+@_line_add(PostbackEvent)
 def on_postback(event):
     # 0) ミュート／一時停止ゲート
     try:
@@ -11288,6 +11334,29 @@ def __safe_create_app():
             flask_app.add_url_rule("/", "index", lambda: redirect(url_for("main.login")))
     except Exception:
         pass
+
+    # -- LINE init (lazy) --
+    try:
+        import os
+        from linebot import LineBotApi, WebhookHandler
+        tok = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+        sec = os.getenv("LINE_CHANNEL_SECRET")
+        if tok and sec:
+            _line_api = LineBotApi(tok)
+            _line_handler = WebhookHandler(sec)
+            def _line_add(*a, **kw):  # real decorator
+                return _line_handler.add(*a, **kw)
+        else:
+            _line_api = None
+            _line_handler = None
+            def _line_add(*a, **kw):  # no-op fallback
+                return _noop_decorator(*a, **kw)
+    except Exception:
+        _line_api = None
+        _line_handler = None
+        def _line_add(*a, **kw):
+            return _noop_decorator(*a, **kw)
+    # -- /LINE init --
 
     return flask_app
 
