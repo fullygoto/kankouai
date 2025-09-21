@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>{{ folder }} / 画像を選択</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:#f6faf9;padding:20px}
+    .container{background:#fff;max-width:1200px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;text-decoration:none}
+    .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+    .btn.danger{background:#e35}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:12px}
+    .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff;display:flex;flex-direction:column;gap:8px}
+    .name{font-size:.92em;color:#345;word-break:break-all}
+    .muted{color:#567;font-size:.9em}
+    img{max-width:100%;height:150px;object-fit:cover;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+    .tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .input{flex:1;min-width:220px;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <h1 style="margin:0">フォルダ：{{ folder }}</h1>
+      <div class="row">
+        <a class="btn ghost" href="{{ url_for('admin_media_folders', next=next, entry_id=entry_id) }}">← フォルダ一覧</a>
+        <a class="btn ghost" href="{{ next or url_for('admin_entry', edit=entry_id) }}">エントリに戻る</a>
+      </div>
+    </div>
+
+    <div class="tools" style="margin-top:10px">
+      <input id="q" class="input" type="search" placeholder="ファイル名で絞り込み">
+      <span class="muted" id="counts">0 件</span>
+    </div>
+
+    <div id="grid" class="grid">
+      {% if images and images|length %}
+        {# ts がある場合は新しい順で #}
+        {% for f in images|sort(attribute='ts', reverse=True) if f.ts is defined %}
+          <div class="card" data-name="{{ f.name|lower }}">
+            <a href="{{ f.url or url_for('admin_media_img', filename=f.name, folder=folder) }}" target="_blank" rel="noopener">
+              <img src="{{ f.url or url_for('admin_media_img', filename=f.name, folder=folder) }}" loading="lazy" alt="{{ f.name }}">
+            </a>
+            <div class="name">{{ f.name }}</div>
+            <div class="muted">登録日: {{ f.ts }}</div>
+            <div class="row">
+              <!-- この画像を使う：entry にアタッチ -->
+              <form method="post" action="{{ url_for('admin_entry_attach') }}">
+                <input type="hidden" name="entry_id" value="{{ entry_id }}">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <input type="hidden" name="next" value="{{ next or url_for('admin_entry', edit=entry_id) }}">
+                <button class="btn" type="submit">この画像を使う</button>
+              </form>
+              <!-- 透かし編集 -->
+              <a class="btn ghost" href="{{ url_for('admin_watermark_edit', filename=f.name) }}" target="_blank" rel="noopener">編集</a>
+              <!-- 削除 -->
+              <form method="post" action="{{ url_for('admin_media_delete') }}" onsubmit="return confirm('削除しますか？');">
+                <input type="hidden" name="filename" value="{{ f.name }}">
+                <button class="btn danger" type="submit">削除</button>
+              </form>
+            </div>
+          </div>
+        {% endfor %}
+        {# ts がない素朴な配列（ファイル名のみ）の場合 #}
+        {% for name in images if name is string %}
+          <div class="card" data-name="{{ name|lower }}">
+            <a href="{{ url_for('admin_media_img', filename=name, folder=folder) }}" target="_blank" rel="noopener">
+              <img src="{{ url_for('admin_media_img', filename=name, folder=folder) }}" loading="lazy" alt="{{ name }}">
+            </a>
+            <div class="name">{{ name }}</div>
+            <div class="row">
+              <form method="post" action="{{ url_for('admin_entry_attach') }}">
+                <input type="hidden" name="entry_id" value="{{ entry_id }}">
+                <input type="hidden" name="filename" value="{{ name }}">
+                <input type="hidden" name="next" value="{{ next or url_for('admin_entry', edit=entry_id) }}">
+                <button class="btn" type="submit">この画像を使う</button>
+              </form>
+              <a class="btn ghost" href="{{ url_for('admin_watermark_edit', filename=name) }}" target="_blank" rel="noopener">編集</a>
+              <form method="post" action="{{ url_for('admin_media_delete') }}" onsubmit="return confirm('削除しますか？');">
+                <input type="hidden" name="filename" value="{{ name }}">
+                <button class="btn danger" type="submit">削除</button>
+              </form>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="muted">画像が見つかりません。</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const q=document.getElementById('q');
+      const grid=document.getElementById('grid');
+      const counts=document.getElementById('counts');
+      function update(){
+        const term=(q.value||'').toLowerCase();
+        let shown=0;
+        [...grid.children].forEach(card=>{
+          const name=(card.querySelector('.name')?.textContent||'').toLowerCase();
+          const ok=!term || name.includes(term);
+          card.style.display=ok?'':'none';
+          if(ok) shown++;
+        });
+        counts.textContent = shown + ' 件';
+      }
+      q.addEventListener('input', update);
+      update();
+    })();
+  </script>
+</body>
+</html>

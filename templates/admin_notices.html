@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>お知らせ管理</title>
+    <style>
+        body {font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #f6faf9;}
+        .container {background:#fff; padding:28px 32px; margin:40px auto; max-width:700px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d;}
+        label {display:inline-block; min-width:70px; font-weight: 500;}
+        input[type=text], input[type=date], textarea {margin-bottom:12px; width:98%; padding: 6px 10px; font-size:1em; border-radius:7px; border: 1px solid #b0c4d7;}
+        textarea {resize:vertical;}
+        .add-btn {padding: 7px 24px; font-size:1em; border-radius:7px; background: #2a8ed8; color:#fff; border:none;}
+        .notice-card {background:#f7faf7; margin:14px 0; border-radius:11px; padding:14px 16px; box-shadow: 0 2px 6px #e0e6ed30;}
+        .card-label {color:#2a8ed8; font-size:0.98em;}
+        .top-btn {padding:7px 18px; margin-bottom:16px; font-size:1em; border-radius:7px; background:#e4ebf6; color:#217; border:1px solid #c0d0e0;}
+        .del-btn {background: #fff; color: #d76; border: 1px solid #eaa; border-radius: 7px; padding:7px 18px;}
+        .del-btn:hover {background:#fee;}
+        .edit-btn {padding: 7px 18px; background: #6abf4b; color: #fff; border: none; border-radius: 7px;}
+    </style>
+    <script>
+        function onCategoryChange() {
+            var cat = document.getElementById('category_select').value;
+            // イベント・特売は期間入力、その他は有効期限のみ
+            document.getElementById('period_fields').style.display = (cat === 'イベント' || cat === '特売') ? 'block' : 'none';
+            document.getElementById('expire_field').style.display = (cat !== 'イベント' && cat !== '特売') ? 'block' : 'none';
+        }
+        window.onload = function() { onCategoryChange(); }
+    </script>
+</head>
+{% include '_back_to_data.html' %}
+<body>
+<div class="container">
+    <a href="{{ url_for('admin_entry') }}" class="top-btn">← 管理画面トップに戻る</a>
+    <h1>お知らせ・イベント・特売管理</h1>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul>
+        {% for message in messages %}
+          <li style="color:green; font-weight:500;">{{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+
+    <form method="post">
+        {% if edit_notice %}
+        <input type="hidden" name="edit_id" value="{{ edit_notice.id }}">
+        {% endif %}
+        <label>タイトル</label><br>
+        <input type="text" name="title" value="{{ edit_notice.title if edit_notice else '' }}" required><br>
+        <label>内容</label><br>
+        <textarea name="content" rows="3" required>{{ edit_notice.content if edit_notice else '' }}</textarea><br>
+        <label>カテゴリ</label>
+        <select name="category" id="category_select" onchange="onCategoryChange()">
+            {% set notice_cats = ["イベント", "特売", "お知らせ"] %}
+            {% for c in notice_cats %}
+            <option value="{{ c }}" {% if edit_notice and edit_notice.category == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+        </select><br>
+        <label>画像URL</label><br>
+        <input type="text" name="image_url" value="{{ edit_notice.image_url if edit_notice else '' }}"><br>
+
+        <!-- イベント・特売用：期間 -->
+        <div id="period_fields" style="display:none;">
+            <label>開始日</label><br>
+            <input type="date" name="start_date" value="{{ edit_notice.start_date if edit_notice and edit_notice.start_date }}"><br>
+            <label>終了日</label><br>
+            <input type="date" name="end_date" value="{{ edit_notice.end_date if edit_notice and edit_notice.end_date }}"><br>
+        </div>
+        <!-- お知らせ用：有効期限 -->
+        <div id="expire_field" style="display:none;">
+            <label>有効期限</label><br>
+            <input type="date" name="expire_date" value="{{ edit_notice.expire_date if edit_notice and edit_notice.expire_date }}"><br>
+        </div>
+
+        <button class="add-btn" type="submit">{% if edit_notice %}更新{% else %}お知らせ追加{% endif %}</button>
+        {% if edit_notice %}
+        <a href="{{ url_for('admin_notices') }}" class="top-btn" style="background:#ffe;">キャンセル</a>
+        {% endif %}
+    </form>
+    <hr>
+    <h2>登録済みお知らせ</h2>
+    {% for n in notices %}
+      <div class="notice-card">
+        <span class="card-label">タイトル：</span>{{ n.title }}<br>
+        <span class="card-label">カテゴリ：</span>{{ n.category }}<br>
+        <span class="card-label">日付：</span>{{ n.date }}<br>
+        <span class="card-label">内容：</span>{{ n.content }}<br>
+        {% if n.image_url %}
+        <span class="card-label">画像：</span><a href="{{ n.image_url }}" target="_blank">画像を見る</a><br>
+        {% endif %}
+        {% if n.category == "イベント" or n.category == "特売" %}
+            <span class="card-label">期間：</span>
+            {{ n.start_date if n.start_date }} ～ {{ n.end_date if n.end_date }}<br>
+        {% elif n.expire_date %}
+            <span class="card-label">有効期限：</span>{{ n.expire_date }}<br>
+        {% endif %}
+        <form method="get" action="{{ url_for('admin_notices') }}" style="display:inline;">
+            <input type="hidden" name="edit" value="{{ n.id }}">
+            <button type="submit" class="edit-btn">編集</button>
+        </form>
+        <form method="post" action="{{ url_for('delete_notice', idx=n.id) }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
+            <button type="submit" class="del-btn">削除</button>
+        </form>
+      </div>
+    {% endfor %}
+</div>
+</body>
+</html>

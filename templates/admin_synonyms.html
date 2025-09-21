@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>類義語（シノニム）管理</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --blue:#2a8ed8; --line:#e6edf3; --bg:#f6faf9; --muted:#789;
+  }
+  body{font-family:'Segoe UI','メイリオ',sans-serif;background:var(--bg);margin:0}
+  .topbar{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+  .topbar h1{font-size:18px;margin:0}
+  .btn{display:inline-block;border:1px solid #cfe1ef;border-radius:10px;padding:7px 12px;text-decoration:none;color:var(--blue);background:#fff;cursor:pointer}
+  .btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+  .btn.ghost{background:#fff;color:var(--blue);border:1px solid #cfe1ef}
+  .btn.danger{border-color:#ffb3b3;color:#b30000;background:#fff}
+  .container{max-width:980px;margin:18px auto;padding:0 14px 24px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 3px 14px #b7d3e022}
+  h2{font-size:16px;margin:0 0 10px}
+  label{font-weight:600}
+  textarea,input[type=text]{width:100%;box-sizing:border-box;border:1px solid #bfd2e2;border-radius:8px;padding:8px 10px;font-size:14px}
+  textarea{min-height:72px;resize:vertical}
+  table{width:100%;border-collapse:collapse}
+  th,td{border-bottom:1px solid #eef3f7;padding:8px;text-align:left;vertical-align:top}
+  th{background:#f7fbff;position:sticky;top:56px;z-index:5}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:760px){.row{grid-template-columns:1fr}}
+  .tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .muted{color:var(--muted)}
+  .right{display:flex;gap:8px;align-items:center}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center; margin:8px 0}
+  .grow{flex:1}
+  .count{font-size:12px;color:#567}
+  .chip{display:inline-block;border:1px dashed #cfe1ef;border-radius:999px;padding:2px 8px;margin:2px;color:#567;font-size:12px}
+</style>
+<script>
+/* ===== ユーティリティ ===== */
+function normalizeSynStr(str){
+  if(!str) return "";
+  // 全角読点/カンマや全角空白を正規化 → 分割 → トリム＆重複除去 → カンマ連結
+  let s = str.replace(/[、，]/g, ",").replace(/\u3000/g, " ");
+  const parts = s.split(/[, \n\r\t]+/).map(v=>v.trim()).filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  for(const p of parts){
+    if(!seen.has(p)){
+      seen.add(p);
+      out.push(p);
+    }
+  }
+  return out.join(", ");
+}
+function getRows(){
+  return Array.from(document.querySelectorAll("#syn_tbody tr"));
+}
+function addRow(tag = "", syns = ""){
+  const tbody = document.getElementById('syn_tbody');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td style="width:26%"><input type="text" name="tag" placeholder="例: 教会" value="${escapeHtml(tag)}"></td>
+    <td>
+      <textarea name="synonyms_temp" placeholder="カンマ区切り（例: チャーチ, Church)">${escapeHtml(syns)}</textarea>
+      <div class="tools" style="margin-top:4px">
+        <span class="muted">例：<span class="chip">チャーチ</span><span class="chip">Church</span></span>
+        <button type="button" class="btn ghost" onclick="dedupeRow(this)">重複/空白を整理</button>
+        <button type="button" class="btn ghost" onclick="sortRowSynonyms(this)">シノニムA→Z</button>
+      </div>
+    </td>
+    <td style="width:1%;white-space:nowrap">
+      <button type="button" class="btn danger" onclick="delRow(this)">削除</button>
+    </td>`;
+
+  // 先頭に差し込む（最上部に新規行を表示）
+  if (tbody.firstChild) {
+    tbody.insertBefore(tr, tbody.firstChild);
+  } else {
+    tbody.appendChild(tr);
+  }
+
+  // 使い勝手向上（フィルタ中でも見える・件数更新・フォーカス・軽いスクロール）
+  tr.style.display = "";
+  updateCount();
+  const inp = tr.querySelector('input[name="tag"]');
+  if (inp) inp.focus();
+  try { tr.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch(e) {}
+}
+function delRow(btn){
+  const tr = btn.closest('tr');
+  tr.parentNode.removeChild(tr);
+  updateCount();
+}
+function dedupeRow(btn){
+  const tr = btn.closest('tr');
+  const ta = tr.querySelector('textarea');
+  ta.value = normalizeSynStr(ta.value);
+}
+function sortRowSynonyms(btn){
+  const tr = btn.closest('tr');
+  const ta = tr.querySelector('textarea');
+  const s = normalizeSynStr(ta.value);
+  const arr = s ? s.split(/\s*,\s*/):[];
+  arr.sort((a,b)=>a.localeCompare(b,'ja'));
+  ta.value = arr.join(", ");
+}
+function dedupeAll(){
+  getRows().forEach(tr=>{
+    const ta = tr.querySelector('textarea');
+    ta.value = normalizeSynStr(ta.value);
+  });
+}
+function sortRows(){
+  const tbody = document.getElementById('syn_tbody');
+  const rows = getRows();
+  rows.sort((a,b)=>{
+    const ta = (a.querySelector('input[name="tag"]').value || "").trim();
+    const tb = (b.querySelector('input[name="tag"]').value || "").trim();
+    return ta.localeCompare(tb, 'ja');
+  });
+  rows.forEach(r=>tbody.appendChild(r));
+}
+function filterRows(q){
+  q = (q||"").trim();
+  const rows = getRows();
+  if(!q){ rows.forEach(tr=>tr.style.display=""); return; }
+  rows.forEach(tr=>{
+    const tag = (tr.querySelector('input[name="tag"]').value||"");
+    const syn = (tr.querySelector('textarea').value||"");
+    const hit = tag.indexOf(q) >= 0 || syn.indexOf(q) >= 0;
+    tr.style.display = hit ? "" : "none";
+  });
+}
+function reindexSynonyms(){
+  const rows = getRows();
+  rows.forEach((tr,i)=>{
+    const ta = tr.querySelector('textarea');
+    ta.name = `synonyms_${i}`;
+  });
+}
+function confirmSave(e){
+  // 空タグの行を除去
+  getRows().forEach(tr=>{
+    const tag = (tr.querySelector('input[name="tag"]').value||"").trim();
+    if(!tag){ tr.remove(); }
+  });
+  // 正規化
+  dedupeAll();
+  // 重複タグ検出
+  const rows = getRows();
+  const seen = new Set();
+  for(const tr of rows){
+    const tag = tr.querySelector('input[name="tag"]').value.trim();
+    if(seen.has(tag)){
+      alert(`同じタグが重複しています：「${tag}」\n重複を解消してから保存してください。`);
+      e.preventDefault();
+      return;
+    }
+    seen.add(tag);
+  }
+  // 連番付け直し（/admin/synonyms の受け口に合わせる）
+  reindexSynonyms();
+  // 件数表示更新
+  updateCount();
+}
+function clearAll(){
+  if(confirm("すべての行を削除し、辞書を空にしますか？")){
+    document.getElementById('syn_tbody').innerHTML = "";
+    updateCount();
+  }
+}
+function addN(n){
+  for(let i=0;i<n;i++) addRow();
+  updateCount();
+}
+function updateCount(){
+  const c = getRows().length;
+  const label = document.getElementById('tag_count');
+  if(label) label.textContent = c.toString();
+}
+function escapeHtml(s){
+  return (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+window.addEventListener('DOMContentLoaded', updateCount);
+</script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>類義語（シノニム）管理</h1>
+    <div class="right">
+      <a class="btn" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+    </div>
+  </div>
+
+  <div class="container">
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="card" style="background:#f7fffb;border-color:#bfe9d2">
+          {% for m in messages %}<div>{{ m }}</div>{% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <!-- インポート / エクスポート（現行機能維持） -->
+    <div class="card">
+      <h2>インポート / エクスポート</h2>
+      <div class="row">
+        <form method="post" action="{{ url_for('admin_synonyms_import') }}" enctype="multipart/form-data">
+          <label>ファイルから（synonyms.json）</label>
+          <input type="file" name="json_file" accept=".json">
+          <div class="tools">
+            <button type="submit" class="btn">インポート</button>
+            <span class="muted">※既存は上書きされます</span>
+          </div>
+        </form>
+        <form method="post" action="{{ url_for('admin_synonyms_import') }}">
+          <label>テキストで貼り付け</label>
+          <textarea name="json_text" placeholder='{"タグ":[ "別名", "同義語" ], ...}'></textarea>
+          <div class="tools">
+            <button type="submit" class="btn">インポート</button>
+            <span class="muted">※既存は上書きされます</span>
+          </div>
+        </form>
+      </div>
+      <div class="tools">
+        <a class="btn" href="{{ url_for('admin_synonyms_export') }}">エクスポート（ダウンロード）</a>
+        <span class="muted">編集前にバックアップ推奨</span>
+      </div>
+    </div>
+
+    <!-- AI 自動生成（現行機能維持） -->
+    <div class="card">
+      <h2>AIで自動生成（登録タグに沿って）</h2>
+      <form method="post" action="{{ url_for('admin_synonyms_autogen') }}">
+        <div class="row">
+          <div>
+            <label>対象</label><br>
+            <label><input type="radio" name="target" value="missing" checked> 辞書に無いタグのみ</label><br>
+            <label><input type="radio" name="target" value="all"> すべての登録タグ</label>
+          </div>
+          <div>
+            <label>更新モード</label><br>
+            <label><input type="radio" name="mode" value="append" checked> 追記（既存に加える）</label><br>
+            <label><input type="radio" name="mode" value="overwrite"> 上書き（置き換え）</label>
+          </div>
+        </div>
+        <div class="tools">
+          <button type="submit" class="btn">AIで生成＆登録</button>
+          <span class="muted">※OpenAI APIキーが必要。大きい辞書は時間がかかる場合があります。</span>
+        </div>
+      </form>
+    </div>
+
+    <!-- 編集（新機能） -->
+    <form method="post" action="{{ url_for('admin_synonyms') }}" onsubmit="confirmSave(event)">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <h2>現在の辞書（<span id="tag_count">{{ (synonyms|length) if synonyms else 0 }}</span> タグ）— 直接編集できます</h2>
+          <div class="toolbar">
+            <input class="btn grow" type="text" placeholder="タグ / シノニムを検索" oninput="filterRows(this.value)">
+            <button type="button" class="btn ghost" onclick="addRow()">＋ 行を追加</button>
+            <button type="button" class="btn ghost" onclick="addN(5)">＋5 行</button>
+            <button type="button" class="btn ghost" onclick="sortRows()">タグA→Z</button>
+            <button type="button" class="btn ghost" onclick="dedupeAll()">全行のシノニム整理</button>
+            <button type="button" class="btn danger" onclick="clearAll()">全削除</button>
+            <button type="submit" class="btn primary">保存</button>
+          </div>
+        </div>
+
+        <table>
+          <thead>
+            <tr><th>タグ</th><th>シノニム（カンマ区切り）</th><th style="width:1%"></th></tr>
+          </thead>
+          <tbody id="syn_tbody">
+            {% if synonyms %}
+              {% for tag, syns in synonyms.items() %}
+                <tr>
+                  <td style="width:26%"><input type="text" name="tag" value="{{ tag }}"></td>
+                  <td>
+                    <textarea name="synonyms_{{ loop.index0 }}">{{ (", ".join(syns)) if syns else "" }}</textarea>
+                    <div class="tools" style="margin-top:4px">
+                      <span class="muted">例：<span class="chip">別名</span><span class="chip">表記ゆれ</span></span>
+                      <button type="button" class="btn ghost" onclick="dedupeRow(this)">重複/空白を整理</button>
+                      <button type="button" class="btn ghost" onclick="sortRowSynonyms(this)">シノニムA→Z</button>
+                    </div>
+                  </td>
+                  <td style="white-space:nowrap">
+                    <button type="button" class="btn danger" onclick="delRow(this)">削除</button>
+                  </td>
+                </tr>
+              {% endfor %}
+            {% endif %}
+          </tbody>
+        </table>
+
+        {% if not synonyms %}
+          <div class="muted" style="margin-top:10px">
+            辞書が空です。「＋ 行を追加」で作成するか、上の「インポート / AI生成」をご利用ください。
+          </div>
+        {% endif %}
+
+        <div class="tools" style="margin-top:10px">
+          <button type="button" class="btn ghost" onclick="addRow()">＋ 行を追加</button>
+          <button type="submit" class="btn primary">保存</button>
+        </div>
+        <div class="muted">行を削除すると、そのタグは辞書から削除されます。シノニムの個別削除はテキストから該当語を消してください。</div>
+      </div>
+    </form>
+  </div>
+</body>
+</html>

@@ -1,0 +1,19 @@
+<!-- templates/_back_to_data.html -->
+<style>
+  .back-to-data{
+    position: fixed; right: 16px; top: 12px; z-index: 9999;
+  }
+  .back-to-data a{
+    display:inline-block; padding:8px 14px; border-radius:999px;
+    background:#2a8ed8; color:#fff; text-decoration:none; font-weight:600;
+    box-shadow:0 4px 12px rgba(42,142,216,.25);
+  }
+  .back-to-data a:hover{ opacity:.9 }
+  @media (max-width:640px){
+    .back-to-data{ right:10px; top:10px }
+    .back-to-data a{ padding:6px 10px; font-size:13px }
+  }
+</style>
+<div class="back-to-data">
+  <a href="{{ url_for('admin_entry') }}" title="観光データ管理へ戻る">データ管理に戻る</a>
+</div>

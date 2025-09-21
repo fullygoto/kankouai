@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>観光データ管理</title>
+    <style>
+        body {font-family: 'Segoe UI', 'メイリオ', sans-serif; background: #f6faf9;}
+        .container {background:#fff; padding:30px 32px; margin:40px auto; max-width:980px; border-radius:17px; box-shadow: 0 4px 20px #b7d3e04d;}
+        label {display:inline-block; min-width:70px; font-weight: 500;}
+        input[type=text], textarea, select {margin-bottom:12px; width:98%; padding: 6px 10px; font-size:1em; border-radius:7px; border: 1px solid #b0c4d7; background:#fff;}
+        textarea {resize:vertical;}
+        .entry-card {background:#f7faf7; margin:12px 0; border-radius:12px; padding:14px 16px; box-shadow: 0 2px 6px #e0e6ed30;}
+        .entry-actions {margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;}
+        .card-label {color:#2a8ed8; font-size:0.98em;}
+        .nav {margin-bottom:20px;}
+        .nav a {margin-right:16px; font-size:1em; color:#2a8ed8; text-decoration:none; font-weight:500;}
+        .nav a:hover {text-decoration: underline;}
+        .add-btn {padding: 7px 24px; font-size:1em; border-radius:7px; background: #2a8ed8; color:#fff; border:none; margin-top: 8px;}
+        .del-btn {background: #fff; color: #d76; border: 1px solid #eaa; border-radius: 7px; padding:7px 18px;}
+        .del-btn:hover {background:#fee;}
+        .row {margin-bottom:10px;}
+        .extra-row {margin:6px 0;}
+        .mini-note {font-size:0.92em; color:#888;}
+        hr {border: 1px solid #e7eef5;}
+        .filterbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:8px 0 14px}
+        .filterbar input[type=text], .filterbar select{width:auto;min-width:160px}
+        .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef6ff;color:#2a8ed8;font-size:.9em}
+        .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+        .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+        .pager{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 10px}
+        .pager .btn{padding:6px 10px}
+        .pager .info{color:#456;font-size:.92em}
+        ul.compact {margin:4px 0 10px 18px; padding:0;}
+        ul.compact li {margin:2px 0;}
+        table.kv {border-collapse: collapse; margin:4px 0 8px 0;}
+        table.kv td {border:1px solid #e3e9ee; padding:4px 6px; font-size:0.92em}
+        table.kv td.k {background:#f6f9fb; min-width:120px; font-weight:500; color:#345;}
+        .muted{color:#789;font-size:.92em}
+        .thumb{max-width:160px;height:auto;border:1px solid #ddd;border-radius:8px}
+        .imgmeta{font-size:.88em;color:#567;margin-top:4px}
+        .nearby-ctl {display:flex;gap:8px;align-items:center}
+        .nearby-ctl .muted{margin-left:-4px}
+        @media (max-width: 700px) {
+            .container {padding:10px;}
+            input[type=text], textarea {width:96%;}
+            .filterbar input[type=text], .filterbar select {min-width:130px}
+        }
+
+        /* === 追加：透かし生成済みから選ぶ専用UI（必要時のみ出現） === */
+        .wm-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0 8px}
+        .wm-toolbar .grow{flex:1}
+        .wm-search{width:100%;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
+        .wm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:10px}
+        .wm-card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
+        .wm-card .name{display:block;margin-top:6px;font-size:.92em;color:#345;word-break:break-all}
+        .wm-card .small{font-size:.9em;color:#567;margin-top:4px}
+        .wm-variant{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+        .wm-variant button{padding:6px 10px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+        .wm-variant button.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+        .wm-preview{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+        .wm-counts{font-size:.9em;color:#567}
+    </style>
+
+    <script>
+    // ===== 共通UI =====
+    function toggleSection(id, enable){
+        const sec = document.getElementById(id);
+        if(!sec) return;
+        sec.style.display = enable ? 'block' : 'none';
+        sec.querySelectorAll('input,select,textarea').forEach(el => { el.disabled = !enable; });
+    }
+
+    function addExtraRow(targetId) {
+        const wrap = document.getElementById(targetId);
+        const div = document.createElement('div');
+        div.className = 'extra-row';
+        div.innerHTML = `
+            <input name="extras_key[]" placeholder="項目"> ＝
+            <input name="extras_val[]" placeholder="内容">
+            <button type="button" onclick="this.parentNode.remove()">－</button>
+        `;
+        wrap.appendChild(div);
+    }
+
+    function validateAreas(formId) {
+        const form = document.getElementById(formId);
+        const checks = form.querySelectorAll('input[name="areas"]:checked');
+        if (checks.length === 0) { alert('エリアは1つ以上選択してください。'); return false; }
+        return true;
+    }
+
+    // ===== 画像メタ（サイズ & 容量表示） =====
+    function _formatBytes(bytes){
+        if(!isFinite(bytes) || bytes <= 0) return '';
+        const units = ['B','KB','MB','GB','TB'];
+        let i = 0, n = bytes;
+        while(n >= 1024 && i < units.length - 1){ n /= 1024; i++; }
+        return (n >= 100 ? Math.round(n) : (n >= 10 ? n.toFixed(1) : n.toFixed(2))) + ' ' + units[i];
+    }
+
+    async function _fetchContentLength(url){
+        try{
+            const res = await fetch(url, {method:'HEAD', credentials:'same-origin'});
+            const len = res.headers.get('Content-Length') || res.headers.get('content-length');
+            if(len) return parseInt(len, 10);
+        }catch(_e){}
+        return null;
+    }
+
+    function _ensureMetaHost(img){
+        let host = img.nextElementSibling;
+        if(!(host && host.classList.contains('imgmeta'))){
+            host = document.createElement('div');
+            host.className = 'imgmeta';
+            img.parentNode.insertBefore(host, img.nextSibling);
+        }
+        return host;
+    }
+
+    async function annotateImageMeta(img){
+        if(!img) return;
+        const host = _ensureMetaHost(img);
+        host.textContent = '画像情報を取得中…';
+        const fullUrl = img.getAttribute('data-fullsrc') || img.currentSrc || img.src;
+
+        const contentLength = await _fetchContentLength(fullUrl);
+        const sizeText = contentLength ? _formatBytes(contentLength) : '';
+
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if((!w || !h) || img.getAttribute('data-use-full') === '1'){
+            try{
+                await new Promise((resolve, reject)=>{
+                    const probe = new Image();
+                    probe.decoding = 'async';
+                    probe.referrerPolicy = 'no-referrer';
+                    probe.onload = ()=>{ w = probe.naturalWidth; h = probe.naturalHeight; resolve(); };
+                    probe.onerror = reject;
+                    probe.src = fullUrl + (fullUrl.includes('?') ? '&' : '?') + '_ts=' + Date.now();
+                });
+            }catch(_e){}
+        }
+        const dimsText = (w && h) ? (w + '×' + h + ' px') : '';
+        host.textContent = [dimsText, sizeText].filter(Boolean).join(' ・ ') || '画像情報なし';
+    }
+
+    function annotateAllImages(){
+        document.querySelectorAll('#admin-image-preview-t, #admin-image-preview-s').forEach(img=>{
+            if(!img.getAttribute('data-fullsrc')) img.setAttribute('data-fullsrc', img.currentSrc || img.src);
+            annotateImageMeta(img);
+        });
+        document.querySelectorAll('.entry-card a[target="_blank"] > img.thumb, .entry-card a[target="_blank"] > img').forEach(img=>{
+            const anchor = (img.parentElement && img.parentElement.tagName === 'A') ? img.parentElement : null;
+            if(anchor){
+                img.classList.add('thumb');
+                img.setAttribute('data-fullsrc', anchor.getAttribute('href') || '');
+                img.setAttribute('data-use-full', '1');
+                annotateImageMeta(img);
+            }
+        });
+    }
+
+    // ====== フィルタ & ソート & ページネーション ======
+    let PAGING = {page:1, size:20, totalFiltered:0, totalAll:0};
+    let GEO = {active:false, lat:null, lng:null, radiusKm:3};
+    const _norm = s => (s||'').toString().toLowerCase();
+
+    function haversine(lat1, lon1, lat2, lon2){
+        const R = 6371, toRad = d => d * Math.PI / 180;
+        const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+        const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+        return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function formatDistance(km){
+        if(!isFinite(km)) return '';
+        if(km < 1) return `${Math.round(km*1000)} m`;
+        if(km < 10) return `${km.toFixed(2)} km`;
+        return `${km.toFixed(1)} km`;
+    }
+
+    function startNearby(){
+        if(!navigator.geolocation){ alert('この端末は位置情報に対応していません。'); return; }
+        const r = parseFloat(document.getElementById('near_radius').value || '3');
+        navigator.geolocation.getCurrentPosition(pos=>{
+            GEO = {active:true, lat:pos.coords.latitude, lng:pos.coords.longitude, radiusKm:r};
+            filterCards();
+        }, err=>{ alert('現在地を取得できませんでした: ' + err.message); },
+        {enableHighAccuracy:true, timeout:10000, maximumAge:30000});
+    }
+    function clearNearby(){
+        GEO = {active:false, lat:null, lng:null, radiusKm:3};
+        document.querySelectorAll('.dist-badge').forEach(n=>n.remove());
+        filterCards(false);
+    }
+
+    function updateDistanceBadges(){
+        Array.from(document.querySelectorAll('.entry-card')).forEach(card=>{
+            const old = card.querySelector('.dist-badge'); if(old) old.remove();
+            if(!(GEO.active && card.style.display !== 'none')) return;
+            const d = parseFloat(card.dataset.distance || 'NaN'); if(!isFinite(d)) return;
+            const host = card.querySelector('.entry-actions')?.parentNode || card;
+            const badge = document.createElement('div');
+            badge.className = 'muted dist-badge';
+            badge.style.margin = '6px 0';
+            badge.textContent = '現在地から約 ' + formatDistance(d);
+            const actions = card.querySelector('.entry-actions');
+            if(actions) host.insertBefore(badge, actions); else host.appendChild(badge);
+        });
+    }
+
+    function filterCards(resetPage=true){
+        const q = _norm(document.getElementById('f_q').value);
+        const cat = document.getElementById('f_cat').value;
+        const area = document.getElementById('f_area').value;
+        const tagsRaw = document.getElementById('f_tag').value.trim();
+        const sort = document.getElementById('f_sort').value;
+        const requireTags = tagsRaw ? tagsRaw.split(',').map(s=>s.trim()).filter(Boolean).map(_norm) : [];
+        const list = Array.from(document.querySelectorAll('.entry-card'));
+        let filtered = [];
+
+        list.forEach(card=>{
+            const txt = card.dataset.text;
+            const dcat = card.dataset.category;
+            const dtags = (card.dataset.tags||'').split(',').map(_norm);
+            const dareas = (card.dataset.areas||'').split(',').map(s=>s.trim());
+            let ok = true;
+            if(q && !txt.includes(q)) ok = false;
+            if(cat && dcat !== cat) ok = false;
+            if(area && !dareas.includes(area)) ok = false;
+            if(requireTags.length){ for(const t of requireTags){ if(!dtags.includes(t)){ ok = false; break; } } }
+            card.style.display = 'none';
+            if(ok) filtered.push(card);
+        });
+
+        if(GEO.active && GEO.lat!=null && GEO.lng!=null){
+            const picked = [];
+            filtered.forEach(card=>{
+                const la = parseFloat(card.dataset.lat || 'NaN');
+                const lo = parseFloat(card.dataset.lng || 'NaN');
+                if(!isFinite(la) || !isFinite(lo)) return;
+                const d = haversine(GEO.lat, GEO.lng, la, lo);
+                card.dataset.distance = d.toFixed(6);
+                if(d <= GEO.radiusKm) picked.push(card);
+            });
+            filtered = picked;
+        }else{
+            filtered.forEach(card=>{ delete card.dataset.distance; });
+        }
+
+        filtered.sort((a,b)=>{
+            if(sort==='title_asc') return a.dataset.title.localeCompare(b.dataset.title, 'ja');
+            if(sort==='title_desc') return b.dataset.title.localeCompare(a.dataset.title, 'ja');
+            if(sort==='cat_asc'){ const c = a.dataset.category.localeCompare(b.dataset.category, 'ja'); return c!==0?c:a.dataset.title.localeCompare(b.dataset.title, 'ja'); }
+            if(sort==='cat_desc'){ const c = b.dataset.category.localeCompare(a.dataset.category, 'ja'); return c!==0?c:a.dataset.title.localeCompare(b.dataset.title, 'ja'); }
+            if(sort==='dist_asc'){ return parseFloat(a.dataset.distance || '1e9') - parseFloat(b.dataset.distance || '1e9'); }
+            return 0;
+        });
+
+        PAGING.totalFiltered = filtered.length;
+        PAGING.totalAll = list.length;
+        if(resetPage) PAGING.page = 1;
+
+        applyPagination(filtered);
+        updateDistanceBadges();
+
+        document.querySelectorAll('.entry-card').forEach(card=>{
+            if(card.style.display !== 'none'){
+                const img = card.querySelector('a[target="_blank"] > img.thumb, a[target="_blank"] > img');
+                if(img) annotateImageMeta(img);
+            }
+        });
+    }
+
+    function applyPagination(filtered){
+        const size = PAGING.size;
+        const totalPages = Math.max(1, Math.ceil((filtered.length || 0) / size));
+        if(PAGING.page > totalPages) PAGING.page = totalPages;
+        if(PAGING.page < 1) PAGING.page = 1;
+        const start = (PAGING.page - 1) * size;
+        const end = Math.min(start + size, filtered.length);
+        for(let i=0;i<filtered.length;i++){ filtered[i].style.display = (i>=start && i<end) ? '' : 'none'; }
+        document.getElementById('f_count').textContent = PAGING.totalFiltered;
+        document.getElementById('f_total').textContent = PAGING.totalAll;
+        const info = `ページ ${PAGING.page} / ${totalPages}（1ページ ${size}件）`;
+        document.querySelectorAll('.pager .info').forEach(el=>el.textContent = info);
+        document.querySelectorAll('.pager').forEach(pg=>{
+            pg.querySelector('.prev').disabled = (PAGING.page<=1);
+            pg.querySelector('.next').disabled = (PAGING.page>=totalPages);
+            pg.querySelector('.first').disabled = (PAGING.page<=1);
+            pg.querySelector('.last').disabled = (PAGING.page>=totalPages);
+        });
+    }
+
+    function resetFilters(){
+        document.getElementById('f_q').value=''; document.getElementById('f_cat').value='';
+        document.getElementById('f_area').value=''; document.getElementById('f_tag').value='';
+        document.getElementById('f_sort').value='title_asc';
+        clearNearby(); PAGING.page = 1; filterCards(false);
+    }
+    function onChangePageSize(sel){ PAGING.size = parseInt(sel.value || '20', 10); PAGING.page = 1; filterCards(false); }
+    function gotoPage(which){
+        if(which==='first') PAGING.page = 1;
+        else if(which==='prev') PAGING.page -= 1;
+        else if(which==='next') PAGING.page += 1;
+        else if(which==='last'){ const size = PAGING.size; const totalPages = Math.max(1, Math.ceil(PAGING.totalFiltered / size)); PAGING.page = totalPages; }
+        filterCards(false);
+    }
+
+    // ==== 透かしプレビュー再署名（編集フォーム用） ====
+    async function _signPreview(filename, wm){
+        if(!filename) return null;
+        try{
+            const qs = new URLSearchParams({ filename, wm });
+            const res = await fetch(`/admin/_sign_image?${qs.toString()}`, { credentials: 'same-origin' });
+            const data = await res.json();
+            if(data && data.ok && data.url) return data.url;
+        }catch(e){ console.warn('sign error', e); }
+        return null;
+    }
+
+    // ラジオ名分離 + hidden 同期（観光=t, 店舗=s）
+    function _bindWmRadios(section){
+        const rootId = section==='t' ? 'form_tourism' : 'form_shop';
+        const blockId = section==='t' ? 'wm-block-t' : 'wm-block-s';
+        const imgId = section==='t' ? 'admin-image-preview-t' : 'admin-image-preview-s';
+        const radioName = section==='t' ? 'wm_choice_t' : 'wm_choice_s';
+
+        const root = document.getElementById(rootId);
+        const block = document.getElementById(blockId);
+        const img = document.getElementById(imgId);
+        const master = document.getElementById('wm_choice_master');
+        if(!root || !master) return;
+
+        const filename = block ? (block.dataset.filename || '') : '';
+
+        const radios = root.querySelectorAll(`input[name="${radioName}"]`);
+        radios.forEach(r => {
+            r.addEventListener('change', async (ev)=>{
+                if(ev.target.checked){
+                    const choice = ev.target.value || 'none';
+                    master.value = choice; // hidden に同期
+                    if(filename && img){
+                        const url = await _signPreview(filename, choice);
+                        if(url){
+                            img.src = url; img.setAttribute('data-fullsrc', url);
+                            if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+                        }
+                    }
+                }
+            });
+        });
+
+        const init = root.querySelector(`input[name="${radioName}"]:checked`);
+        if(init){
+            master.value = init.value || master.value;
+            if(filename && img){
+                _signPreview(filename, init.value || 'none').then(url => {
+                    if(url){
+                        img.src = url; img.setAttribute('data-fullsrc', url);
+                        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+                    }
+                });
+            }else if(img){
+                img.setAttribute('data-fullsrc', img.currentSrc || img.src);
+                if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+            }
+        }
+    }
+
+    function _syncWmFromVisible(){
+        const cat = document.getElementById('category_select').value;
+        const master = document.getElementById('wm_choice_master');
+        if(!master) return;
+        if(cat === '観光'){
+            // 観光側はギャラリー/ピッカーで master を更新
+        }else{
+            const p = document.querySelector('#form_shop input[name="wm_choice_s"]:checked');
+            if(p) master.value = p.value;
+        }
+    }
+
+    function onCategoryChange() {
+        const cat = document.getElementById('category_select').value;
+        toggleSection('form_tourism', cat === '観光');
+        toggleSection('form_shop', cat !== '観光');
+        _syncWmFromVisible();
+    }
+
+    /* ========= 観光フォーム：透かし生成済みギャラリー選択 ========= */
+    function _wmBuildVariantName(fn, kind){
+        const dot = fn.lastIndexOf('.'); const base = dot >= 0 ? fn.slice(0, dot) : fn; const ext  = dot >= 0 ? fn.slice(dot) : '';
+        const suf  = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
+        return base + suf + ext;
+    }
+    function _wmVariantUrl(fn, kind){ const vname = _wmBuildVariantName(fn, kind); return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(vname); }
+    function _wmSrcUrl(fn){ return (window.ADMIN_MEDIA_IMG_URL_TMPL || '/admin/media/img/') + encodeURIComponent(fn); }
+
+    function _setSelectedImage(fn, kind){
+        const sel = document.getElementById('selected_image');
+        const master = document.getElementById('wm_choice_master');
+        if(sel) sel.value = fn;
+        if(master) master.value = kind;
+
+        const img = document.getElementById('admin-image-preview-t');
+        if(img){
+            const url = _wmVariantUrl(fn, kind);
+            img.src = url; img.setAttribute('data-fullsrc', url);
+            if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+        }
+    }
+
+    function bindWmGallery(){
+        const q = document.getElementById('wm_q');
+        const grid = document.getElementById('wm_grid');
+        if(!grid) return;
+        const cards = Array.from(grid.querySelectorAll('.wm-card'));
+        const shownCount = document.getElementById('wm_shown');
+        const totalCount = document.getElementById('wm_total');
+
+        function updateCounts(){
+            if(totalCount) totalCount.textContent = cards.length;
+            if(shownCount){ let shown = 0; for(const c of cards){ if(c.style.display !== 'none') shown++; } shownCount.textContent = shown; }
+        }
+        function filter(){
+            const term = (q?.value || '').trim().toLowerCase();
+            for(const c of cards){
+                const name = (c.dataset.name || '').toLowerCase();
+                c.style.display = (!term || name.includes(term)) ? '' : 'none';
+            }
+            updateCounts();
+        }
+        grid.addEventListener('click', (e)=>{
+            const btn = e.target.closest('button[data-fn][data-kind]');
+            if(btn){
+                const fn = btn.getAttribute('data-fn');
+                const kind = btn.getAttribute('data-kind');
+                _setSelectedImage(fn, kind);
+                grid.querySelectorAll('button[data-fn][data-kind]').forEach(b=>b.classList.remove('ghost'));
+                btn.classList.add('ghost');
+            }
+        });
+        q?.addEventListener('input', filter);
+        updateCounts();
+    }
+
+    window.onload = function(){
+        onCategoryChange();
+        filterCards();
+        _bindWmRadios('t'); // 観光側はギャラリー/ピッカー運用のため実質無視
+        _bindWmRadios('s'); // 店舗側はラジオで同期
+        _syncWmFromVisible();
+        annotateAllImages();
+        bindWmGallery();
+    };
+    </script>
+</head>
+
+<body>
+<div class="container">
+    {# --- カテゴリ自動マージ（既存 + fullyGOTO、重複除去＆順序保持） --- #}
+    {% set _base_cats = (cat_list if cat_list is defined else ["観光","飲食","宿泊","診療所","役所","交通","バス","イベント","特売"]) %}
+    {% set _fg_cats = (fg_cat_list if fg_cat_list is defined else ["求人","五島を贈ろう","観光","泊まる","食べる・呑む","きれい","癒し","ショップ","生活","趣味・習い事"]) %}
+    {% set _ns = namespace(cats=_base_cats[:]) %}
+    {% for c in _fg_cats %}{% if c not in _ns.cats %}{% set _ = _ns.cats.append(c) %}{% endif %}{% endfor %}
+    {% set cat_list = _ns.cats %}
+
+    {% if area_opts is not defined %}{% set area_opts = ["五島市","新上五島町","宇久町","小値賀町"] %}{% endif %}
+    {% if entries is not defined %}{% set entries = [] %}{% endif %}
+
+    {% if role == "admin" %}
+    <div class="nav" style="float:right;">
+        <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
+        <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+        <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+        <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
+        <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
+        <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
+        <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
+        <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
+        <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
+        <a href="{{ safe_url_for('admin_synonyms') or '/admin_synonyms.html' }}">[類義語（シノニム）]</a>
+        <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+
+        <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
+            <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
+            <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
+        </form>
+
+        <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
+            <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">[LINE応答 一時停止]</button>
+        </form>
+        <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
+            <button class="btn ghost" type="submit">[再開]</button>
+        </form>
+        {% if global_paused %}
+        <span class="badge" style="background:#fee;color:#c33;margin-left:8px;">
+            LINE停止中{% if paused_by %}（{{ '管理者' if paused_by=='admin' else 'ユーザー' }}）{% endif %}
+        </span>
+        {% endif %}
+    </div>
+    <h1 style="margin-bottom:20px;">観光データ（管理者モード） {{ '編集' if edit_id else '登録' }}</h1>
+    {% else %}
+    <h1 style="margin-bottom:20px;">観光データ（店舗ユーザーモード） {{ '編集' if edit_id else '登録' }}</h1>
+    {% endif %}
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul>
+        {% for message in messages %}
+          <li style="color:green; font-weight:500;">{{ message }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+
+    {% set _areas_edit = (entry_edit.areas if entry_edit and entry_edit.areas is defined and entry_edit.areas is not string else (entry_edit.areas.split(',') if entry_edit and entry_edit.areas else [])) %}
+
+    {# === 透かし 初期値（保存済みの値→正規化） === #}
+    {% set _wm_on_init = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+    {% set _wm_raw_init = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+    {% set _wm_choice_init = (
+        _wm_raw_init if _wm_raw_init in ['none','fullygoto','gotocity']
+        else ('fullygoto' if _wm_raw_init == 'fully'
+        else ('gotocity' if _wm_raw_init == 'city'
+        else ('fullygoto' if _wm_on_init else 'none')))
+    ) %}
+
+    <!-- ===== 登録フォーム ===== -->
+    <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
+        {% if edit_id %}<input type="hidden" name="edit_id" value="{{ edit_id }}">{% endif %}
+
+        <!-- 代表（サーバに送る唯一の値） -->
+        <input type="hidden" name="wm_external_choice" id="wm_choice_master" value="{{ _wm_choice_init }}">
+        <!-- 新UIで選んだ元画像ファイル名を送る（ギャラリー利用時） -->
+        <input type="hidden" name="selected_image" id="selected_image" value="">
+
+        <label>カテゴリー</label><br>
+        <select name="category" id="category_select" onchange="onCategoryChange()">
+            {% for c in cat_list %}
+              <option value="{{ c }}" {% if entry_edit and entry_edit.category == c %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+        </select>
+
+        <hr>
+
+        <!-- 観光地用フォーム -->
+        <div id="form_tourism" style="display:none;">
+
+        <style>
+            .pickbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+            .pickbar .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+            .pickbar .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+            .mini-note a{color:#2a8ed8;text-decoration:none}
+            .mini-note a:hover{text-decoration:underline}
+        </style>
+
+        <label>タイトル</label><br>
+        <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+
+        <label>説明</label><br>
+        <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+
+        {% set _imgname_t = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+        {% set _wm_on_t = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+        {% set _wm_raw_t = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+        {% set _wm_choice_t = (
+            _wm_raw_t if _wm_raw_t in ['none','fullygoto','gotocity']
+            else ('fullygoto' if _wm_raw_t == 'fully'
+            else ('gotocity' if _wm_raw_t == 'city'
+            else ('fullygoto' if _wm_on_t else 'none')))
+        ) %}
+        {% if _imgname_t %}
+            <div class="mt-2" id="wm-block-t" data-filename="{{ _imgname_t }}">
+            <div>現在の画像:</div>
+            <img id="admin-image-preview-t" class="thumb"
+                src="{{ safe_url_for('serve_image', filename=_imgname_t, _sign=True, wm=_wm_choice_t) }}"
+                alt="現在の画像"
+                style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                referrerpolicy="no-referrer" loading="lazy" />
+            <div class="imgmeta"></div>
+            <div class="form-check mt-2">
+                <input class="form-check-input" type="checkbox" id="image_delete_t" name="image_delete" value="1">
+                <label class="form-check-label" for="image_delete_t">この画像を削除する</label>
+            </div>
+            </div>
+        {% endif %}
+
+        <input type="hidden" name="image_existing" id="image_existing_t" value="{{ _imgname_t }}">
+
+        <div class="pickbar">
+        {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
+        <button type="button" class="btn"
+                id="btn_open_folder_picker_t"
+                data-target="t"
+                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
+            フォルダから選ぶ
+        </button>
+        <!-- ▼ 透かし済み（完成画像）を最適化のみで登録する新しい経路 -->
+        <fieldset style="border:1px solid #dbe8f3;border-radius:10px;padding:10px 12px;margin:8px 0;">
+        <legend style="color:#234;">ローカルの“透かし済み”画像を最適化して登録</legend>
+        <div class="mini-note" style="margin:4px 0 8px;">
+            ここで選んだ画像は <b>サーバ側で透かし合成を行わず</b>、リサイズ/圧縮（最適化）のみ実施して登録します。<br>
+            この経路を使うと、下の透かし選択は自動で「なし」に固定されます（プレビューも透かし無し表示）。
+        </div>
+        <input type="file" id="image_file_final" name="image_file_final" accept="image/*">
+
+        <div id="final-preview-wrap" style="margin-top:8px;display:none;">
+            <div class="small muted">アップロード予定のプレビュー（ローカル）</div>
+            <img id="final-local-preview" class="thumb" style="max-width:240px;height:auto;border:1px solid #ccc;border-radius:4px;">
+        </div>
+        </fieldset>
+
+        <script>
+        (function(){
+        // 新しい完成済みアップロード欄のプレビューと挙動
+        const fin = document.getElementById('image_file_final');
+        const wmMaster = document.getElementById('wm_choice_master'); // 既存 hidden
+        const selHidden = document.getElementById('selected_image');  // 既存 hidden（ギャラリー用）
+        const pvWrap = document.getElementById('final-preview-wrap');
+        const pvImg  = document.getElementById('final-local-preview');
+
+        if(fin){
+            fin.addEventListener('change', ()=>{
+            // 透かし選択を「none」に固定（サーバ側でも上書きしますがUI上も明示）
+            if(wmMaster) wmMaster.value = 'none';
+            // ギャラリーやピッカーでの選択があっても、こちらを優先するため空にする
+            if(selHidden) selHidden.value = '';
+
+            // ローカルプレビュー
+            if(fin.files && fin.files[0]){
+                const url = URL.createObjectURL(fin.files[0]);
+                if(pvImg){ pvImg.src = url; }
+                if(pvWrap){ pvWrap.style.display = ''; }
+
+                // 既存の現在画像プレビューに軽い目印（任意）
+                const cur = document.getElementById('admin-image-preview-t');
+                if(cur){ cur.style.outline = '2px dashed #88a'; cur.title = '新しいアップロード画像が優先されます'; }
+            }else{
+                if(pvWrap){ pvWrap.style.display = 'none'; }
+            }
+            });
+        }
+        })();
+        </script>
+
+
+
+        <a class="btn ghost"
+            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            target="_blank" rel="noopener">
+            透かし一括作成を開く
+        </a>
+
+        <span class="mini-note">※「フォルダから選ぶ」＝ 既存フォルダを選択 → 中の画像（登録日の新しい順）からワンクリックで選択できます。</span>
+        </div>
+
+        <label>住所</label><br>
+        <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+
+        <label>地図URL</label><br>
+        <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+
+        <label>出典</label><br>
+        <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+
+        <label>出典URL</label><br>
+        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
+        <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
+
+        <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
+        <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
+        <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
+
+        <label>緯度・経度（任意）</label><br>
+        <div class="row" style="display:flex; gap:10px; align-items:center;">
+            <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
+            <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
+        </div>
+        <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
+
+        <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
+        <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
+
+        <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
+        <div class="row">
+            {% for area in area_opts %}
+            <label style="min-width:unset;"><input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}</label>
+            {% endfor %}
+        </div>
+
+        <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
+        <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
+        {% if entry_edit and entry_edit.links %}
+        {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
+        {% endif %}
+        </textarea><br>
+
+        <label>追加情報（項目＝内容）</label>
+        <div id="extras-list-tourism">
+            {% set _extras = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
+            {% if _extras.items is defined %}
+                {% for k, v in _extras.items() %}
+                <div class="extra-row">
+                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="extra-row">
+                    <input name="extras_key[]" placeholder="項目"> ＝
+                    <input name="extras_val[]" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
+            {% endif %}
+        </div>
+        <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-tourism')">＋ 行を追加</button>
+
+        </div>
+
+        <!-- 店舗系カテゴリ用フォーム -->
+        <div id="form_shop" style="display:none;">
+
+        <style>
+            .pickbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+            .pickbar .btn{padding:7px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;cursor:pointer}
+            .pickbar .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+            .mini-note a{color:#2a8ed8;text-decoration:none}
+            .mini-note a:hover{text-decoration:underline}
+        </style>
+
+        <label>タイトル</label><br>
+        <input type="text" name="title" value="{{ entry_edit.title if entry_edit else '' }}" required><br>
+
+        <label>説明</label><br>
+        <textarea name="desc" rows="3" required>{{ entry_edit.desc if entry_edit else '' }}</textarea><br>
+
+        {% set _imgname_s = entry_edit.image_file or entry_edit.image if entry_edit else '' %}
+        {% set _wm_on_s = (entry_edit.wm_on if entry_edit and entry_edit.wm_on is not none else True) %}
+        {% set _wm_raw_s = (entry_edit.wm_external_choice if entry_edit and entry_edit.wm_external_choice else '') %}
+        {% set _wm_choice_s = (
+            _wm_raw_s if _wm_raw_s in ['none','fullygoto','gotocity']
+            else ('fullygoto' if _wm_raw_s == 'fully'
+            else ('gotocity' if _wm_raw_s == 'city'
+            else ('fullygoto' if _wm_on_s else 'none')))
+        ) %}
+        {% if _imgname_s %}
+            <div class="mt-2" id="wm-block-s" data-filename="{{ _imgname_s }}">
+            <div>現在の画像:</div>
+            <img id="admin-image-preview-s" class="thumb"
+                src="{{ safe_url_for('serve_image', filename=_imgname_s, _sign=True, wm=_wm_choice_s) }}"
+                alt="現在の画像"
+                style="max-width: 240px; height: auto; border: 1px solid #ccc; border-radius: 4px;"
+                referrerpolicy="no-referrer" loading="lazy" />
+            <div class="imgmeta"></div>
+            <div class="form-check mt-2">
+                <input class="form-check-input" type="checkbox" id="image_delete_s" name="image_delete" value="1">
+                <label class="form-check-label" for="image_delete_s">この画像を削除する</label>
+            </div>
+            </div>
+        {% endif %}
+
+        <!-- ★ 店舗側：透かし選択（ラジオで master に同期） -->
+        <div class="row" style="margin-top:8px;">
+            <label style="min-width:unset;">透かし</label><br>
+            <label style="min-width:unset;margin-right:10px;">
+                <input type="radio" name="wm_choice_s" value="none" {% if _wm_choice_s == 'none' %}checked{% endif %}> なし
+            </label>
+            <label style="min-width:unset;margin-right:10px;">
+                <input type="radio" name="wm_choice_s" value="fullygoto" {% if _wm_choice_s == 'fullygoto' %}checked{% endif %}> GOTO全面
+            </label>
+            <label style="min-width:unset;">
+                <input type="radio" name="wm_choice_s" value="gotocity" {% if _wm_choice_s == 'gotocity' %}checked{% endif %}> GOTO市名
+            </label>
+        </div>
+
+        <input type="hidden" name="image_existing" id="image_existing_s" value="{{ _imgname_s }}">
+
+        <div class="pickbar">
+        {% set _eid = (edit if edit is defined else (entry.id if entry is defined else None)) %}
+        <button type="button" class="btn"
+                id="btn_open_folder_picker_s"
+                data-target="s"
+                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
+            フォルダから選ぶ
+        </button>
+
+        <!-- ▼ 透かし済み（完成画像）を最適化のみで登録する新しい経路 -->
+        <fieldset style="border:1px solid #dbe8f3;border-radius:10px;padding:10px 12px;margin:8px 0;">
+        <legend style="color:#234;">ローカルの“透かし済み”画像を最適化して登録</legend>
+        <div class="mini-note" style="margin:4px 0 8px;">
+            ここで選んだ画像は <b>サーバ側で透かし合成を行わず</b>、リサイズ/圧縮（最適化）のみ実施して登録します。<br>
+            この経路を使うと、下の透かし選択は自動で「なし」に固定されます（プレビューも透かし無し表示）。
+        </div>
+        <input type="file" id="image_file_final" name="image_file_final" accept="image/*">
+
+        <div id="final-preview-wrap" style="margin-top:8px;display:none;">
+            <div class="small muted">アップロード予定のプレビュー（ローカル）</div>
+            <img id="final-local-preview" class="thumb" style="max-width:240px;height:auto;border:1px solid #ccc;border-radius:4px;">
+        </div>
+        </fieldset>
+
+        <script>
+        (function(){
+        // 新しい完成済みアップロード欄のプレビューと挙動
+        const fin = document.getElementById('image_file_final');
+        const wmMaster = document.getElementById('wm_choice_master'); // 既存 hidden
+        const selHidden = document.getElementById('selected_image');  // 既存 hidden（ギャラリー用）
+        const pvWrap = document.getElementById('final-preview-wrap');
+        const pvImg  = document.getElementById('final-local-preview');
+
+        if(fin){
+            fin.addEventListener('change', ()=>{
+            // 透かし選択を「none」に固定（サーバ側でも上書きしますがUI上も明示）
+            if(wmMaster) wmMaster.value = 'none';
+            // ギャラリーやピッカーでの選択があっても、こちらを優先するため空にする
+            if(selHidden) selHidden.value = '';
+
+            // ローカルプレビュー
+            if(fin.files && fin.files[0]){
+                const url = URL.createObjectURL(fin.files[0]);
+                if(pvImg){ pvImg.src = url; }
+                if(pvWrap){ pvWrap.style.display = ''; }
+
+                // 既存の現在画像プレビューに軽い目印（任意）
+                const cur = document.getElementById('admin-image-preview-t');
+                if(cur){ cur.style.outline = '2px dashed #88a'; cur.title = '新しいアップロード画像が優先されます'; }
+            }else{
+                if(pvWrap){ pvWrap.style.display = 'none'; }
+            }
+            });
+        }
+        })();
+        </script>
+
+        <a class="btn ghost"
+            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            target="_blank" rel="noopener">
+            透かし一括作成を開く
+        </a>
+
+        <span class="mini-note">※ 既存フォルダ → 画像（新しい順）から選べます。</span>
+        </div>
+
+        <label>住所</label><br>
+        <input type="text" name="address" value="{{ entry_edit.address if entry_edit else '' }}"><br>
+
+        <label>電話番号</label><br>
+        <input type="text" name="tel" value="{{ entry_edit.tel if entry_edit else '' }}"><br>
+
+        <label>休み</label><br>
+        <input type="text" name="holiday" value="{{ entry_edit.holiday if entry_edit else '' }}"><br>
+
+        <label>営業時間</label><br>
+        <input type="text" name="open_hours" value="{{ entry_edit.open_hours if entry_edit else '' }}"><br>
+
+        <label>駐車場：</label>
+        <select name="parking">
+            <option value="あり" {% if entry_edit and entry_edit.parking == 'あり' %}selected{% endif %}>あり</option>
+            <option value="なし" {% if entry_edit and entry_edit.parking == 'なし' %}selected{% endif %}>なし</option>
+        </select>
+        台数：<input type="text" name="parking_num" value="{{ entry_edit.parking_num if entry_edit else '' }}" style="width:80px;">台<br>
+
+        <label>支払方法</label><br>
+        {% set _pay_edit = (entry_edit.payment if entry_edit and entry_edit.payment is defined and entry_edit.payment is not string else (entry_edit.payment.split(',') if entry_edit and entry_edit.payment else [])) %}
+        <input type="checkbox" name="payment" value="現金" {% if '現金' in _pay_edit %}checked{% endif %}>現金
+        <input type="checkbox" name="payment" value="カード" {% if 'カード' in _pay_edit %}checked{% endif %}>カード
+        <input type="checkbox" name="payment" value="その他" {% if 'その他' in _pay_edit %}checked{% endif %}>その他<br>
+
+        <label>備考（自由記述）</label><br>
+        <textarea name="remark" rows="2">{{ entry_edit.remark if entry_edit else '' }}</textarea><br>
+
+        <label>タグ <span class="mini-note">（カンマ区切りで複数OK）</span></label><br>
+        <input type="text" name="tags" value="{% if entry_edit and entry_edit.tags %}{{ (entry_edit.tags|join(',')) if entry_edit.tags is not string else entry_edit.tags }}{% endif %}"><br>
+
+        <label>エリア（市町）<span style="color:red; font-size:0.96em;">※1つ以上必須</span></label><br>
+        <div class="row">
+            {% for area in area_opts %}
+            <label style="min-width:unset;"><input type="checkbox" name="areas" value="{{ area }}" {% if _areas_edit and area in _areas_edit %}checked{% endif %}> {{ area }}</label>
+            {% endfor %}
+        </div>
+
+        <label>地図URL</label><br>
+        <input type="text" name="map" value="{{ entry_edit.map if entry_edit else '' }}"><br>
+
+        <label>出典</label><br>
+        <input type="text" name="source" placeholder="例：五島の島たび（五島市公式）" value="{{ entry_edit.source if entry_edit else '' }}"><br>
+
+        <label>出典URL</label><br>
+        <input type="text" name="source_url" placeholder="https://..." value="{{ entry_edit.source_url if entry_edit else '' }}"><br>
+        <div class="mini-note">※ここを入れておくと、AIの回答末尾に「— 出典 — …」が自動で付与されます。</div>
+
+        <label>座標コピペ欄（URL / 「緯度,経度」 / DMS 可）</label><br>
+        <input type="text" name="coords" placeholder="例）35.681236, 139.767125 ／ https://maps.app.goo.gl/... ／ 北緯35度41分36秒 東経139度45分" value=""><br>
+        <div class="mini-note">ここに貼るだけでOK。未入力の場合は下の緯度・経度欄や地図URLから自動補完されます。</div>
+
+        <label>緯度・経度（任意）</label><br>
+        <div class="row" style="display:flex; gap:10px; align-items:center;">
+            <input type="text" name="lat" inputmode="decimal" placeholder="緯度 例: 32.695123" value="{{ entry_edit.lat if entry_edit and entry_edit.lat is not none else '' }}" style="width:48%;">
+            <input type="text" name="lng" inputmode="decimal" placeholder="経度 例: 128.845678" value="{{ entry_edit.lng if entry_edit and entry_edit.lng is not none else '' }}" style="width:48%;">
+        </div>
+        <div class="mini-note">※ 上の「座標コピペ欄」を使えば、この2つは空でも大丈夫です。</div>
+
+        <label>リンク（複数可）<span class="mini-note">（1行1URL／カンマ区切りも可）</span></label><br>
+        <textarea name="links" rows="3" placeholder="https://example.com https://instagram.com/xxx">
+        {% if entry_edit and entry_edit.links %}
+        {{ (entry_edit.links|join('\n')) if entry_edit.links is not string else entry_edit.links }}
+        {% endif %}
+        </textarea><br>
+
+        <label>追加情報（項目＝内容）</label>
+        <div id="extras-list-shop">
+            {% set _extras2 = (entry_edit.extras if entry_edit and entry_edit.extras else {}) %}
+            {% if _extras2.items is defined %}
+                {% for k, v in _extras2.items() %}
+                <div class="extra-row">
+                    <input name="extras_key[]" value="{{ k }}" placeholder="項目"> ＝
+                    <input name="extras_val[]" value="{{ v }}" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="extra-row">
+                    <input name="extras_key[]" placeholder="項目"> ＝
+                    <input name="extras_val[]" placeholder="内容">
+                    <button type="button" onclick="this.parentNode.remove()">－</button>
+                </div>
+            {% endif %}
+        </div>
+        <button type="button" class="add-btn" style="background:#5aa;" onclick="addExtraRow('extras-list-shop')">＋ 行を追加</button>
+
+        </div>
+
+        <button class="add-btn" type="submit">{{ '編集' if edit_id else '登録' }}</button>
+    </form>
+
+    <hr>
+    <h2 style="margin-bottom:8px;">登録済みデータ</h2>
+
+    <div class="filterbar">
+        <input type="text" id="f_q" placeholder="キーワード（タイトル/説明/住所/タグ/追加情報/リンク/出典）" oninput="filterCards()">
+        <select id="f_cat" onchange="filterCards()">
+            <option value="">カテゴリー：すべて</option>
+            {% for c in cat_list %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+        <select id="f_area" onchange="filterCards()">
+            <option value="">エリア：すべて</option>
+            {% for area in area_opts %}<option value="{{ area }}">{{ area }}</option>{% endfor %}
+        </select>
+        <input type="text" id="f_tag" placeholder="タグ（カンマ区切り・AND）" oninput="filterCards()">
+        <select id="f_sort" onchange="filterCards()">
+            <option value="title_asc">並び替え：タイトル↑</option>
+            <option value="title_desc">並び替え：タイトル↓</option>
+            <option value="cat_asc">並び替え：カテゴリ↑</option>
+            <option value="cat_desc">並び替え：カテゴリ↓</option>
+            <option value="dist_asc">並び替え：距離↑（現在地）</option>
+        </select>
+        <span class="badge">表示：<span id="f_count">0</span> / <span id="f_total">0</span></span>
+        <select id="f_page_size" onchange="onChangePageSize(this)">
+            <option value="10">1ページ 10件</option>
+            <option value="20" selected>1ページ 20件</option>
+            <option value="30">1ページ 30件</option>
+            <option value="50">1ページ 50件</option>
+        </select>
+
+        <div class="nearby-ctl">
+            <button class="btn" type="button" onclick="startNearby()">現在地から</button>
+            <select id="near_radius">
+                <option value="1">1</option>
+                <option value="3" selected>3</option>
+                <option value="5">5</option>
+                <option value="10">10</option>
+            </select>
+            <span class="muted">km 以内</span>
+            <button class="btn ghost" type="button" onclick="clearNearby()">解除</button>
+        </div>
+
+        <button class="btn ghost" type="button" onclick="resetFilters()">リセット</button>
+    </div>
+
+    <!-- ページャー（上） -->
+    <div class="pager">
+        <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
+        <button type="button" class="btn prev" onclick="gotoPage('prev')">‹ 前へ</button>
+        <span class="info">ページ 1 / 1（1ページ 20件）</span>
+        <button type="button" class="btn next" onclick="gotoPage('next')">次へ ›</button>
+        <button type="button" class="btn last" onclick="gotoPage('last')">最後 ≫</button>
+    </div>
+
+    <div id="cards">
+    {% for e in entries %}
+        {% set _tags  = e.tags  if e.tags  is defined and e.tags  is not string else (e.tags  | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _areas = e.areas if e.areas is defined and e.areas is not string else (e.areas.split(',') if e.areas else []) %}
+        {% set _links = e.links if e.links is defined and e.links is not string else (e.links | replace('\r\n', ',') | replace('\n', ',') | split(',')) %}
+        {% set _pay   = e.payment if e.payment is defined and e.payment is not string else (e.payment.split(',') if e.payment else []) %}
+        {% set all_text = (e.title ~ ' ' ~ (e.desc or '') ~ ' ' ~ (e.address or '') ~ ' ' ~ (_links | join(' ')) ~ ' ' ~ (e.extras | tojson) ~ ' ' ~ (e.source or '') ~ ' ' ~ (e.source_url or '')) | lower %}
+
+        <div class="entry-card"
+             data-title="{{ e.title or '' }}"
+             data-category="{{ e.category or '' }}"
+             data-areas="{{ _areas|join(', ') }}"
+             data-tags="{{ (_tags|join(', ')|lower) if _tags else '' }}"
+             data-text="{{ all_text }}"
+             data-lat="{{ e.lat if e.lat is defined else '' }}"
+             data-lng="{{ e.lng if e.lng is defined else '' }}">
+
+            {% set _img = e.image_file or e.image %}
+            {% set _wm = (e.wm_on if e.wm_on is defined else True) %}
+            {% set _wm_raw_view = (e.wm_external_choice if e.wm_external_choice else '') %}
+            {% set _wm_choice_view = (
+                _wm_raw_view if _wm_raw_view in ['none','fullygoto','gotocity']
+                else ('fullygoto' if _wm_raw_view == 'fully'
+                else ('gotocity' if _wm_raw_view == 'city'
+                else ('fullygoto' if _wm else 'none')))
+            ) %}
+
+            <div style="display:flex; gap:12px; align-items:flex-start;">
+                {% if _img %}
+                <a href="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm=_wm_choice_view) }}" target="_blank" rel="noopener noreferrer" style="flex:0 0 auto;">
+                    <img class="thumb"
+                         src="{{ safe_url_for('serve_image', filename=_img, _sign=True, wm='thumb') ~ '&_ts=' ~ (now()|int if now is defined else 0) }}"
+                         alt="{{ e.title }} の画像"
+                         style="width:120px; height:90px; object-fit:cover; border-radius:6px; border:1px solid #e2e8f0; background:#fff;"
+                         loading="lazy" decoding="async" referrerpolicy="no-referrer">
+                </a>
+                {% endif %}
+
+                <div style="flex:1 1 auto;">
+                    <span class="card-label">タイトル：</span>{{ e.title }}<br>
+                    <span class="card-label">説明：</span>{{ e.desc }}<br>
+
+                    {% if e.lat is not none and e.lng is not none %}
+                    <span class="card-label">緯度・経度：</span>{{ e.lat }}, {{ e.lng }} （<a href="https://maps.google.com/?q={{ e.lat }},{{ e.lng }}" target="_blank" rel="noopener">地図</a>）<br>
+                    {% endif %}
+
+                    <span class="card-label">住所：</span>{{ e.address }}<br>
+
+                    <span class="card-label">地図：</span>
+                    {% if e.map %}<a href="{{ e.map }}" target="_blank" rel="noopener noreferrer">MAP</a>{% endif %}<br>
+
+                    <span class="card-label">出典：</span>
+                    {% if e.source and e.source_url %}
+                        <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source }}</a>
+                    {% elif e.source %}
+                        {{ e.source }}
+                    {% elif e.source_url %}
+                        <a href="{{ e.source_url }}" target="_blank" rel="noopener">{{ e.source_url }}</a>
+                    {% else %}
+                        （未入力）
+                    {% endif %}<br>
+
+                    <span class="card-label">タグ：</span>{{ _tags|join(', ') }}<br>
+                    <span class="card-label">エリア：</span>{{ _areas|join(', ') }}<br>
+
+                    {% if e.category and e.category != "観光" %}
+                        <span class="card-label">電話：</span>{{ e.tel or "" }}<br>
+                        <span class="card-label">休み：</span>{{ e.holiday or "" }}<br>
+                        <span class="card-label">営業時間：</span>{{ e.open_hours or "" }}<br>
+                        <span class="card-label">駐車場：</span>{{ e.parking or "" }}{% if e.parking_num %}（{{ e.parking_num }}台）{% endif %}<br>
+                        <span class="card-label">支払方法：</span>{{ _pay|join(', ') }}<br>
+                        <span class="card-label">備考：</span>{{ e.remark or "" }}<br>
+                    {% endif %}
+
+                    {% if _links %}
+                    <span class="card-label">リンク：</span>
+                    <ul class="compact">
+                        {% for u in _links %}
+                            {% set u2 = (u ~ '') | trim %}
+                            {% if u2 %}<li><a href="{{ u2 }}" target="_blank" rel="noopener noreferrer">{{ u2 }}</a></li>{% endif %}
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+
+                    {% if e.extras %}
+                    <span class="card-label">追加情報：</span>
+                    <table class="kv">
+                        {% if e.extras.items is defined %}
+                            {% for k, v in e.extras.items() %}
+                            <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                            {% endfor %}
+                        {% elif e.extras is iterable and e.extras is not string %}
+                            {% for it in e.extras %}
+                                {% if it.items is defined %}
+                                    {% for k,v in it.items() %}
+                                    <tr><td class="k">{{ k }}</td><td>{{ v }}</td></tr>
+                                    {% endfor %}
+                                {% else %}
+                                    <tr><td class="k">{{ it[0] if it|length>0 else '' }}</td><td>{{ it[1] if it|length>1 else '' }}</td></tr>
+                                {% endif %}
+                            {% endfor %}
+                        {% else %}
+                            <tr><td class="k">備考</td><td>{{ e.extras }}</td></tr>
+                        {% endif %}
+                    </table>
+                    {% endif %}
+
+                    <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
+
+                    <div class="entry-actions" style="margin-top:8px;">
+                        <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
+                            <input type="hidden" name="edit" value="{{ loop.index0 }}">
+                            <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
+                        </form>
+
+                        {% if role == "admin" %}
+                        <form method="post" action="{{ url_for('delete_entry') }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
+                            <input type="hidden" name="idx" value="{{ loop.index0 }}">
+                            <button type="submit" class="del-btn">削除</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endfor %}
+    </div>
+
+    <!-- ページャー（下） -->
+    <div class="pager">
+        <button type="button" class="btn first" onclick="gotoPage('first')">≪ 最初</button>
+        <button type="button" class="btn prev" onclick="gotoPage('prev')">‹ 前へ</button>
+        <span class="info">ページ 1 / 1（1ページ 20件）</span>
+        <button type="button" class="btn next" onclick="gotoPage('next')">次へ ›</button>
+        <button type="button" class="btn last" onclick="gotoPage('last')">最後 ≫</button>
+    </div>
+</div>
+
+<script>
+/* ======== Media Picker Bridge（フォルダから選ぶ／ギャラリー共通） ======== */
+(function(){
+  let _pickerWin = null;
+  let _pickerTarget = null; // 't' or 's'
+
+  function variantFilename(fn, kind){
+    const i = fn.lastIndexOf('.'); const base = i>0 ? fn.slice(0,i) : fn; const ext = i>0 ? fn.slice(i) : '';
+    const suffix = (kind==='none') ? '__none' : (kind==='fullygoto' ? '__fullygoto' : '__goto');
+    return base + suffix + ext;
+  }
+
+  async function setPreviewAndHidden(target, filename, preferredWm, rawUrl){
+    const master = document.getElementById('wm_choice_master');
+    const wm = preferredWm || (master ? (master.value || 'none') : 'none');
+
+    if(target === 't'){
+      const hImg = document.getElementById('image_existing_t');
+      const img  = document.getElementById('admin-image-preview-t');
+      const blk  = document.getElementById('wm-block-t');
+      if(hImg) hImg.value = filename;
+      if(blk) blk.dataset.filename = filename;
+
+      let url = await _signPreview(filename, wm);
+      if(!url) {
+        // サイン失敗時はフォールバック（無透かし）
+        url = rawUrl || (variantFilename(filename, 'none'));
+      }
+      if(img && url){
+        img.src = url;
+        img.setAttribute('data-fullsrc', url);
+        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+      }
+    }else{
+      const hImg = document.getElementById('image_existing_s');
+      const img  = document.getElementById('admin-image-preview-s');
+      const blk  = document.getElementById('wm-block-s');
+      if(hImg) hImg.value = filename;
+      if(blk) blk.dataset.filename = filename;
+
+      let url = await _signPreview(filename, wm);
+      if(!url) {
+        url = rawUrl || (variantFilename(filename, 'none'));
+      }
+      if(img && url){
+        img.src = url;
+        img.setAttribute('data-fullsrc', url);
+        if(img.complete) annotateImageMeta(img); else img.onload = ()=> annotateImageMeta(img);
+      }
+    }
+  }
+
+  // フォルダピッカーを開く
+  function openPicker(btn){
+    const url = btn.getAttribute('data-url');
+    _pickerTarget = btn.getAttribute('data-target'); // 't' or 's'
+    _pickerWin = window.open(url, 'mediaPicker', 'width=1100,height=800');
+    if(_pickerWin) _pickerWin.focus();
+  }
+
+  document.getElementById('btn_open_folder_picker_t')?.addEventListener('click', function(){ openPicker(this); });
+  document.getElementById('btn_open_folder_picker_s')?.addEventListener('click', function(){ openPicker(this); });
+
+  // メッセージ受信（フォルダピッカー / 透かしギャラリー）
+  window.addEventListener('message', (ev)=>{
+    if(ev.origin !== location.origin) return;
+    const d = ev.data || {};
+
+    // 1) フォルダピッカー（/admin/media/folders）
+    if(d.type === 'media-pick' && _pickerTarget){
+      const name = (d.files && d.files[0]) || '';
+      const url  = (d.urls  && d.urls[0])  || '';
+      if(name){
+        setPreviewAndHidden(_pickerTarget, name, null, url);
+      }
+      try{ if(_pickerWin && !_pickerWin.closed) _pickerWin.close(); }catch(_){}
+      _pickerWin = null;
+      _pickerTarget = null;
+      return;
+    }
+
+    // 2) 透かしギャラリー（kind: none/fullygoto/gotocity）
+    if(d.type === 'wm-pick'){
+      const cat = document.getElementById('category_select')?.value || '観光';
+      const target = (cat === '観光') ? 't' : 's';
+      const name = d.filename;
+      const kind = d.kind || 'none';
+      const master = document.getElementById('wm_choice_master');
+      if(master) master.value = kind;
+      if(name){
+        setPreviewAndHidden(target, name, kind, null);
+      }
+      return;
+    }
+  }, false);
+})();
+</script>
+
+<script>
+/* サーバの画像URLテンプレート（必要なら上書き）
+   例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
+   デフォルトは /admin/media/img/<filename>
+*/
+</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# secrets / credentials
+.env
+.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/*.p12
+
+# python venv & caches
+.venv/**
+**/__pycache__/**
+
+# node packages
+**/node_modules/**
+
+# generated / big binaries / uploads
+media/**
+var/**
+/var/data/**
+logs/**
+backup/**
+
+# archives & sqlite
+**/*.zip
+**/*.7z
+**/*.tar.gz
+**/*.sqlite*

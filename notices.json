@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "title": "テスト",
+    "content": "テストイベント",
+    "category": "イベント",
+    "date": "2025-07-21",
+    "expire_date": "2025-07-22",
+    "image_url": "https://www.fullygoto.com/wp-content/uploads/2025/03/%E3%83%97%E3%83%AD%E3%83%95%E3%82%A3%E3%83%BC%E3%83%AB%E7%94%A8%E5%86%99%E7%9C%9F-1920x1280.jpg",
+    "created_by": "fully"
+  },
+  {
+    "id": 2,
+    "title": "特売テスト",
+    "content": "特売テスト",
+    "category": "特売",
+    "date": "2025-07-21",
+    "expire_date": "2025-07-22",
+    "image_url": "",
+    "created_by": "fully"
+  }
+]

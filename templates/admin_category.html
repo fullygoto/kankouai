@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>カテゴリー管理</title>
+    <style>
+        body {font-family:sans-serif;background:#f6faf9;}
+        .container {background:#fff;padding:30px;margin:30px auto;max-width:600px;border-radius:13px;}
+        .cat-title {font-weight:bold;margin-bottom:3px;color:#18a772;}
+        label{display:inline-block;min-width:60px;}
+        input[type="text"]{margin-bottom:6px;padding:4px;}
+        .fields{margin-bottom:12px;}
+        .del-btn{color:#d44;background:none;border:none;}
+    </style>
+</head>
+<body>
+<div class="container">
+<h1>カテゴリー管理</h1>
+{% with messages = get_flashed_messages() %}
+  {% if messages %}
+    <ul>
+    {% for message in messages %}
+      <li style="color:green;">{{ message }}</li>
+    {% endfor %}
+    </ul>
+  {% endif %}
+{% endwith %}
+<!-- 新規カテゴリー -->
+<form method="post" style="margin-bottom:20px;">
+    <input type="hidden" name="mode" value="add">
+    <label>新規カテゴリー:</label>
+    <input name="name" required>
+    <button type="submit">追加</button>
+</form>
+<hr>
+<!-- カテゴリー一覧 -->
+{% for cat in categories %}
+    {% set cat_idx = loop.index0 %}
+    <div style="margin-bottom:18px;">
+        <span class="cat-title">{{cat.name}}</span>
+        <form method="post" style="display:inline;">
+            <input type="hidden" name="mode" value="delete">
+            <input type="hidden" name="del_idx" value="{{ cat_idx }}">
+            <button class="del-btn" type="submit" onclick="return confirm('本当に削除しますか？');">[削除]</button>
+        </form>
+        <div class="fields">
+            <b>入力項目：</b>
+            <ul>
+            {% for f in cat.fields %}
+                <li>{{f.label}} ({{f.name}}, {{f.type}}) {% if f.required %}[必須]{% endif %}
+                    <form method="post" style="display:inline;">
+                        <input type="hidden" name="mode" value="delete_field">
+                        <input type="hidden" name="cat_idx" value="{{ cat_idx }}">
+                        <input type="hidden" name="field_idx" value="{{ loop.index0 }}">
+                        <button class="del-btn" type="submit">×</button>
+                    </form>
+                </li>
+            {% endfor %}
+            </ul>
+            <!-- 項目追加フォーム -->
+            <form method="post" style="margin-top:5px;">
+                <input type="hidden" name="mode" value="edit_fields">
+                <input type="hidden" name="cat_idx" value="{{ cat_idx }}">
+                <label>項目名</label>
+                <input name="field_name" required style="width:100px;">
+                <label>ラベル</label>
+                <input name="field_label" required style="width:100px;">
+                <label>型</label>
+                <select name="field_type">
+                    <option value="text">テキスト</option>
+                    <option value="textarea">複数行</option>
+                    <option value="number">数字</option>
+                    <option value="url">URL</option>
+                </select>
+                <label>必須</label>
+                <input type="checkbox" name="field_required">
+                <button type="submit">追加</button>
+            </form>
+        </div>
+    </div>
+{% endfor %}
+<a href="{{ url_for('admin_entry') }}">→ データ管理へ</a>
+</div>
+</body>
+</html>

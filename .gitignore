@@ -1,0 +1,44 @@
+# ===== Minimal whitelist repo policy =====
+# まず全て無視
+*
+
+# --- ここだけ許可（リポジトリ直下） ---
+!.gitignore
+!.codexignore
+!README.md
+!requirements.txt
+!app.py
+!conversational_router.py
+!notices.json
+!shop_infos.json
+!synonyms.json
+!users.json
+!watermark_ext.py
+
+# templates は中身もすべて許可
+!templates/
+!templates/**
+
+# logs フォルダ自体は保持するが、ログ本体は無視
+!logs/
+logs/*
+!logs/.gitkeep
+
+# --- 常に無視（安全） ---
+.env
+.env.*
+.venv/
+__pycache__/
+*.pyc
+.vscode/
+.DS_Store
+backup/
+data/
+media/
+ngrok.exe
+*.zip
+*.exe
+
+# never track local notes
+管理画面ログイン情報.txt
+*ログイン情報*.txt
