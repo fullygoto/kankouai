@@ -471,26 +471,26 @@
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
         <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ一覧]</a>
-        <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-        <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-        <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-        <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-        <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
-        <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
+        <a href="{{ url_for('main.admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+        <a href="{{ safe_url_for('main.admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+        <a href="{{ url_for('main.admin_backup') }}">[全体バックアップ]</a>
+        <a href="{{ url_for('main.admin_entries_edit') }}">[観光データ一括編集]</a>
+        <a href="{{ safe_url_for('main.admin_data_files') }}">[テキストデータ管理（.txt）]</a>
+        <a href="{{ safe_url_for('main.admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
-        <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
-        <a href="{{ safe_url_for('admin_synonyms') or '/admin_synonyms.html' }}">[類義語（シノニム）]</a>
-        <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+        <a href="{{ safe_url_for('main.admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
+        <a href="{{ safe_url_for('main.admin_synonyms') or '/admin_synonyms.html' }}">[類義語（シノニム）]</a>
+        <a href="{{ url_for('main.admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
-        <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
+        <form action="{{ url_for('main.admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
             <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
             <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
         </form>
 
-        <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
+        <form method="post" action="{{ url_for('main.admin_line_pause') }}" style="display:inline;">
             <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">[LINE応答 一時停止]</button>
         </form>
-        <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
+        <form method="post" action="{{ url_for('main.admin_line_resume') }}" style="display:inline;">
             <button class="btn ghost" type="submit">[再開]</button>
         </form>
         {% if global_paused %}
@@ -593,7 +593,7 @@
         <button type="button" class="btn"
                 id="btn_open_folder_picker_t"
                 data-target="t"
-                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
+                data-url="{% if _eid %}{{ url_for('main.admin_media_folders', entry_id=_eid, next=url_for('main.admin_entry', edit=_eid)) }}{% else %}{{ url_for('main.admin_media_folders') }}{% endif %}?picker=1">
             フォルダから選ぶ
         </button>
         <!-- ▼ 透かし済み（完成画像）を最適化のみで登録する新しい経路 -->
@@ -647,7 +647,7 @@
 
 
         <a class="btn ghost"
-            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            href="{{ safe_url_for('main.admin_watermark', picker=1, order='new') or url_for('main.admin_watermark', picker=1, order='new') }}"
             target="_blank" rel="noopener">
             透かし一括作成を開く
         </a>
@@ -782,7 +782,7 @@
         <button type="button" class="btn"
                 id="btn_open_folder_picker_s"
                 data-target="s"
-                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
+                data-url="{% if _eid %}{{ url_for('main.admin_media_folders', entry_id=_eid, next=url_for('main.admin_entry', edit=_eid)) }}{% else %}{{ url_for('main.admin_media_folders') }}{% endif %}?picker=1">
             フォルダから選ぶ
         </button>
 
@@ -835,7 +835,7 @@
         </script>
 
         <a class="btn ghost"
-            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            href="{{ safe_url_for('main.admin_watermark', picker=1, order='new') or url_for('main.admin_watermark', picker=1, order='new') }}"
             target="_blank" rel="noopener">
             透かし一括作成を開く
         </a>
@@ -1226,7 +1226,7 @@
 
 <script>
 /* サーバの画像URLテンプレート（必要なら上書き）
-   例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
+   例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('main.admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
    デフォルトは /admin/media/img/<filename>
 */
 </script>
@@ -1705,26 +1705,26 @@
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
         <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ一覧]</a>
-        <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-        <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-        <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-        <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-        <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
-        <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
+        <a href="{{ url_for('main.admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+        <a href="{{ safe_url_for('main.admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+        <a href="{{ url_for('main.admin_backup') }}">[全体バックアップ]</a>
+        <a href="{{ url_for('main.admin_entries_edit') }}">[観光データ一括編集]</a>
+        <a href="{{ safe_url_for('main.admin_data_files') }}">[テキストデータ管理（.txt）]</a>
+        <a href="{{ safe_url_for('main.admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
-        <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
-        <a href="{{ safe_url_for('admin_synonyms') or '/admin_synonyms.html' }}">[類義語（シノニム）]</a>
-        <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+        <a href="{{ safe_url_for('main.admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>
+        <a href="{{ safe_url_for('main.admin_synonyms') or '/admin_synonyms.html' }}">[類義語（シノニム）]</a>
+        <a href="{{ url_for('main.admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
 
-        <form action="{{ url_for('admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
+        <form action="{{ url_for('main.admin_restore') }}" method="post" enctype="multipart/form-data" style="display:inline;">
             <input type="file" name="backup_zip" accept=".zip" title="バックアップzipのみ選択してください" style="display:inline;">
             <button type="submit" onclick="return confirm('現在のデータが上書きされます。本当に復元しますか？');">[全体復元]</button>
         </form>
 
-        <form method="post" action="{{ url_for('admin_line_pause') }}" style="display:inline;">
+        <form method="post" action="{{ url_for('main.admin_line_pause') }}" style="display:inline;">
             <button class="btn" type="submit" style="background:#e35;" onclick="return confirm('LINE応答を一時停止します。よろしいですか？');">[LINE応答 一時停止]</button>
         </form>
-        <form method="post" action="{{ url_for('admin_line_resume') }}" style="display:inline;">
+        <form method="post" action="{{ url_for('main.admin_line_resume') }}" style="display:inline;">
             <button class="btn ghost" type="submit">[再開]</button>
         </form>
         {% if global_paused %}
@@ -1827,7 +1827,7 @@
         <button type="button" class="btn"
                 id="btn_open_folder_picker_t"
                 data-target="t"
-                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
+                data-url="{% if _eid %}{{ url_for('main.admin_media_folders', entry_id=_eid, next=url_for('main.admin_entry', edit=_eid)) }}{% else %}{{ url_for('main.admin_media_folders') }}{% endif %}?picker=1">
             フォルダから選ぶ
         </button>
         <!-- ▼ 透かし済み（完成画像）を最適化のみで登録する新しい経路 -->
@@ -1881,7 +1881,7 @@
 
 
         <a class="btn ghost"
-            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            href="{{ safe_url_for('main.admin_watermark', picker=1, order='new') or url_for('main.admin_watermark', picker=1, order='new') }}"
             target="_blank" rel="noopener">
             透かし一括作成を開く
         </a>
@@ -2016,7 +2016,7 @@
         <button type="button" class="btn"
                 id="btn_open_folder_picker_s"
                 data-target="s"
-                data-url="{% if _eid %}{{ url_for('admin_media_folders', entry_id=_eid, next=url_for('admin_entry', edit=_eid)) }}{% else %}{{ url_for('admin_media_folders') }}{% endif %}?picker=1">
+                data-url="{% if _eid %}{{ url_for('main.admin_media_folders', entry_id=_eid, next=url_for('main.admin_entry', edit=_eid)) }}{% else %}{{ url_for('main.admin_media_folders') }}{% endif %}?picker=1">
             フォルダから選ぶ
         </button>
 
@@ -2069,7 +2069,7 @@
         </script>
 
         <a class="btn ghost"
-            href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
+            href="{{ safe_url_for('main.admin_watermark', picker=1, order='new') or url_for('main.admin_watermark', picker=1, order='new') }}"
             target="_blank" rel="noopener">
             透かし一括作成を開く
         </a>
@@ -2460,7 +2460,7 @@
 
 <script>
 /* サーバの画像URLテンプレート（必要なら上書き）
-   例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
+   例：window.ADMIN_MEDIA_IMG_URL_TMPL = "{{ url_for('main.admin_media_img', filename='__REPLACE__') }}".replace('__REPLACE__','');
    デフォルトは /admin/media/img/<filename>
 */
 </script>

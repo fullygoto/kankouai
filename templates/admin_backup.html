@@ -40,7 +40,7 @@ async function showStorage(){
   const el = document.getElementById('storage');
   el.textContent = '読み込み中…';
   try{
-    const r = await fetch('{{ url_for("admin_storage_stats") }}');
+    const r = await fetch('{{ url_for("main.admin_storage_stats") }}');
     const j = await r.json();
     function human(n){
       const u=['B','KB','MB','GB','TB']; let i=0; let x=Number(n||0);
@@ -68,14 +68,14 @@ async function showStorage(){
   <div class="container">
     <div class="nav" style="float:right;">
       <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
-      <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-      <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-      <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
-      <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-      <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-      <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
+      <a href="{{ url_for('main.admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+      <a href="{{ url_for('main.admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+      <a href="{{ url_for('main.admin_synonyms') }}">[類義語辞書管理]</a>
+      <a href="{{ url_for('main.admin_backup') }}">[全体バックアップ]</a>
+      <a href="{{ url_for('main.admin_entries_edit') }}">[観光データ一括編集]</a>
+      <a href="{{ url_for('main.admin_notices') }}">[お知らせ管理]</a>
       <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
-      <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+      <a href="{{ url_for('main.admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
     </div>
 
     <h1>全体バックアップ / 復元</h1>
@@ -98,8 +98,8 @@ async function showStorage(){
         <h2 style="margin:0 0 8px">バックアップの作成</h2>
         <p class="muted">現在の保存内容をダウンロードします。</p>
         <div class="actions">
-          <a class="btn" href="{{ url_for('admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
-          <a class="btn gray" href="{{ url_for('admin_backup', stream='1') }}">容量不足のとき：ストリーミング（tar.gz）</a>
+          <a class="btn" href="{{ url_for('main.admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
+          <a class="btn gray" href="{{ url_for('main.admin_backup', stream='1') }}">容量不足のとき：ストリーミング（tar.gz）</a>
           <button class="btn ghost" type="button" onclick="location.reload()">再読込</button>
           <button class="btn ghost" type="button" onclick="showStorage()">サーバーの容量状況を表示</button>
         </div>
@@ -122,7 +122,7 @@ async function showStorage(){
           ZIPの内容で現在のデータを<strong>上書き</strong>します。<br>
           事前に「バックアップの作成」で退避しておくことを推奨します。
         </p>
-        <form method="post" action="{{ url_for('admin_restore') }}" enctype="multipart/form-data" onsubmit="return confirmRestore()">
+        <form method="post" action="{{ url_for('main.admin_restore') }}" enctype="multipart/form-data" onsubmit="return confirmRestore()">
           <input type="file" name="backup_zip" accept=".zip">
           <div class="actions">
             <button class="btn danger" type="submit">ZIPをアップロードして復元</button>
@@ -142,7 +142,7 @@ async function showStorage(){
         Google Drive / Dropbox / S3 などに置いた ZIP の<strong>直リンク</strong>を指定すると、<br>
         サーバー側が直接ダウンロードして復元します。
       </p>
-      <form method="post" action="{{ url_for('admin_restore_from_url') }}" onsubmit="return confirmRestore()">
+      <form method="post" action="{{ url_for('main.admin_restore_from_url') }}" onsubmit="return confirmRestore()">
         <div class="input-row">
           <input type="url" name="backup_url" placeholder="https://example.com/your-backup.zip" required>
           <button class="btn danger" type="submit">URLから復元</button>
@@ -239,7 +239,7 @@ async function showStorage(){
   const el = document.getElementById('storage');
   el.textContent = '読み込み中…';
   try{
-    const r = await fetch('{{ url_for("admin_storage_stats") }}');
+    const r = await fetch('{{ url_for("main.admin_storage_stats") }}');
     const j = await r.json();
     function human(n){
       const u=['B','KB','MB','GB','TB']; let i=0; let x=Number(n||0);
@@ -267,14 +267,14 @@ async function showStorage(){
   <div class="container">
     <div class="nav" style="float:right;">
       <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
-      <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-      <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-      <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
-      <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-      <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-      <a href="{{ url_for('admin_notices') }}">[お知らせ管理]</a>
+      <a href="{{ url_for('main.admin_unhit_questions') }}">[未ヒット質問一覧]</a>
+      <a href="{{ url_for('main.admin_unhit_report') }}">[未ヒット頻出レポート]</a>
+      <a href="{{ url_for('main.admin_synonyms') }}">[類義語辞書管理]</a>
+      <a href="{{ url_for('main.admin_backup') }}">[全体バックアップ]</a>
+      <a href="{{ url_for('main.admin_entries_edit') }}">[観光データ一括編集]</a>
+      <a href="{{ url_for('main.admin_notices') }}">[お知らせ管理]</a>
       <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
-      <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+      <a href="{{ url_for('main.admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
     </div>
 
     <h1>全体バックアップ / 復元</h1>
@@ -297,8 +297,8 @@ async function showStorage(){
         <h2 style="margin:0 0 8px">バックアップの作成</h2>
         <p class="muted">現在の保存内容をダウンロードします。</p>
         <div class="actions">
-          <a class="btn" href="{{ url_for('admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
-          <a class="btn gray" href="{{ url_for('admin_backup', stream='1') }}">容量不足のとき：ストリーミング（tar.gz）</a>
+          <a class="btn" href="{{ url_for('main.admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
+          <a class="btn gray" href="{{ url_for('main.admin_backup', stream='1') }}">容量不足のとき：ストリーミング（tar.gz）</a>
           <button class="btn ghost" type="button" onclick="location.reload()">再読込</button>
           <button class="btn ghost" type="button" onclick="showStorage()">サーバーの容量状況を表示</button>
         </div>
@@ -321,7 +321,7 @@ async function showStorage(){
           ZIPの内容で現在のデータを<strong>上書き</strong>します。<br>
           事前に「バックアップの作成」で退避しておくことを推奨します。
         </p>
-        <form method="post" action="{{ url_for('admin_restore') }}" enctype="multipart/form-data" onsubmit="return confirmRestore()">
+        <form method="post" action="{{ url_for('main.admin_restore') }}" enctype="multipart/form-data" onsubmit="return confirmRestore()">
           <input type="file" name="backup_zip" accept=".zip">
           <div class="actions">
             <button class="btn danger" type="submit">ZIPをアップロードして復元</button>
@@ -341,7 +341,7 @@ async function showStorage(){
         Google Drive / Dropbox / S3 などに置いた ZIP の<strong>直リンク</strong>を指定すると、<br>
         サーバー側が直接ダウンロードして復元します。
       </p>
-      <form method="post" action="{{ url_for('admin_restore_from_url') }}" onsubmit="return confirmRestore()">
+      <form method="post" action="{{ url_for('main.admin_restore_from_url') }}" onsubmit="return confirmRestore()">
         <div class="input-row">
           <input type="url" name="backup_url" placeholder="https://example.com/your-backup.zip" required>
           <button class="btn danger" type="submit">URLから復元</button>
