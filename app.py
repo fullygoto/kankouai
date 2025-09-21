@@ -3872,7 +3872,23 @@ ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 # ---- 画像アクセス保護（署名付きURL + 透かし）----
 IMAGE_PROTECT = os.getenv("IMAGE_PROTECT","1").lower() in {"1","true","on","yes"}
-IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or SECRET_FALLBACK or "change-me").encode("utf-8")
+# --- signing key (standalone, safe) ---
+try:
+    from flask import current_app as _ca
+    _conf = getattr(_ca, "config", None)
+except Exception:
+    _conf = None
+
+# 優先: config["IMAGES_SIGNING_KEY"] -> env IMAGES_SIGNING_KEY -> config["SECRET_KEY"] -> env SECRET_KEY -> "dev-secret"
+_sign_src = None
+if _conf:
+    _sign_src = _conf.get("IMAGES_SIGNING_KEY") or _conf.get("SECRET_KEY")
+if not _sign_src:
+    import os as _os
+    _sign_src = _os.getenv("IMAGES_SIGNING_KEY") or _os.getenv("SECRET_KEY") or "dev-secret"
+
+IMAGES_SIGNING_KEY = (_sign_src or "dev-secret").encode("utf-8")
+# --- /signing key ---
 SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
 # 署名URLのキャッシュ安全マージン（exp までの残時間から引く秒数）
 SIGNED_IMAGE_CACHE_SAFETY_SEC = int(os.getenv("SIGNED_IMAGE_CACHE_SAFETY_SEC", "300"))  # 既定: 5分
