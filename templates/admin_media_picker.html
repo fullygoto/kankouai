@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -81,3 +82,88 @@
   </div>
 </body>
 </html>
+=======
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>フォルダから画像を選ぶ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{ --bg:#f6faf9; --card:#fff; --muted:#567; --line:#e7eef5; --brand:#2a8ed8; }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
+    .container{background:var(--card);max-width:1100px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
+    h1{margin:0 0 14px}
+    .muted{color:var(--muted);font-size:.95em}
+    .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer;text-decoration:none}
+    .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
+    .btn.small{padding:6px 10px;font-size:.92em}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:12px}
+    .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
+    .name{display:block;margin-top:6px;font-size:.92em;color:#345;word-break:break-all}
+    img{max-width:100%;height:140px;object-fit:cover;border:1px solid #e5eef5;border-radius:8px;background:#fff}
+    .row{margin:10px 0}
+    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .variants{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+    .variants a{padding:6px 10px;border:1px solid #b7d3e0;border-radius:8px;background:#fff;color:#2a8ed8;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <h1>フォルダから画像を選ぶ</h1>
+      <a class="btn ghost" href="{{ return_to }}">← 編集画面に戻る</a>
+    </div>
+
+    {% if not folder %}
+      <div class="row muted">フォルダを選んでください。</div>
+      <div class="grid">
+        {% if folders and folders|length %}
+          {% for f in folders %}
+            <div class="card">
+              <div class="muted">フォルダ</div>
+              <div class="name">{{ f.name }}</div>
+              <div class="muted" style="margin-top:4px">{{ f.count }} 件</div>
+              <a class="btn small" style="margin-top:8px"
+                 href="{{ url_for('admin_media_picker', folder=f.name, return_to=return_to) }}">開く</a>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">フォルダが見つかりません。</div>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="row">
+        <a class="btn ghost small" href="{{ url_for('admin_media_picker', return_to=return_to) }}">← フォルダ一覧</a>
+        <span class="muted" style="margin-left:8px">フォルダ：<b>{{ folder }}</b>（登録日の新しい順）</span>
+      </div>
+      <div class="grid">
+        {% if files and files|length %}
+          {% for f in files %}
+            <div class="card">
+              <a href="{{ url_for('admin_media_img', filename=f.rel) }}" target="_blank" rel="noopener">
+                <img src="{{ url_for('admin_media_img', filename=f.rel) }}" alt="{{ f.name }}" loading="lazy">
+              </a>
+              <div class="name">{{ f.rel }}</div>
+              <div class="variants">
+                {# 戻りURLに ?picked=...&wm=... を付けて返す #}
+                {% set ret = return_to + ('&' if '?' in return_to else '?') %}
+                <a href="{{ ret }}picked={{ f.rel|urlencode }}&wm=none">使う（なし）</a>
+                <a href="{{ ret }}picked={{ f.rel|urlencode }}&wm=gotocity">使う（＠Goto City）</a>
+                <a href="{{ ret }}picked={{ f.rel|urlencode }}&wm=fullygoto">使う（＠fullyGOTO）</a>
+              </div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="muted">画像がありません。</div>
+        {% endif %}
+      </div>
+      <div class="row" style="margin-top:12px">
+        <a class="btn ghost" href="{{ url_for('admin_media_picker', return_to=return_to) }}">← フォルダ一覧へ</a>
+        <a class="btn ghost" href="{{ return_to }}" style="margin-left:6px">編集画面に戻る</a>
+      </div>
+    {% endif %}
+  </div>
+</body>
+</html>
+>>>>>>> origin/import/windows-snapshot

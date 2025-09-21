@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <!DOCTYPE html>
 <html>
 <head>
@@ -165,3 +166,172 @@
 </div>
 </body>
 </html>
+=======
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>観光AI 運用マニュアル</title>
+    <style>
+        body { font-family: 'Segoe UI', 'メイリオ', sans-serif; background:#f6faf9; }
+        .container { background:#fff; padding:34px; margin:40px auto; max-width:980px; border-radius:17px; box-shadow:0 4px 20px #b7d3e04d; }
+        h1 { margin:0 0 14px; }
+        h2 { color:#2a8ed8; margin:28px 0 10px; }
+        h3 { margin:18px 0 8px; color:#345; }
+        p  { line-height:1.7; }
+        ul, ol { margin:8px 0 18px 22px; }
+        code, .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#f2f6fb; padding:2px 6px; border-radius:6px; }
+        .nav { float:right; margin-bottom:10px; }
+        .nav a { color:#2a8ed8; text-decoration:none; font-weight:500; margin-left:12px; }
+        .nav a:hover { text-decoration:underline; }
+        .howto { background:#eef6fd; border-left:4px solid #5ca4df; padding:13px 18px; margin:10px 0 18px; }
+        .note { background:#fff8e6; border-left:4px solid #f2c14e; padding:10px 14px; margin:10px 0 14px; }
+        .danger { background:#ffefef; border-left:4px solid #e56565; padding:10px 14px; margin:10px 0 14px; }
+        .toc { background:#f7faf7; border:1px solid #e3ece6; border-radius:10px; padding:10px 14px; }
+        .toc a { color:#2a8ed8; text-decoration:none; }
+        .toc a:hover { text-decoration:underline; }
+        .kbd { border:1px solid #ccd9e6; }
+    </style>
+</head>
+<body>
+{% include '_back_to_data.html' %}
+<div class="container">
+    <div class="nav">
+        <a href="{{ url_for('admin_entry') }}">[データ管理へ戻る]</a>
+    </div>
+
+    <h1>観光AI 運用マニュアル</h1>
+    <div class="howto">
+        本マニュアルは <b>fullyGOTO 観光AI</b> の最新UI/仕様に対応しています。<br>
+        作業手順・トラブル対応・バックアップ・AI類義語自動生成（キュー式）まで、必要な情報をまとめています。
+    </div>
+
+    <div class="toc">
+        <b>目次</b>
+        <ol>
+            <li><a href="#login">ログインと権限</a></li>
+            <li><a href="#entry">データ登録・編集</a></li>
+            <li><a href="#list">登録済みデータの検索/並び替え/ページネーション</a></li>
+            <li><a href="#unhit">未ヒット質問のカバー</a></li>
+            <li><a href="#syn">類義語辞書（手動）とAI自動生成</a></li>
+            <li><a href="#notice">お知らせ管理</a> / <a href="#txt">テキストデータ管理（.txt）</a></li>
+            <li><a href="#backup">全体バックアップ / 復元</a></li>
+            <li><a href="#line">LINE応答の一時停止 / 再開</a></li>
+            <li><a href="#trouble">トラブルシューティング</a></li>
+            <li><a href="#appendix">付録（用語・仕様メモ）</a></li>
+        </ol>
+    </div>
+
+    <h2 id="login">1. ログインと権限</h2>
+    <ul>
+        <li>管理者（admin）と店舗ユーザーの2ロールがあります。管理者のみ実施できる機能：
+            <ul>
+                <li>未ヒット分析（一覧/頻出レポート）</li>
+                <li>類義語辞書管理・AI自動生成</li>
+                <li>全体バックアップ/復元・テキストデータ管理・お知らせ管理</li>
+                <li>LINE応答の一時停止/再開</li>
+            </ul>
+        </li>
+        <li>画面右上のナビリンクから各機能へ移動できます。</li>
+    </ul>
+
+    <h2 id="entry">2. データ登録・編集</h2>
+    <ol>
+        <li><b>観光データ管理</b>画面で「登録」または一覧から「編集」を選択します。</li>
+        <li><b>カテゴリー</b>を選ぶと、<b>観光</b>用フォームと<b>店舗系</b>フォームが自動で切り替わります。
+            <div class="note">非表示側の入力欄は送信時に<b>無効化（disabled）</b>されるため、項目が意図せず消える心配はありません。カテゴリを切り替えても安全です。</div>
+        </li>
+        <li><b>共通項目</b>：タイトル、説明、住所、地図URL、タグ、エリア（市町）※エリアは<b>1つ以上必須</b></li>
+        <li><b>観光用フォーム</b>：リンク（複数/1行1URL可）、追加情報（任意の項目＝内容を複数行追加可）</li>
+        <li><b>店舗系フォーム</b>：電話番号、休み、営業時間、駐車場（台数）、支払方法（複数選択可）、備考、リンク、追加情報</li>
+        <li><b>タグ</b>はカンマ区切りで複数指定可。<b>リンク</b>は「1行1URL」またはカンマ区切りでもOK。</li>
+        <li>登録/更新すると、LINE応答・AI検索に<b>即時反映</b>されます。</li>
+    </ol>
+
+    <h2 id="list">3. 登録済みデータの検索/並び替え/ページネーション</h2>
+    <ul>
+        <li><b>検索</b>：タイトル/説明/住所/タグ/追加情報/リンクを横断検索（入力で即フィルタ）。</li>
+        <li><b>カテゴリ/エリア/タグAND</b>で絞り込み可能（タグはカンマ区切りでAND）。</li>
+        <li><b>並び替え</b>：タイトル↑↓、カテゴリ↑↓。</li>
+        <li><b>ページサイズ</b>：10/20/30/50件、ページャー（最初/前/次/最後）あり。</li>
+        <li>件数バッジに「表示/全体」の件数が出ます。<span class="kbd">リセット</span>で全解除。</li>
+    </ul>
+
+    <h2 id="unhit">4. 未ヒット質問のカバー</h2>
+    <ol>
+        <li>ナビから<b>未ヒット質問一覧</b>または<b>未ヒット頻出レポート</b>を開く。</li>
+        <li>エントリをクリックすると、AI提案（タグ/タイトル案）付きで新規登録画面へ遷移。</li>
+        <li>内容を調整して保存すれば、次回以降の同様質問にも自動対応できます。</li>
+    </ol>
+
+    <h2 id="syn">5. 類義語辞書（手動）と AI 自動生成</h2>
+    <h3>5.1 手動メンテ</h3>
+    <ul>
+        <li>ナビの<b>類義語辞書管理</b>で、タグごとに「言い換え・表記揺れ」を追加/編集できます。</li>
+        <li>住民・観光客の呼び方に合わせて、気づいた表現は随時追加してください。</li>
+    </ul>
+
+    <h3>5.2 AI自動生成（キュー式・安全な消し込み）</h3>
+    <p>画面の<b>AI自動生成</b>から以下を指定できます：</p>
+    <ul>
+        <li><b>対象</b>：<code>missing</code>（未生成のタグのみ） / <code>all</code>（全タグ）</li>
+        <li><b>モード</b>：<code>append</code>（追記） / <code>overwrite</code>（上書き）</li>
+        <li><b>limit</b>（1〜60、既定20）：1回で処理するタグ数の上限</li>
+        <li><b>chunk</b>（1〜10、既定4）：AIへまとめて投げるタグ数（小さくすると安全、やや低速）</li>
+        <li><b>use_queue</b>（既定ON）：初回に処理対象のタグ一覧を<b>キュー化</b>し、以降は先頭から順に消化</li>
+    </ul>
+    <div class="note">
+        <b>安全なキュー消し込み：</b> 処理に<b>成功したタグのみ</b>キューから削除します。タイムアウト/失敗分はキューに残り、次回の実行で再処理されます。
+    </div>
+    <ul>
+        <li>タイムアウト閾値は環境変数 <code>SYN_AUTOGEN_DEADLINE</code>（既定20秒）。時間切れ時は<b>途中まで保存</b>し、キューはそのまま維持されます。</li>
+        <li>OpenAIのAPIキー未設定時は実行できません（<code>OPENAI_API_KEY が未設定です</code>と表示）。</li>
+        <li>内部的には高品質モデル→フォールバックの順で呼び出し、JSONを抽出して辞書に反映します。</li>
+    </ul>
+
+    <h2 id="notice">6. お知らせ管理</h2>
+    <ul>
+        <li>ナビの<b>お知らせ管理</b>で登録/編集/公開管理。公開一覧は<b>お知らせ一覧</b>から確認できます。</li>
+    </ul>
+
+    <h2 id="txt">7. テキストデータ管理（.txt）</h2>
+    <ul>
+        <li>ナビの<b>テキストデータ管理（.txt）</b>から、各種テキストファイルをアップロード/差し替えできます。</li>
+        <li>差し替え後はAI応答に即時反映されます。</li>
+    </ul>
+
+    <h2 id="backup">8. 全体バックアップ / 復元</h2>
+    <ol>
+        <li><b>全体バックアップ</b>：現在のデータ一式をZIPでダウンロードできます。</li>
+        <li><b>全体復元</b>：過去のバックアップZIPをアップロードして状態を戻せます。</li>
+    </ol>
+    <div class="danger"><b>注意：</b> 復元は現在のデータを<b>上書き</b>します。実行前に最新版バックアップの取得を強く推奨します。</div>
+
+    <h2 id="line">9. LINE応答の一時停止 / 再開</h2>
+    <ul>
+        <li>ナビの<b>LINE応答 一時停止</b>/<b>再開</b>ボタンでトグル。停止中は画面に<b>LINE停止中</b>バッジが表示されます。</li>
+    </ul>
+
+    <h2 id="trouble">10. トラブルシューティング</h2>
+    <ul>
+        <li><b>登録したのにヒットしない</b>：ページを再読み込み→タグ/エリアの設定漏れを確認→類義語辞書に表記揺れを追加。</li>
+        <li><b>管理画面がエラー</b>：再読み込み・別ブラウザで再試行。表示されたエラー文を控えて管理者へ連絡。</li>
+        <li><b>AI自動生成が途中で止まる</b>：時間切れの可能性。もう一度実行（キューは成功分のみ減り、未処理分が残ります）。<code>limit</code>や<code>chunk</code>を小さめに。</li>
+        <li><b>復元を誤って実施</b>：直近のバックアップがあれば再度復元で戻せます。なければ管理者へ。</li>
+    </ul>
+
+    <h2 id="appendix">付録：用語・仕様メモ</h2>
+    <ul>
+        <li><b>タグ</b>：カンマ区切り。AIの検索ヒントにも使用。</li>
+        <li><b>エリア</b>：市町単位、1つ以上必須（チェック未選択だと保存不可）。</li>
+        <li><b>リンク</b>：1行1URL推奨。カンマ区切りも可。</li>
+        <li><b>追加情報</b>：任意の「項目＝内容」を複数行で保持。</li>
+        <li><b>AI自動生成キュー</b>：対象タグ一覧を順次処理。<u>成功分のみ</u>消し込み。</li>
+    </ul>
+
+    <hr style="border:1px solid #e7eef5; margin-top:26px;">
+    <p class="muted" style="color:#6b7b89;">運用に関するお問い合わせ：管理担当 または Mitake合同会社サポート</p>
+</div>
+</body>
+</html>
+>>>>>>> origin/import/windows-snapshot

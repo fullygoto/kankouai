@@ -40,3 +40,8 @@ ngrok.exe
 # never track local notes
 管理画面ログイン情報.txt
 *ログイン情報*.txt
+.venv/
+__pycache__/
+*.pyc
+templates/*.bak
+!wsgi.py

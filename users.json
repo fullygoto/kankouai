@@ -19,5 +19,11 @@
     "password_hash": "scrypt:32768:8:1$EOr9jz12rh6rF19Q$56b86ffef20574bc7d4d31a62492014a991687d41d421d29c1faac9cf53fe7d9bccbba3f5fb0d071cab8c516538040ec72cea3fa927aa99b3ebf7af9f8a3863b",
     "role": "admin",
     "active": true
+  },
+  {
+    "username": "admin",
+    "password": "admin",
+    "role": "admin",
+    "disabled": false
   }
 ]

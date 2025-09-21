@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <!doctype html>
 <html lang="ja">
 <head>
@@ -213,3 +214,220 @@
   </script>
 </body>
 </html>
+=======
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>テキストデータ管理</title>
+  <style>
+    :root{
+      --bg:#f7f7fb; --card:#fff; --ink:#1f2937; --muted:#6b7280;
+      --primary:#2563eb; --primary-ink:#fff; --danger:#dc2626;
+      --ring:#c7d2fe; --border:#e5e7eb;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;font:14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "ヒラギノ角ゴ ProN", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;color:var(--ink);background:var(--bg)}
+    a{color:var(--primary);text-decoration:none}
+    a:hover{text-decoration:underline}
+
+    .wrap{max-width:1200px;margin:24px auto;padding:0 16px}
+    .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+    .title{font-size:20px;font-weight:700}
+    .toolbar{display:flex;flex-wrap:wrap;gap:8px}
+
+    .btn{
+      display:inline-flex;align-items:center;justify-content:center;gap:6px;
+      height:34px;padding:0 12px;border:1px solid var(--border);border-radius:8px;background:#fff;color:var(--ink);
+      cursor:pointer;white-space:nowrap
+    }
+    .btn:hover{background:#fafafa}
+    .btn:focus{outline:2px solid var(--ring);outline-offset:2px}
+    .btn.primary{background:var(--primary);border-color:var(--primary);color:var(--primary-ink)}
+    .btn.primary:hover{filter:brightness(0.95)}
+    .btn.ghost{background:transparent}
+    .btn.danger{background:var(--danger);border-color:var(--danger);color:#fff}
+
+    .grid{
+      display:grid;grid-template-columns:380px 1fr;gap:16px;
+    }
+    @media (max-width: 980px){
+      .grid{grid-template-columns:1fr}
+    }
+
+    .card{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 1px 0 rgba(0,0,0,.03)}
+    .card .hd{padding:12px 14px;border-bottom:1px solid var(--border);font-weight:600}
+    .card .bd{padding:12px 14px}
+
+    /* table */
+    .table-wrap{overflow:auto}
+    table{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed}
+    thead th{
+      position:sticky;top:0;background:#f9fafb;border-bottom:1px solid var(--border);
+      font-size:12px;color:var(--muted);text-align:left;padding:10px 10px
+    }
+    tbody td{border-bottom:1px solid var(--border);padding:10px 10px;vertical-align:middle}
+    tbody tr:hover{background:#fafafa}
+    .col-name{width:auto}
+    .col-size{width:110px;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
+    .col-mtime{width:160px;color:var(--muted)}
+    .col-actions{width:230px}
+    .name-cell{display:flex;align-items:center;gap:8px;min-width:0}
+    .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+    .badge{font-size:11px;color:#666;border:1px solid var(--border);padding:2px 6px;border-radius:999px;background:#fafafa}
+    .actions{display:flex;gap:6px;flex-wrap:nowrap;white-space:nowrap}
+
+    /* editor */
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+    .row .grow{flex:1}
+    input[type="text"], select{
+      height:34px;border:1px solid var(--border);border-radius:8px;padding:0 10px;background:#fff;min-width:0;width:100%
+    }
+    textarea{
+      width:100%;min-height:420px;resize:vertical;border:1px solid var(--border);
+      border-radius:10px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace
+    }
+    .muted{color:var(--muted)}
+    .flash{margin-bottom:12px;padding:10px 12px;border:1px solid var(--border);background:#fff;border-radius:10px}
+    .hint{margin:10px 0 0;color:var(--muted);font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div class="title">テキストデータ管理（.txt / .md）</div>
+      <div class="toolbar">
+        <form action="{{ url_for('admin_data_files_new') }}" method="post" class="row" style="gap:8px">
+          <input type="text" name="new_name" placeholder="新規ファイル名（例: memo.md）" required>
+          <button class="btn primary" type="submit">新規作成</button>
+        </form>
+
+        <form action="{{ url_for('admin_data_files_upload') }}" method="post" enctype="multipart/form-data" class="row" style="gap:8px">
+          <input type="file" name="txt_files" multiple accept=".txt,.md">
+          <button class="btn" type="submit">アップロード</button>
+        </form>
+        <a class="btn" href="{{ url_for('admin_entry') }}">← 管理ページに戻る</a>
+      </div>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for cat, msg in messages %}
+          <div class="flash">{{ msg }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="grid">
+      <!-- 左：一覧 -->
+      <div class="card">
+        <div class="hd">ファイル一覧</div>
+        <div class="bd table-wrap">
+          <table aria-label="ファイル一覧">
+            <thead>
+              <tr>
+                <th class="col-name">名前</th>
+                <th class="col-size">サイズ</th>
+                <th class="col-mtime">更新日時</th>
+                <th class="col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for f in files %}
+              <tr>
+                <td class="col-name">
+                  <div class="name-cell">
+                    <span class="badge">{{ f.ext }}</span>
+                    <a class="name" href="{{ url_for('admin_data_files', edit=f.name) }}" title="{{ f.name }}">
+                      {{ f.name }}
+                    </a>
+                  </div>
+                </td>
+                <td class="col-size">
+                  {% if f.size < 1024 %}
+                    {{ f.size }} B
+                  {% elif f.size < 1024*1024 %}
+                    {{ (f.size/1024)|round(1) }} KB
+                  {% else %}
+                    {{ (f.size/1024/1024)|round(2) }} MB
+                  {% endif %}
+                </td>
+                <td class="col-mtime">{{ f.mtime }}</td>
+                <td class="col-actions">
+                  <div class="actions">
+                    <a class="btn" href="{{ url_for('admin_data_files', edit=f.name) }}">編集</a>
+                    <a class="btn" href="{{ url_for('admin_data_files_download', name=f.name) }}">DL</a>
+                    <button class="btn ghost" type="button" onclick="renameFile('{{ f.name|e }}')">リネーム</button>
+                    <form action="{{ url_for('admin_data_files_delete') }}" method="post" onsubmit="return confirmDelete('{{ f.name|e }}')">
+                      <input type="hidden" name="del_name" value="{{ f.name }}">
+                      <button class="btn danger" type="submit">削除</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+              {% else %}
+              <tr><td colspan="4" class="muted">ファイルがありません。</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <p class="hint">※ 列幅固定＆折返し抑制で「名前 / サイズ / 更新日時 / 操作」が崩れないようにしています。</p>
+        </div>
+      </div>
+
+      <!-- 右：編集 -->
+      <div class="card">
+        <div class="hd">エディタ</div>
+        <div class="bd">
+          {% if edit %}
+            <form action="{{ url_for('admin_data_files_save') }}" method="post">
+              <div class="row">
+                <input class="grow" type="text" value="{{ edit }}" readonly>
+                <select name="save_encoding" title="保存エンコード">
+                  <option value="utf-8" {% if 'utf-8' in (used_enc or '')|lower %}selected{% endif %}>UTF-8</option>
+                  <option value="cp932" {% if 'cp932' in (used_enc or '')|lower %}selected{% endif %}>CP932（Windows）</option>
+                </select>
+                <button class="btn primary" type="submit">保存</button>
+                <a class="btn" href="{{ url_for('admin_data_files_download', name=edit) }}">ダウンロード</a>
+              </div>
+              {% if used_enc %}
+                <div class="muted" style="margin-bottom:8px;">読み込みエンコード: {{ used_enc }}</div>
+              {% endif %}
+              <input type="hidden" name="edit_name" value="{{ edit }}">
+              <textarea name="content" spellcheck="false">{{ content }}</textarea>
+            </form>
+            <div class="row" style="margin-top:8px;">
+              <button class="btn ghost" onclick="renameFile('{{ edit|e }}')">このファイルをリネーム</button>
+              <form action="{{ url_for('admin_data_files_delete') }}" method="post" onsubmit="return confirmDelete('{{ edit|e }}')">
+                <input type="hidden" name="del_name" value="{{ edit }}">
+                <button class="btn danger" type="submit">このファイルを削除</button>
+              </form>
+            </div>
+          {% else %}
+            <p class="muted">左の一覧から編集するファイルを選ぶか、上部ツールバーで新規作成/アップロードしてください。</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- rename / delete helpers -->
+  <form id="renameForm" action="{{ url_for('admin_data_files_rename') }}" method="post" style="display:none">
+    <input type="hidden" name="old_name" id="rn_old">
+    <input type="hidden" name="new_name" id="rn_new">
+  </form>
+  <script>
+    function renameFile(oldName){
+      const nn = prompt("新しいファイル名（.txt / .md）", oldName);
+      if(!nn || nn.trim() === "" || nn === oldName) return;
+      document.getElementById("rn_old").value = oldName;
+      document.getElementById("rn_new").value = nn.trim();
+      document.getElementById("renameForm").submit();
+    }
+    function confirmDelete(name){
+      return confirm(`「${name}」を削除します。よろしいですか？`);
+    }
+  </script>
+</body>
+</html>
+>>>>>>> origin/import/windows-snapshot

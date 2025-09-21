@@ -1,5 +1,25 @@
+# --- LINE DECORATOR SAFE BOOTSTRAP (very early) ---
+if '_noop_decorator' not in globals():
+    def _noop_decorator(*a, **kw):
+        def _wrap(fn):
+            return fn
+        return _wrap
+if '_line_add' not in globals():
+    # import時は no-op。create_app 内で本物に差し替える。
+    def _line_add(*a, **kw):
+        return _noop_decorator(*a, **kw)
+# --- /LINE DECORATOR SAFE BOOTSTRAP ---
+
+# --- SAFE BOOTSTRAP (very early) ---
+import os as _os
+from pathlib import Path as _Path
+if 'STATIC_FALLBACK' not in globals():
+    STATIC_FALLBACK = _os.getenv('STATIC_FOLDER') or str((_Path(__file__).parent / 'static').resolve())
+# --- /SAFE BOOTSTRAP ---
+
 # === Standard Library ===
 import os
+import tempfile
 import json
 import re
 import math
@@ -13,7 +33,6 @@ import uuid
 import hmac, hashlib, base64
 import zipfile
 import io
-# 追加が必要な標準ライブラリ
 import shutil      # _has_free_space で disk_usage を使用
 import tarfile     # _stream_backup_targz で使用
 import queue       # ストリーミング用の内部キュー
@@ -25,17 +44,58 @@ import urllib.parse as _u  # ← _extract_wm_flags などで使用
 from difflib import get_close_matches  # ★追加
 import secrets          # ← これを追加
 
-
 # === Third-Party ===
 from dotenv import load_dotenv
 load_dotenv()
 
+# --- LINE no-op decorator (import-time safe) ---
+def _noop_decorator(*a, **kw):
+    def _wrap(fn):
+        return fn
+    return _wrap
+# --- /LINE no-op ---
+
+
+
+
+
+# --- SAFE: avoid duplicate blueprint registration ---
+try:
+    from flask import Flask as _Flask
+    _orig_register_bp = _Flask.register_blueprint
+    def _register_blueprint_safe(self, bp, *args, **kwargs):
+        # すでに同名が登録済みならスキップ
+        if bp.name in self.blueprints:
+            return
+        try:
+            return _orig_register_bp(self, bp, *args, **kwargs)
+        except AssertionError as e:
+            # "overwriting an existing endpoint function" は重複登録なので無視
+            if "overwriting an existing endpoint function" in str(e):
+                return
+            raise
+    _Flask.register_blueprint = _register_blueprint_safe
+except Exception:
+    pass
+# --- /SAFE ---
+# --- SAFE SECRET FALLBACK (import-time safe) ---
+SECRET_FALLBACK = (
+    os.getenv("IMAGES_SIGNING_KEY")
+    or os.getenv("FLASK_SECRET_KEY")
+    or os.getenv("SECRET_KEY")
+    or "change-me"
+)
+# --- /SAFE SECRET FALLBACK ---
+# --- SAFE IMPORT BOOTSTRAP ---
+from pathlib import Path
+
+DEFAULT_STATIC_FOLDER = str((Path(__file__).parent / "static").resolve())
+# --- /SAFE IMPORT BOOTSTRAP ---
 from flask import (
-    Flask, render_template, request, redirect, url_for, flash, session,
+    Flask, Blueprint, render_template, request, redirect, url_for, flash, session,
     jsonify, send_file, abort, send_from_directory, render_template_string, Response,
     current_app as _flask_current_app,  # ← これを追加
 )
-
 
 # --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
 try:
@@ -44,7 +104,6 @@ try:
 except Exception:
     # フォールバック（セッションに role が無ければ 403）
     def login_required(view_func):
-        from functools import wraps  # すでに上で import しているが二重でもOK
         @wraps(view_func)
         def _wrapped(*args, **kwargs):
             if not session.get("role"):
@@ -95,18 +154,80 @@ from linebot.models import (
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
+# --- Blueprint / App globals ---
+bp = Blueprint("main", __name__)
+app: Flask | None = None
+MAX_UPLOAD_MB = 16
+
+
+def _get_logger():
+    if isinstance(app, Flask):
+        return app.logger
+    return logging.getLogger(__name__)
+
+
+
+# --- media/watermark accessors (read-only phase) ---
+def get_media_root(app_like=None):
+    """
+    _cfg(None, "MEDIA_ROOT", _cfg(None, "MEDIA_ROOT", MEDIA_ROOT)) の取得（未設定時は static の兄弟 'media/img' を既定）
+    """
+    try:
+        base = _cfg(app_like, "MEDIA_ROOT", None)
+    except Exception:
+        base = None
+    if base:
+        return base
+    # STATIC_FALLBACK は既に先頭で定義済み
+    from pathlib import Path as __Path
+    return str((__Path(STATIC_FALLBACK).parent / "media" / "img"))
+
+def get_watermark_dir(app_like=None):
+    """
+    _cfg(None, "WATERMARK_DIR", _cfg(None, "WATERMARK_DIR", WATERMARK_DIR)) の取得（未設定時は static/watermarks）
+    """
+    default = str(__import__("os").path.join(STATIC_FALLBACK, "watermarks"))
+    try:
+        return _cfg(app_like, "WATERMARK_DIR", default)
+    except Exception:
+        return default
+# --- /media/watermark accessors ---
+def _cfg(key: str, default=None):
+    flask_app = _flask_current_app
+    if flask_app:
+        return flask_app.config.get(key, default)
+    return default
+
+# === safe mkdir helpers（import時に落ちないように／どこでも呼べる版） ===
+def _safe_mkdir(path_like: Any) -> None:
+    """親は作らず。失敗してもアプリは落とさない。"""
+    try:
+        os.makedirs(str(path_like), exist_ok=True)
+    except Exception as e:
+        # app 未初期化でも落ちないように best-effort ログ
+        try:
+            from flask import current_app as _app
+            _app.logger.warning(f"[mkdir] skip {path_like}: {e.__class__.__name__}")
+        except Exception:
+            pass
+
+def _safe_mkdir_p(path_like: Any) -> None:
+    """親も含めて作成（parents=True）。失敗してもアプリは落とさない。"""
+    try:
+        Path(path_like).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        try:
+            from flask import current_app as _app
+            _app.logger.warning(f"[mkdir] skip {path_like}: {e.__class__.__name__}")
+        except Exception:
+            pass
+
 # =========================
 #  Flask / 設定
 # =========================
-app = Flask(__name__)
-
 from config import get_config
-app.config.from_object(get_config())
 
-# 以降のメッセージ等で使うため、上限MBを設定から参照
-MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
-
-@app.template_filter("b64encode")
+@bp.app_template_filter("b64encode")
 def jinja_b64encode(s):
     if s is None:
         return ""
@@ -125,7 +246,7 @@ def _ensure_csrf_token():
         session["_csrf_token"] = tok
     return tok
 
-@app.context_processor
+@bp.app_context_processor
 def _inject_csrf_token():
     # テンプレートで csrf_token() が常に呼べるようになる
     return dict(csrf_token=_ensure_csrf_token)
@@ -135,12 +256,12 @@ def _inject_csrf_token():
 BUILD_ID = os.getenv("BUILD_ID") or datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
 
 # Jinja から {{ BUILD_ID }} を使えるように注入
-@app.context_processor
+@bp.app_context_processor
 def _inject_build_id():
     return dict(BUILD_ID=BUILD_ID)
 
 # 管理系や運用系ページは常に最新を返す（ブラウザキャッシュ無効化）
-@app.after_request
+@bp.after_app_request
 def _no_cache_admin(resp):
     p = (request.path or "")
     if p.startswith(("/admin", "/notices")):
@@ -153,7 +274,6 @@ def _no_cache_admin(resp):
 # === サーバ内スナップショット（ZIP）: 生成 / 一覧 / 復元 / DL ===================
 
 def _snapshot_dir():
-    import os
     return os.environ.get("SNAPSHOT_DIR", "backups")
 
 def _snapshot_includes():
@@ -161,14 +281,13 @@ def _snapshot_includes():
     ZIPに含めるパス（カンマ区切り環境変数 SNAPSHOT_INCLUDES があれば上書き）
     既定： data/, static/uploads/, images/, entries.json
     """
-    import os
     raw = os.environ.get("SNAPSHOT_INCLUDES", "data,static/uploads,images,entries.json")
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 def _snapshot_list():
-    import os, glob, datetime as dt
+    import glob, datetime as dt
     base = _snapshot_dir()
-    os.makedirs(base, exist_ok=True)
+    _safe_mkdir_p(base)
     files = sorted(glob.glob(os.path.join(base, "snapshot-*.zip")))
     out = []
     for f in files:
@@ -184,9 +303,9 @@ def _snapshot_create_internal(tag: str | None = None):
     """
     サーバ内にZIPを作成してパスを返す。失敗時は例外。
     """
-    import os, time, zipfile, os.path as op
+    import os.path as op
     base = _snapshot_dir()
-    os.makedirs(base, exist_ok=True)
+    _safe_mkdir_p(base)
     ts = time.strftime("%Y%m%d-%H%M%S")
     name = f"snapshot-{ts}{('-'+tag) if tag else ''}.zip"
     out = op.join(base, name)
@@ -212,7 +331,7 @@ def _snapshot_restore_internal(fname: str):
     """
     ZIPから復元する。許可されたパス（entries.json / data/ / static/uploads/ / images/）のみ展開。
     """
-    import os, zipfile, os.path as op
+    import os.path as op
     base = op.abspath(_snapshot_dir())
     path = op.abspath(op.join(base, fname))
     if not path.startswith(base) or not op.isfile(path):
@@ -239,7 +358,7 @@ def _snapshot_restore_internal(fname: str):
     return path
 
 
-@app.route("/admin/snapshot/create", methods=["POST"])
+@bp.route("/admin/snapshot/create", methods=["POST"])
 @login_required
 def admin_snapshot_create():
     if session.get("role") != "admin":
@@ -254,7 +373,7 @@ def admin_snapshot_create():
         flash(f"スナップショット作成に失敗しました: {e}")
     return redirect(url_for("admin_entries_edit"))
 
-@app.route("/admin/snapshot/download/<path:fname>")
+@bp.route("/admin/snapshot/download/<path:fname>")
 @login_required
 def admin_snapshot_download(fname):
     if session.get("role") != "admin":
@@ -267,7 +386,7 @@ def admin_snapshot_download(fname):
         _abort(404)
     return send_from_directory(base, op.basename(path), as_attachment=True)
 
-@app.route("/admin/snapshot/restore", methods=["POST"])
+@bp.route("/admin/snapshot/restore", methods=["POST"])
 @login_required
 def admin_snapshot_restore():
     if session.get("role") != "admin":
@@ -287,7 +406,7 @@ def admin_snapshot_restore():
     return redirect(url_for("admin_entries_edit"))
 # ========================================================================
 
-@app.context_processor
+@bp.app_context_processor
 def _inject_template_helpers():
     def has_endpoint(name: str) -> bool:
         try:
@@ -496,12 +615,7 @@ def _env_truthy(val: str | None) -> bool:
     return v not in ("", "0", "false", "off", "no")
 
 def _watermark_enabled() -> bool:
-    # どれか1つでも真なら有効（Renderで WATERMARK_ENABLE=1 ならOK）
-    return (
-        _env_truthy(os.getenv("WATERMARK_ENABLE")) or
-        _env_truthy(os.getenv("WATERMARK_ENABLED")) or
-        _env_truthy(os.getenv("WM_ENABLE"))
-    )
+    return bool(_cfg("WATERMARK_ENABLE", True))
 
 # === 透かし種別の解釈ヘルパー ===
 def _resolve_wm_kind(arg: str | None):
@@ -516,27 +630,13 @@ def _resolve_wm_kind(arg: str | None):
         return "gotocity"
     return None
     
-# ==== 画像配信（署名 + 透かし対応）=============================
-# 依存: Pillow, safe_join, send_file, load_entries(), app など
-# 既存の設定が無い場合のデフォルト
-MEDIA_ROOT = os.getenv("MEDIA_ROOT", "media/img")
-WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
-IMAGE_PROTECT    = os.getenv("IMAGE_PROTECT",    "0").lower() in {"1","true","on","yes"}
-
-# ==== 画像保存/配信のディレクトリ統一（互換アライメント） ====
-MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img")
-IMAGES_DIR = os.getenv("IMAGES_DIR") or MEDIA_ROOT
-MEDIA_ROOT = IMAGES_DIR  # ← 配信・保存とも同じ実体を指すように統一
-try:
-    app.logger.info("[media] MEDIA_ROOT=%s  IMAGES_DIR=%s  URL_PREFIX=%s",
-                    MEDIA_ROOT, IMAGES_DIR, MEDIA_URL_PREFIX)
-except Exception:
-    pass
+# ==== 画像保存/配信ヘルパー ====
+def _media_dir() -> Path:
+    return Path(_cfg("MEDIA_DIR", _cfg("IMAGES_DIR", "media/img"))).resolve()
 
 
-# === 保存ヘルパー（/media/img 配下に“確実に保存”＋mtimeで新しい順を保証） ===
-MEDIA_DIR = Path(MEDIA_ROOT).resolve()
-MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+def _media_url_prefix() -> str:
+    return _cfg("MEDIA_URL_PREFIX", "/media/img")
 
 def _wm_variant_name(base_filename: str, kind: str, *, out_ext: str | None=None) -> str:
     """kind: 'fullygoto' | 'gotocity' | 'src'"""
@@ -552,7 +652,8 @@ def _touch_latest(path: Path, bias_sec: int = 0) -> None:
 
 def _list_existing_files(order: str = "new") -> list[dict]:
     items = []
-    for p in MEDIA_DIR.glob("*"):
+    media_dir = _media_dir()
+    for p in media_dir.glob("*"):
         if p.is_file():
             items.append({"name": p.name, "mtime": p.stat().st_mtime})
     items.sort(key=lambda x: x["mtime"], reverse=(order == "new"))
@@ -570,7 +671,8 @@ def list_media_for_grid(order: str = "new", include_derivatives: bool = True) ->
     - order: 'new'（更新日時降順） or 'name'（名前昇順）
     """
     rows: list[tuple[str, float]] = []
-    for p in MEDIA_DIR.glob("*"):
+    media_dir = _media_dir()
+    for p in media_dir.glob("*"):
         if not p.is_file():
             continue
         name = p.name
@@ -592,7 +694,7 @@ def list_media_for_grid(order: str = "new", include_derivatives: bool = True) ->
     return [n for n, _ in rows]
 
 def _save_bytes(dst: Path, data: bytes, *, bias_sec: int = 0) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    _safe_mkdir_p(dst.parent)
     with open(dst, "wb") as f:
         f.write(data)
     _touch_latest(dst, bias_sec=bias_sec)
@@ -625,7 +727,7 @@ def _render_watermark_bytes(src_path: Path, mode: str) -> tuple[bytes, str]:
         return buf.read(), out_ext
 
 # --- Watermark assets (static/watermarks 以下) ---
-WATERMARK_DIR = os.getenv("WATERMARK_DIR") or os.path.join(app.static_folder, "watermarks")
+WATERMARK_DIR = os.getenv("WATERMARK_DIR") or os.path.join(STATIC_FALLBACK, "watermarks")
 WATERMARK_FILES = {
     "fullygoto": "wm_fullygoto.png",
     "gotocity":  "wm_gotocity.png",
@@ -635,7 +737,7 @@ def _wm_overlay_path(mode: str) -> str | None:
     fn = WATERMARK_FILES.get((mode or "").strip().lower())
     if not fn:
         return None
-    p = os.path.join(WATERMARK_DIR, fn)
+    p = os.path.join(_cfg(None, "WATERMARK_DIR", _cfg(None, "WATERMARK_DIR", _cfg(None, "WATERMARK_DIR", WATERMARK_DIR))), fn)
     return p if os.path.isfile(p) else None
 
 
@@ -822,7 +924,7 @@ def _wm_normalize(v) -> str | None:
 
 
 
-@app.route("/media/img/<path:filename>")
+@bp.route("/media/img/<path:filename>")
 def serve_image(filename):
     """
     署名検証 → 実ファイル解決 → 透かしモード決定（URL優先→エントリ既定） → 返却。
@@ -956,9 +1058,9 @@ def serve_image(filename):
     from werkzeug.utils import safe_join
     def _find_image_path(fn: str) -> str | None:
         candidates = []
-        if "MEDIA_ROOT" in globals() and globals().get("MEDIA_ROOT"):
-            candidates.append(globals()["MEDIA_ROOT"])
-        for d in {globals().get("IMAGES_DIR"), os.getenv("MEDIA_ROOT", "media/img"), "media/img", "media"}:
+        if "get_media_root(None)" in globals() and globals().get("get_media_root(None)"):
+            candidates.append(globals()["get_media_root(None)"])
+        for d in {globals().get("get_media_root(None)"), os.getenv("get_media_root(None)", "media/img"), "media/img", "media"}:
             if d and d not in candidates:
                 candidates.append(d)
         for base in candidates:
@@ -1130,16 +1232,17 @@ def _preferred_media_url(fn: str) -> str:
 
 
 # 別名プレフィックス（環境変数で差し替え可）
-MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img").rstrip("/")
 
-# 上の serve_image を 1つだけ残した状態で、この追記を入れる
-if MEDIA_URL_PREFIX != "/media/img":
+def _register_media_alias(flask_app: Flask) -> None:
+    prefix = _media_url_prefix().rstrip("/")
+    if prefix == "/media/img":
+        return
     try:
-        app.add_url_rule(
-            f"{MEDIA_URL_PREFIX}/<path:filename>",
-            endpoint="serve_image_alias",   # ← エンドポイント名は重複させない
-            view_func=serve_image,          # ← 上で定義済みの関数を再利用
-            methods=["GET", "HEAD"]
+        flask_app.add_url_rule(
+            f"{prefix}/<path:filename>",
+            endpoint="serve_image_alias",
+            view_func=serve_image,
+            methods=["GET", "HEAD"],
         )
     except AssertionError:
         pass
@@ -1826,7 +1929,7 @@ def _mode_to_cats(mode: str):
     return None  # all
 
 
-@app.route("/api/nearby", methods=["GET"])
+@bp.route("/api/nearby", methods=["GET"])
 def api_nearby():
     """
     例: /api/nearby?lat=32.7&lng=128.8&r=2000&cat=観光,飲食&limit=20
@@ -2160,7 +2263,6 @@ CATEGORIES = [
     "生活",
     "趣味・習い事",
 ]
-app.jinja_env.globals["CATEGORIES"] = CATEGORIES  # テンプレートから参照できるようにする
 
 
 # --- LINE 応答制御フラグ（環境変数で上書き可） ---
@@ -2173,13 +2275,19 @@ LINE_ASK_AREA_FIRST = os.getenv("LINE_ASK_AREA_FIRST", "1").lower() in {"1", "tr
 # LINE は使わない環境では callback を閉じる/無効化でもOK
 
 # --- Jinja2 互換用: 'string' / 'mapping' テストが無い環境向け ---
-if 'string' not in app.jinja_env.tests:
-    app.jinja_env.tests['string'] = lambda v: isinstance(v, str)
-if 'mapping' not in app.jinja_env.tests:
-    from collections.abc import Mapping
-    app.jinja_env.tests['mapping'] = lambda v: isinstance(v, Mapping)
+def _configure_jinja_env(flask_app: Flask) -> None:
+    if 'string' not in flask_app.jinja_env.tests:
+        flask_app.jinja_env.tests['string'] = lambda v: isinstance(v, str)
+    if 'mapping' not in flask_app.jinja_env.tests:
+        from collections.abc import Mapping
+        flask_app.jinja_env.tests['mapping'] = lambda v: isinstance(v, Mapping)
+    flask_app.jinja_env.globals["CATEGORIES"] = CATEGORIES
+    flask_app.jinja_env.globals["safe_url_for"] = safe_url_for
+    flask_app.jinja_env.globals["signed_image_url"] = lambda fn, wm=False: build_signed_image_url(fn, wm=wm, external=False)
 
-app.config["JSON_AS_ASCII"] = False  # 日本語をJSONでそのまま返す
+
+# 本番では必ず環境変数で設定
+# セッション設定などは create_app 内で適用
 
 
 # === 透かしコマンド／ユーザー選好ユーティリティ =========================
@@ -2193,7 +2301,7 @@ def _load_user_prefs() -> dict:
         return {}
 
 def _save_user_prefs(prefs: dict) -> None:
-    WM_PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _safe_mkdir_p(WM_PREFS_PATH.parent)
     WM_PREFS_PATH.write_text(json.dumps(prefs, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def _get_user_wm(uid: str) -> str:
@@ -2246,16 +2354,8 @@ def parse_wm_command(text: str):
 # ======================================================================
 
 # 本番では必ず環境変数で設定
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "supersecret")
-
-# セッション設定
+# セッション設定は create_app で反映
 SECURE_COOKIE = os.environ.get("SESSION_COOKIE_SECURE", "1").lower() in {"1", "true", "on", "yes"}
-app.config.update(
-    SESSION_COOKIE_SECURE=SECURE_COOKIE,
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_HTTPONLY=True,
-    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
-)
 # ==== Rate limit setup (put right after Flask settings) ====
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -2268,8 +2368,6 @@ _APP_ENV_EARLY = os.getenv("APP_ENV", "dev").lower()
 # 本番で ProxyHop が 0 以下は危険なのでブロック
 if _APP_ENV_EARLY in {"prod", "production"} and TRUSTED_PROXY_HOPS <= 0:
     raise RuntimeError("TRUSTED_PROXY_HOPS must be >= 1 in production")
-
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS, x_proto=1, x_host=1, x_port=1)
 
 # flask-limiter が無い環境でも落ちないように（util も含めて try）
 try:
@@ -2296,25 +2394,28 @@ if _APP_ENV_EARLY in {"prod", "production"} and (not RATE_STORAGE_URI or RATE_ST
     raise RuntimeError("In production, set RATE_STORAGE_URI to a shared backend (e.g., redis://...)")
 
 if Limiter:
-    # ★一度だけ初期化し、必要なら後からデコレータで利用
     limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URI)
-    limiter.init_app(app)
-    limit_deco = limiter.limit
+
+    def limit_deco(*a, **k):  # type: ignore
+        return limiter.limit(*a, **k)
 else:
     limiter = None
-    def limit_deco(*a, **k):
-        def _wrap(f): return f
+
+    def limit_deco(*a, **k):  # type: ignore
+        def _wrap(f):
+            return f
+
         return _wrap
 
 LOGIN_LIMITS = os.getenv("LOGIN_LIMITS", "10/minute;100/day")
 
-@app.errorhandler(429)
+@bp.app_errorhandler(429)
 def _ratelimit_handler(e):
     return jsonify({"error": "Too Many Requests", "detail": "Rate limit exceeded."}), 429
 # ==== /Rate limit setup ====
 
-@app.errorhandler(RequestEntityTooLarge)
-@app.errorhandler(413)
+@bp.app_errorhandler(RequestEntityTooLarge)
+@bp.app_errorhandler(413)
 def _too_large(e):
     wants_json = (
         request.is_json
@@ -2441,7 +2542,7 @@ CSRF_STRICT = (os.getenv("CSRF_STRICT", "1").lower() in {"1","true","on","yes"})
 
 
 
-@app.before_request
+@bp.before_app_request
 def _csrf_referer_origin_guard():
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return
@@ -2489,8 +2590,8 @@ def _load_admin_nets():
 
 _ADMIN_NETS = _load_admin_nets()
 # ログ
-app.logger.info("[admin-ip] allowlist=%s  APP_ENV=%s",
-                ", ".join(map(str, _ADMIN_NETS)) or "(empty)", APP_ENV)
+_get_logger().info("[admin-ip] allowlist=%s  APP_ENV=%s",
+                   ", ".join(map(str, _ADMIN_NETS)) or "(empty)", APP_ENV)
 
 def _admin_ip_ok(ip: str) -> bool:
     # 本番は未設定＝拒否、開発系は未設定でも許可
@@ -2502,7 +2603,7 @@ def _admin_ip_ok(ip: str) -> bool:
         return False
     return any(ipobj in n for n in _ADMIN_NETS)
 
-@app.before_request
+@bp.before_app_request
 def _restrict_admin_ip():
     if not ADMIN_IP_ENFORCE:
         return  # ← 開発中はここで早期リターン＝IP制限OFF
@@ -2513,7 +2614,7 @@ def _restrict_admin_ip():
         if not _admin_ip_ok(client_ip):
             abort(403, description="Forbidden: your IP is not allowed for admin/shop.")
 # ===== ここまで =====
-@app.route("/nearby", methods=["GET"])
+@bp.route("/nearby", methods=["GET"])
 def nearby_page():
     html = """
 <!DOCTYPE html><html lang="ja"><head>
@@ -2602,7 +2703,7 @@ btn.addEventListener("click", ()=>{
     return render_template_string(html)
 
 
-@app.route("/_debug/ip")
+@bp.route("/_debug/ip")
 def _debug_ip():
     if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
         abort(404)
@@ -2618,7 +2719,7 @@ def login_required(fn):
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
             flash("ログインしてください")
-            return redirect(url_for("login"))
+            return redirect(url_for("main.login"))
         return fn(*args, **kwargs)
     return wrapper
 
@@ -2698,12 +2799,9 @@ def safe_url_for(endpoint, **values):
         except Exception:
             return "#"
 
-# Jinja から直接呼べるように（既に設定済ならこの行で上書きされます）
-app.jinja_env.globals["safe_url_for"] = safe_url_for
-# 明示的に署名URLを作りたいときはこれも使えます（任意）
-app.jinja_env.globals["signed_image_url"] = lambda fn, wm=False: build_signed_image_url(fn, wm=wm, external=False)
 
-@app.route("/admin/_sign_image", methods=["GET"])
+
+@bp.route("/admin/_sign_image", methods=["GET"])
 @login_required
 def admin_sign_image():
     """
@@ -2747,11 +2845,55 @@ REASK_UNHIT   = os.environ.get("REASK_UNHIT", "1").lower() in {"1", "true", "on"
 SUGGEST_UNHIT = os.environ.get("SUGGEST_UNHIT", "1").lower() in {"1", "true", "on", "yes"}
 ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1", "true", "on", "yes"}
 
-# OpenAI v1 クライアント
-client = OpenAI(timeout=15)
+
+# ==== OpenAI client: 遅延生成ファクトリ（OPENAI_API_KEYが無ければ None を返す）====
+import os
+from typing import Optional, Any
+
+try:
+    from openai import OpenAI
+    _HAVE_OPENAI = True
+except Exception:
+    OpenAI = None  # type: ignore
+    _HAVE_OPENAI = False
+
+_openai_client = None  # type: Optional["OpenAI"]
+
+def get_openai_client() -> Optional["OpenAI"]:
+    """
+    OPENAI_API_KEY が無い／openai が未インストールなら None を返す。
+    初回アクセス時にだけクライアントを生成（遅延生成）。
+    """
+    global _openai_client
+    if not _HAVE_OPENAI:
+        return None
+    if _openai_client is not None:
+        return _openai_client
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    _openai_client = OpenAI(api_key=api_key, timeout=15)
+    return _openai_client
 
 
-# --- OpenAIラッパ（モデル切替を一元管理：正規版） ---
+def _extract_output_text(res: Any) -> str:
+    txt = getattr(res, "output_text", None)
+    if isinstance(txt, str) and txt.strip():
+        return txt.strip()
+    try:
+        output = getattr(res, "output", None)
+        if isinstance(output, list) and output:
+            content = getattr(output[0], "content", None)
+            if isinstance(content, list) and content:
+                text_part = getattr(content[0], "text", None)
+                if isinstance(text_part, str) and text_part.strip():
+                    return text_part.strip()
+    except Exception:
+        pass
+    return ""
+
+
+# ==== Chat ラッパ（openai_chat を“遅延クライアント”で実行）====
 if 'openai_chat' not in globals():
     def openai_chat(model, messages, **kwargs):
         """
@@ -2759,8 +2901,6 @@ if 'openai_chat' not in globals():
         messages: str か [{"role","content"}] のどちらもOK。
         max_tokens 系は max_output_tokens に正規化。
         """
-        if not os.environ.get("OPENAI_API_KEY"):
-            return ""
         safe_model = "gpt-5-mini"
         mot = (kwargs.pop("max_output_tokens", None)
                or kwargs.pop("max_completion_tokens", None)
@@ -2774,13 +2914,21 @@ if 'openai_chat' not in globals():
         else:
             msgs = [{"role": "user", "content": str(messages)}]
 
+        client = get_openai_client()
+        if client is None:
+            try:
+                app.logger.warning("openai_chat skipped: OPENAI not configured or SDK missing")
+            except Exception:
+                pass
+            return ""
+
         try:
             res = client.responses.create(
                 model=safe_model,
                 input=[{"role": m["role"], "content": m["content"]} for m in msgs],
                 max_output_tokens=max_tokens,
             )
-            return (getattr(res, "output_text", "") or "").strip()
+            return _extract_output_text(res)
         except Exception as e:
             try:
                 app.logger.exception("openai_chat failed: %s", e)
@@ -2852,15 +3000,15 @@ try:
             return WAIT_MESSAGES[idx]
 
         # ---------------------------------------------------------------------------
-        app.logger.info("LINE enabled")
+        _get_logger().info("LINE enabled")
     else:
         line_bot_api = None
         handler = None
-        app.logger.warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
+        _get_logger().warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
 except Exception as e:
     line_bot_api = None
     handler = None
-    app.logger.exception("LINE init failed: %s", e)
+    _get_logger().exception("LINE init failed: %s", e)
 
 # === 出典フッター強制付与ラッパ（すべての reply/push を横取り） ===
 
@@ -3047,7 +3195,28 @@ if _line_enabled() and handler:
         return False
 
 # ==== ここから：統合した TextMessage ハンドラ（1本だけ残す・修正版） ====
-@handler.add(MessageEvent, message=TextMessage)
+
+# --- LINE No-Op fallback (when env not provided) ---
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+if not (LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET):
+    class _NoopHandler:
+        def add(self, *a, **k):
+            def _wrap(f):
+                return f
+            return _wrap
+        def handle(self, *a, **k):
+            return None
+    class _NoopAPI:
+        def __getattr__(self, name):
+            def _noop(*a, **k):
+                return None
+            return _noop
+    handler = _NoopHandler()
+    line_bot_api = _NoopAPI()
+# --- /LINE No-Op fallback ---
+
+@_line_add(MessageEvent, message=TextMessage)
 def handle_message(event):
     try:
         text = getattr(event.message, "text", "") or ""
@@ -3372,7 +3541,7 @@ def handle_message(event):
 # ==== ここまで：統合ハンドラ ====
 
 
-@handler.add(FollowEvent)
+@_line_add(FollowEvent)
 def on_follow(event):
     """
     友だち追加（またはブロック解除）時の最初の挨拶メッセージを送る。
@@ -3419,7 +3588,7 @@ def on_follow(event):
             app.logger.error(f"[follow] reply failed: {e}")
 
 # === LocationMessage は 1 本だけに統合（前半+後半の機能を統合）===
-@handler.add(MessageEvent, message=LocationMessage)
+@_line_add(MessageEvent, message=LocationMessage)
 def on_location(event):
     # 0) ミュート／一時停止ゲート（先頭で早期return）
     try:
@@ -3504,7 +3673,7 @@ def on_location(event):
 
 from urllib.parse import parse_qs
 
-@handler.add(PostbackEvent)
+@_line_add(PostbackEvent)
 def on_postback(event):
     # 0) ミュート／一時停止ゲート
     try:
@@ -3697,17 +3866,29 @@ SEND_LOG_FILE   = os.path.join(LOG_DIR, "send_log.jsonl")
 SEND_LOG_SAMPLE = float(os.environ.get("SEND_LOG_SAMPLE", "1.0"))
 
 
-# === Images: config + route + normalized save (唯一の正) ===
-MEDIA_URL_PREFIX = "/media/img"  # 画像URLの先頭
-IMAGES_DIR = os.path.join(DATA_DIR, "images")
-os.makedirs(IMAGES_DIR, exist_ok=True)
 
 # 入力として受け付ける拡張子（出力は常に .jpg）
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 # ---- 画像アクセス保護（署名付きURL + 透かし）----
 IMAGE_PROTECT = os.getenv("IMAGE_PROTECT","1").lower() in {"1","true","on","yes"}
-IMAGES_SIGNING_KEY = (os.getenv("IMAGES_SIGNING_KEY") or app.secret_key or "change-me").encode("utf-8")
+# --- signing key (standalone, safe) ---
+try:
+    from flask import current_app as _ca
+    _conf = getattr(_ca, "config", None)
+except Exception:
+    _conf = None
+
+# 優先: config["IMAGES_SIGNING_KEY"] -> env IMAGES_SIGNING_KEY -> config["SECRET_KEY"] -> env SECRET_KEY -> "dev-secret"
+_sign_src = None
+if _conf:
+    _sign_src = _conf.get("IMAGES_SIGNING_KEY") or _conf.get("SECRET_KEY")
+if not _sign_src:
+    import os as _os
+    _sign_src = _os.getenv("IMAGES_SIGNING_KEY") or _os.getenv("SECRET_KEY") or "dev-secret"
+
+IMAGES_SIGNING_KEY = (_sign_src or "dev-secret").encode("utf-8")
+# --- /signing key ---
 SIGNED_IMAGE_TTL_SEC = int(os.getenv("SIGNED_IMAGE_TTL_SEC","604800"))  # 既定=7日
 # 署名URLのキャッシュ安全マージン（exp までの残時間から引く秒数）
 SIGNED_IMAGE_CACHE_SAFETY_SEC = int(os.getenv("SIGNED_IMAGE_CACHE_SAFETY_SEC", "300"))  # 既定: 5分
@@ -3999,7 +4180,8 @@ def force_https_url_for(endpoint: str, **values) -> str:
                 base = (request.url_root or "").rstrip("/")
             except Exception:
                 base = ""
-        u = f"{base}{MEDIA_URL_PREFIX}/{filename}{query}" if base else f"{MEDIA_URL_PREFIX}/{filename}{query}"
+        prefix = _media_url_prefix()
+        u = f"{base}{prefix}/{filename}{query}" if base else f"{prefix}/{filename}{query}"
         return _force_https_abs(u)
 
 
@@ -4171,14 +4353,14 @@ WM_VARIANTS = {
 
 def _ensure_wm_variants(basename: str) -> dict:
     """
-    IMAGES_DIR/<basename> を元に、3種の静的ファイルを作る。
+    _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))/<basename> を元に、3種の静的ファイルを作る。
     戻り値: {"none": "xxx.jpg", "gotocity": "...", "fullygoto": "..."}
     """
     import os
     from PIL import Image
 
     root, ext = os.path.splitext(basename)
-    src = os.path.join(IMAGES_DIR, basename)
+    src = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), basename)
     out = {}
 
     if not os.path.isfile(src):
@@ -4187,7 +4369,7 @@ def _ensure_wm_variants(basename: str) -> dict:
     im = Image.open(src).convert("RGB")
     for key, spec in WM_VARIANTS.items():
         fn  = root + spec["suffix"] + ext
-        dst = os.path.join(IMAGES_DIR, fn)
+        dst = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), fn)
         try:
             if spec["text"]:
                 im2 = _apply_text_watermark(im, spec["text"])
@@ -4222,11 +4404,9 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
         TARGET_BYTES = int(globals().get("TARGET_JPEG_MAX_BYTES", 350 * 1024))
     except Exception:
         TARGET_BYTES = 350 * 1024
-    try:
-        IMAGES_DIR = globals()["IMAGES_DIR"]
-    except KeyError:
-        # 通常はグローバルにありますが、保険
-        IMAGES_DIR = os.path.join(os.getcwd(), "data", "images")
+    # 画像保存先（グローバルが無ければ data/images にフォールバック）
+    _images_dir = globals().get("IMAGES_DIR", os.path.join(os.getcwd(), "data", "images"))
+
     # Pillow のランチョス補間（無ければ BICUBIC）
     try:
         RESAMPLE = globals().get("RESAMPLE_LANCZOS", Image.LANCZOS)
@@ -4245,7 +4425,7 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
     if delete:
         if previous:
             try:
-                os.remove(os.path.join(IMAGES_DIR, previous))
+                os.remove(os.path.join(_images_dir, previous))
             except Exception:
                 # 失敗しても致命ではない
                 pass
@@ -4259,6 +4439,9 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
     fname = secure_filename(file_storage.filename or "")
     _, ext = os.path.splitext(fname)
     ext = ext.lower().strip()
+
+    # 画像保存先（グローバルが無ければ data/images にフォールバック）
+    _images_dir = globals().get("IMAGES_DIR", os.path.join(os.getcwd(), "data", "images"))
 
     try:
         # 画像読み込み（爆弾対策もここで拾う）
@@ -4357,16 +4540,16 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
                 best = encode(75, cur)
 
         # 保存（.jpg 固定）
-        os.makedirs(IMAGES_DIR, exist_ok=True)
+        _safe_mkdir(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR)))
         new_name = f"{uuid.uuid4().hex}.jpg"
-        save_path = os.path.join(IMAGES_DIR, new_name)
+        save_path = os.path.join(_images_dir, new_name)
         with open(save_path, "wb") as wf:
             wf.write(best)
 
         # 旧ファイル削除（置換）
         if previous and previous != new_name:
             try:
-                os.remove(os.path.join(IMAGES_DIR, previous))
+                os.remove(os.path.join(_images_dir, previous))
             except Exception:
                 pass
 
@@ -4535,7 +4718,7 @@ def _get_image_meta(filename: str):
     if not filename:
         return None
     try:
-        path = os.path.join(IMAGES_DIR, filename)
+        path = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), filename)
         size_b = os.path.getsize(path)
     except Exception:
         return None
@@ -5027,8 +5210,9 @@ def _ensure_json(path, default_obj):
             json.dump(default_obj, f, ensure_ascii=False, indent=2)
 
 def _bootstrap_files_and_admin():
-    app.logger.info(f"[boot] BASE_DIR={BASE_DIR}")
-    app.logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
+    logger = _get_logger()
+    logger.info(f"[boot] BASE_DIR={BASE_DIR}")
+    logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
 
     _ensure_json(ENTRIES_FILE, [])
     _ensure_json(SYNONYM_FILE, {})
@@ -5054,14 +5238,14 @@ def _bootstrap_files_and_admin():
             }]
             with open(USERS_FILE, "w", encoding="utf-8") as f:
                 json.dump(users, f, ensure_ascii=False, indent=2)
-            app.logger.warning(
+            logger.warning(
                 "users.json を新規作成し、管理者ユーザー '%s' を作成しました。初回ログイン後 ADMIN_INIT_PASSWORD を環境変数から削除してください。",
                 ADMIN_INIT_USER,
             )
         else:
             with open(USERS_FILE, "w", encoding="utf-8") as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
-            app.logger.warning(
+            logger.warning(
                 "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
             )
 
@@ -5069,9 +5253,9 @@ _bootstrap_files_and_admin()
 
 # 必須キーが未設定なら警告（起動は継続）
 if not OPENAI_API_KEY:
-    app.logger.warning("OPENAI_API_KEY が未設定です。OpenAI 呼び出しは失敗します。")
+    _get_logger().warning("OPENAI_API_KEY が未設定です。OpenAI 呼び出しは失敗します。")
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    app.logger.warning("LINE_CHANNEL_* が未設定です。/callback は正常動作しません。")
+    _get_logger().warning("LINE_CHANNEL_* が未設定です。/callback は正常動作しません。")
 
 # === OpenAIの出力から安全にJSONオブジェクトを取り出すユーティリティ ===
 def _extract_json_object(text: str):
@@ -6047,7 +6231,7 @@ def _image_meta(img_name: str | None):
         except Exception:
             url = ""
 
-        path = os.path.join(IMAGES_DIR, img_name)
+        path = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), img_name)
         if not os.path.isfile(path):
             # 存在しない場合も、UIが扱いやすい形で返す
             return {
@@ -6092,7 +6276,7 @@ def _image_meta(img_name: str | None):
 # =========================
 #  管理画面: 観光データ登録・編集
 # =========================
-@app.route("/admin/entry", methods=["GET", "POST"])
+@bp.route("/admin/entry", methods=["GET", "POST"])
 @login_required
 def admin_entry():
     import os  # ローカルimportで安全に
@@ -6474,7 +6658,7 @@ def admin_entry():
 
 
 # ==== 管理画面用：画像メタAPI（要ログイン） ====
-@app.get("/admin/_img_meta")
+@bp.get("/admin/_img_meta")
 @login_required
 def admin_img_meta():
     fn = (request.args.get("filename") or "").strip()
@@ -6486,7 +6670,7 @@ def admin_img_meta():
     return jsonify(ok=True, **meta)
 # ==== / 管理画面用API ====
 
-@app.route("/admin/_wm_diag", methods=["GET"])
+@bp.route("/admin/_wm_diag", methods=["GET"])
 @login_required
 def admin_wm_diag():
     """
@@ -6599,8 +6783,8 @@ def admin_wm_diag():
     )
 
 
-@app.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
-@app.route("/admin/entry/delete/<int:idx>", methods=["POST"])
+@bp.route("/admin/entry/delete/", defaults={"idx": None}, methods=["POST"])
+@bp.route("/admin/entry/delete/<int:idx>", methods=["POST"])
 @login_required
 def delete_entry(idx):
     if session.get("role") != "admin":
@@ -6703,18 +6887,20 @@ def _admin_media_img_impl(filename: str):
     )
 
 # 既に登録済みなら追加しない（重複エラー回避）
-if "admin_media_img" not in app.view_functions:
-    app.add_url_rule(
+def _register_admin_media_image(flask_app: Flask) -> None:
+    if "admin_media_img" in flask_app.view_functions:
+        return
+    flask_app.add_url_rule(
         "/admin/_media_img/<path:filename>",
         endpoint="admin_media_img",
         view_func=login_required(_admin_media_img_impl),
-        methods=["GET"]
+        methods=["GET"],
     )
 
 
 
 # === 新規アップロード→透かし生成→保存（統一版） ============================
-@app.post("/admin/_watermark_generate")
+@bp.post("/admin/_watermark_generate")
 @login_required
 def admin_watermark_generate():
     """
@@ -6777,7 +6963,8 @@ def admin_watermark_generate():
     # 2) md5名で保存（先頭に来るよう mtime を少し進める）
     md5 = hashlib.md5(normalized_bytes).hexdigest()
     base_name = md5 + out_ext
-    base_path = MEDIA_DIR / base_name
+    media_dir = _media_dir()
+    base_path = media_dir / base_name
     if not base_path.exists():
         _save_bytes(base_path, normalized_bytes, bias_sec=+1)
 
@@ -6795,7 +6982,7 @@ def admin_watermark_generate():
         try:
             wm_bytes, out_ext2 = _render_watermark_bytes(base_path, kind)
             deriv_name = _wm_variant_name(base_name, kind, out_ext=out_ext2)
-            _save_bytes(MEDIA_DIR / deriv_name, wm_bytes, bias_sec=+2)
+            _save_bytes(media_dir / deriv_name, wm_bytes, bias_sec=+2)
             saved.append({"name": deriv_name, "kind": kind, "url": _u(deriv_name)})
         except Exception as e:
             app.logger.exception("watermark build failed: kind=%s base=%s", kind, base_name)
@@ -6803,7 +6990,7 @@ def admin_watermark_generate():
     return jsonify(ok=True, saved=saved)
 
 
-@app.route("/shop/entry", methods=["GET", "POST"])
+@bp.route("/shop/entry", methods=["GET", "POST"])
 @login_required
 def shop_entry():
     if session.get("role") != "shop":
@@ -6892,7 +7079,7 @@ def shop_entry():
     shop_entry_data = _norm_entry(shop_entry_data) if shop_entry_data else None
     return render_template("shop_entry.html", role="shop", shop_edit=shop_entry_data)
 
-@app.route("/admin/entries_edit", methods=["GET", "POST"])
+@bp.route("/admin/entries_edit", methods=["GET", "POST"])
 @login_required
 def admin_entries_edit():
     if session.get("role") != "admin":
@@ -7051,7 +7238,7 @@ def admin_entries_edit():
     )
 
 
-@app.route("/admin/entries_dedupe", methods=["GET", "POST"])
+@bp.route("/admin/entries_dedupe", methods=["GET", "POST"])
 @login_required
 def admin_entries_dedupe():
     if session.get("role") != "admin":
@@ -7116,7 +7303,7 @@ def admin_entries_dedupe():
 # =========================
 #  CSV取り込み（既存に追加）
 # =========================
-@app.route("/admin/entries_import_csv", methods=["POST"])
+@bp.route("/admin/entries_import_csv", methods=["POST"])
 @login_required
 def admin_entries_import_csv():
     if session.get("role") != "admin":
@@ -7224,7 +7411,7 @@ def admin_entries_import_csv():
 # =========================
 #  管理: JSONインポート（entries / synonyms）
 # =========================
-@app.route("/admin/import", methods=["GET", "POST"])
+@bp.route("/admin/import", methods=["GET", "POST"])
 @login_required
 def admin_import():
     if session.get("role") != "admin":
@@ -7331,7 +7518,7 @@ def _parse_ts(ts_str: str):
     return _dt.min
 
 
-@app.route("/admin/logs")
+@bp.route("/admin/logs")
 @login_required
 def admin_logs():
     if session.get("role") != "admin":
@@ -7375,7 +7562,7 @@ def admin_logs():
     return render_template("admin_logs.html", logs=logs, q=q, limit=limit, role=session.get("role",""))
 
 
-@app.route("/admin/unhit_questions")
+@bp.route("/admin/unhit_questions")
 @login_required
 def admin_unhit_questions():
     if session.get("role") != "admin":
@@ -7437,7 +7624,7 @@ def admin_unhit_questions():
     )
 
 
-@app.route("/api/faq_suggest", methods=["POST"])
+@bp.route("/api/faq_suggest", methods=["POST"])
 @limit_deco(ASK_LIMITS)   # レート制限は維持
 @login_required
 def api_faq_suggest():
@@ -7456,7 +7643,7 @@ def api_faq_suggest():
     return jsonify({"ok": True, "text": text})
 
 
-@app.route("/admin/add_entry", methods=["POST"])
+@bp.route("/admin/add_entry", methods=["POST"])
 @login_required
 def admin_add_entry():
     if session.get("role") != "admin":
@@ -7671,7 +7858,7 @@ def _stream_backup_targz():
         yield chunk
 # ===== /backup helpers =================================================
 
-@app.route("/admin/backup")
+@bp.route("/admin/backup")
 @login_required
 def admin_backup():
     if session.get("role") != "admin":
@@ -7732,7 +7919,7 @@ def admin_backup():
     }
     return render_template("admin_backup.html", stats=stats)
 
-@app.route("/admin/storage_stats")
+@bp.route("/admin/storage_stats")
 @login_required
 def admin_storage_stats():
     if session.get("role") != "admin":
@@ -7771,7 +7958,7 @@ def admin_storage_stats():
 
     return jsonify(out)
 
-@app.route("/admin/restore", methods=["POST"])
+@bp.route("/admin/restore", methods=["POST"])
 @login_required
 def admin_restore():
     if session.get("role") != "admin":
@@ -7785,7 +7972,7 @@ def admin_restore():
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
 
-@app.route("/admin/restore_from_url", methods=["POST"])
+@bp.route("/admin/restore_from_url", methods=["POST"])
 @login_required
 def admin_restore_from_url():
     if session.get("role") != "admin":
@@ -7867,7 +8054,7 @@ def admin_restore_from_url():
 
     return redirect(url_for("admin_backup"))
 
-@app.route("/internal/backup", methods=["POST"])
+@bp.route("/internal/backup", methods=["POST"])
 def internal_backup():
     token = request.headers.get("X-Backup-Token", "")
     if token != os.environ.get("BACKUP_JOB_TOKEN"):
@@ -7894,14 +8081,14 @@ def internal_backup():
 
 
 # === 管理者ボタン：最優先で停止/再開 ==========================================
-@app.post("/admin/line/pause")
+@bp.post("/admin/line/pause")
 def admin_line_pause():  # 既存の endpoint 名が admin_line_pause ならそちらに合わせて
     _pause_set_admin(True)   # 管理者停止ON
     # 利用者停止はそのままでもOK（残しておく）。必要なら同時に消すなら _pause_set_user(False)
     flash("LINE応答を一時停止しました（管理者）")
     return redirect(url_for("admin_entry"))
 
-@app.post("/admin/line/resume")
+@bp.post("/admin/line/resume")
 def admin_line_resume():  # 既存の endpoint 名が admin_line_resume ならそちらに合わせて
     _pause_set_admin(False)  # 管理者停止OFF
     _pause_set_user(False)   # ついでに利用者停止も全解除（“全ての返事を再開”）
@@ -7909,7 +8096,7 @@ def admin_line_resume():  # 既存の endpoint 名が admin_line_resume なら�
     return redirect(url_for("admin_entry"))
 # ============================================================================
 
-@app.route("/admin/line/mutes", methods=["GET","POST"])
+@bp.route("/admin/line/mutes", methods=["GET","POST"])
 @login_required
 def admin_line_mutes():
     if session.get("role") != "admin":
@@ -7928,7 +8115,7 @@ def admin_line_mutes():
 # =========================
 #  認証
 # =========================
-@app.route("/login", methods=["GET", "POST"])
+@bp.route("/login", methods=["GET", "POST"])
 @limit_deco(LOGIN_LIMITS)   # ← これを付けるだけ
 def login():
     if request.method == "POST":
@@ -7949,17 +8136,17 @@ def login():
             flash("ユーザーIDまたはパスワードが違います")
     return render_template("login.html")
 
-@app.route("/logout")
+@bp.route("/logout")
 def logout():
     session.clear()
     flash("ログアウトしました")
-    return redirect(url_for("login"))
+    return redirect(url_for("main.login"))
 
 
 # =========================
 #  マスター管理（復活＆強化）
 # =========================
-@app.route("/admin/synonyms", methods=["GET", "POST"])
+@bp.route("/admin/synonyms", methods=["GET", "POST"])
 @login_required
 def admin_synonyms():
     if session.get("role") != "admin":
@@ -8003,7 +8190,7 @@ def admin_synonyms():
         queue_pending=pending_count
     )
 
-@app.route("/admin/synonyms/export_missing")
+@bp.route("/admin/synonyms/export_missing")
 @login_required
 def admin_synonyms_export_missing():
     if session.get("role") != "admin":
@@ -8017,7 +8204,7 @@ def admin_synonyms_export_missing():
                      mimetype="application/json")
 
 
-@app.route("/admin/synonyms/queue/reset")
+@bp.route("/admin/synonyms/queue/reset")
 @login_required
 def admin_synonyms_queue_reset():
     if session.get("role") != "admin":
@@ -8035,7 +8222,7 @@ def admin_synonyms_queue_reset():
     return redirect(url_for("admin_synonyms"))
 
 
-@app.route("/admin/synonyms/queue/status")
+@bp.route("/admin/synonyms/queue/status")
 @login_required
 def admin_synonyms_queue_status():
     if session.get("role") != "admin":
@@ -8046,7 +8233,7 @@ def admin_synonyms_queue_status():
 
 
 # ========== 類義語：インポート（上書き） ==========
-@app.route("/admin/synonyms/import", methods=["POST"])
+@bp.route("/admin/synonyms/import", methods=["POST"])
 @login_required
 def admin_synonyms_import():
     if session.get("role") != "admin":
@@ -8094,7 +8281,7 @@ def admin_synonyms_import():
 
 
 # ========== 類義語：エクスポート（ダウンロード） ==========
-@app.route("/admin/synonyms/export", methods=["GET", "POST"])
+@bp.route("/admin/synonyms/export", methods=["GET", "POST"])
 @login_required
 def admin_synonyms_export():
     if session.get("role") != "admin":
@@ -8106,7 +8293,7 @@ def admin_synonyms_export():
 
 
 # ========== 類義語：AI自動生成（missing/all × append/overwrite） ==========
-@app.route("/admin/synonyms/autogen", methods=["POST", "GET"])
+@bp.route("/admin/synonyms/autogen", methods=["POST", "GET"])
 @login_required
 def admin_synonyms_autogen():
     """
@@ -8257,7 +8444,7 @@ def admin_synonyms_autogen():
 
 
 # （互換用：以前のエンドポイント名を使っていた場合のエイリアス）
-@app.route("/admin/synonyms/auto", methods=["POST"])
+@bp.route("/admin/synonyms/auto", methods=["POST"])
 @login_required
 def admin_synonyms_auto():
     return admin_synonyms_autogen()
@@ -8274,7 +8461,7 @@ LAST_SEND_ERROR = ""
 SEND_ERROR_COUNT = 0
 SEND_FAIL_COUNT = 0 
 
-@app.route("/_debug/line_status")
+@bp.route("/_debug/line_status")
 def _debug_line_status():
     """
     LINEの稼働状況を確認するデバッグ用エンドポイント。
@@ -8306,7 +8493,7 @@ def _debug_line_status():
     })
 
 # LINE webhook（可視化＆Rate Limit付き・1本化）
-@app.route("/callback", methods=["POST"])
+@bp.route("/callback", methods=["POST"])
 @limit_deco(ASK_LIMITS)  # ← ここで Rate Limit を適用（limiter無い環境ではノーオペ関数）
 def callback():
     """
@@ -8351,7 +8538,7 @@ def callback():
     return "OK", 200
 
 # 管理者用：任意ユーザーに push して疎通確認（userId はログやLINEの開発者ツールで取得）
-@app.route("/admin/line/test_push", methods=["POST","GET"])
+@bp.route("/admin/line/test_push", methods=["POST","GET"])
 @login_required
 def admin_line_test_push():
     if session.get("role") != "admin":
@@ -9193,7 +9380,7 @@ def get_mobility_reply(text: str):
     # 何も該当しない
     return "", False
 # =====================================================================
-@app.route("/admin/upload_image", methods=["POST"])
+@bp.route("/admin/upload_image", methods=["POST"])
 @login_required
 def admin_upload_image():
     if session.get("role") not in {"admin", "shop"}:
@@ -9342,7 +9529,7 @@ def _wm_draw(im, text, scale=0.05, opacity=180, margin_ratio=0.02):
 # --- JPEG 保存ヘルパー（品質指定・最適化） ---
 def _wm_save_jpeg(im, out_path, quality=85):
     from pathlib import Path
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    _safe_mkdir_p(Path(out_path).parent)
     im = im.convert("RGB")
     im.save(out_path, format="JPEG", quality=int(quality), optimize=True, subsampling=0)
 
@@ -9367,7 +9554,7 @@ def _wm_save(im: Image.Image, dest: str, quality=85):
 
 def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, margin=0.02, quality=85):
     """
-    1枚のオリジナルから __none / __goto / __fullygoto を IMAGES_DIR に生成。
+    1枚のオリジナルから __none / __goto / __fullygoto を _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR)) に生成。
     既存があればスキップ（force=Trueで上書き）。
     戻り値: {"none":fn, "goto":fn, "fully":fn}
     """
@@ -9379,9 +9566,9 @@ def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, m
 
     stem, _ext = os.path.splitext(os.path.basename(src_path))
     out_ext = ".jpg"  # ここを固定しないと PNG 等で quality 指定が例外になる
-    out_none = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_NONE}{out_ext}")
-    out_goto = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_GOTO}{out_ext}")
-    out_full = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_FULLY}{out_ext}")
+    out_none = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), f"{stem}{WM_SUFFIX_NONE}{out_ext}")
+    out_goto = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), f"{stem}{WM_SUFFIX_GOTO}{out_ext}")
+    out_full = os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), f"{stem}{WM_SUFFIX_FULLY}{out_ext}")
 
     if force or not os.path.exists(out_none):
         _wm_save_jpeg(im, out_none, quality=quality)
@@ -9399,9 +9586,9 @@ def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, m
 def _list_source_images():
     """IMAGES_DIR から『元画像っぽいもの（__none/__goto/__fullygotoが付いてない）』だけ列挙"""
     files = []
-    if not os.path.isdir(IMAGES_DIR):
+    if not os.path.isdir(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))):
         return files
-    for fn in os.listdir(IMAGES_DIR):
+    for fn in os.listdir(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))):
         if fn.startswith("."): 
             continue
         root, ext = os.path.splitext(fn)
@@ -9413,7 +9600,7 @@ def _list_source_images():
     files.sort()
     return files
 
-@app.route("/admin/watermark", methods=["GET", "POST"])
+@bp.route("/admin/watermark", methods=["GET", "POST"])
 @login_required
 def admin_watermark():
     # 権限: admin / shop のどちらでも利用可
@@ -9451,7 +9638,7 @@ def admin_watermark():
         targets = []
         for name in selected:
             name = os.path.basename(name)
-            targets.append((name, os.path.join(IMAGES_DIR, name)))
+            targets.append((name, os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), name)))
 
         for f in uploads:
             if not f or not f.filename:
@@ -9461,7 +9648,7 @@ def admin_watermark():
                 if not saved:
                     errors.append(f"{f.filename}: 保存に失敗")
                     continue
-                targets.append((saved, os.path.join(IMAGES_DIR, saved)))
+                targets.append((saved, os.path.join(_cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", _cfg(None, "IMAGES_DIR", IMAGES_DIR))), saved)))
             except Exception as e:
                 errors.append(f"{f.filename}: {e}")
 
@@ -9515,72 +9702,61 @@ def admin_watermark():
     )
 
 
-@app.route("/_debug/where")
+@bp.route("/_debug/where")
 def _debug_where():
     import os
     return jsonify({"app_file": __file__, "cwd": os.getcwd()})
 
 
-@app.route("/_debug/test_weather")
+@bp.route("/_debug/test_weather")
 def _debug_test_weather():
     q = request.args.get("q", "") or ""
     m, ok = get_weather_reply(q)
     return jsonify({"ok": ok, "answer": m})
 
 
-@app.route("/healthz", methods=["GET", "HEAD"])
+@bp.route("/healthz", methods=["GET", "HEAD"])
 def healthz():
-    # 必要なら軽い自己診断をここに追加可
-    return ("ok", 200, {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-store",
-    })
+    return jsonify({"ok": True}), 200
 
-@app.route("/readyz", methods=["GET"])
+
+# 必要なら先頭付近に（未導入なら）：
+# from pathlib import Path
+# import os, tempfile
+# from flask import jsonify
+
+@bp.route("/readyz", methods=["GET"])
 def readyz():
-    problems = []
+    errors = []
 
-    # Redis（レート制限などで使用している場合）
-    try:
-        uri = app.config.get("RATE_STORAGE_URI")
-        if uri and uri not in ("memory://",):
-            import redis  # pip install redis
-            r = redis.from_url(uri)
-            r.ping()
-    except Exception as ex:
-        problems.append(f"redis:{ex}")
+    # 必須ENV（最低限）
+    if not _cfg(None, "OPENAI_API_KEY"):
+        errors.append("missing_env:OPENAI_API_KEY")
 
-    # DB（SQLAlchemyを使っている場合のみ）
-    try:
-        db = globals().get("db")
-        if db:
-            # SQLAlchemy 2.x でも通るように text を使う
-            try:
-                from sqlalchemy import text as _sql_text
-                db.session.execute(_sql_text("SELECT 1"))
-            except Exception:
-                # SQLAlchemyを使っていない・未インストールでもここは素通り
-                db.session.execute("SELECT 1")
-    except Exception as ex:
-        problems.append(f"db:{ex}")
+    # users.json の存在/可読チェック（既存ロジックを維持）
+    data_base_dir = os.getenv("DATA_BASE_DIR")
+    base_path = Path(data_base_dir).expanduser() if data_base_dir else Path(".")
+    users_path = base_path / "users.json"
 
-    # mediaディレクトリに書き込めるか
-    import os, tempfile
-    try:
-        mdir = app.config.get("MEDIA_DIR", ".")
-        os.makedirs(mdir, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=mdir, delete=True) as _:
-            pass
-    except Exception as ex:
-        problems.append(f"media:{ex}")
+    if not users_path.exists():
+        errors.append(f"missing_file:{users_path}")
+    elif not users_path.is_file():
+        errors.append(f"not_a_file:{users_path}")
+    elif not os.access(users_path, os.R_OK):
+        errors.append(f"unreadable_file:{users_path}")
 
-    if problems:
-        return {"status": "degraded", "errors": problems}, 503
-    return {"status": "ready"}, 200
+    # 返り値（env / version を追加）
+    status = 200 if not errors else 503
+    payload = {
+        "ok": not errors,
+        "errors": errors if errors else [],
+        "env": os.getenv("APP_ENV", "prod"),         # 例: stg / prod / test / local
+        "version": os.getenv("GIT_SHA", "unknown"),  # CI等でコミットSHAを注入すると便利
+    }
+    return jsonify(payload), status, {"Content-Type": "application/json; charset=utf-8"}
 
 
-
-@app.route("/_debug/test_transport")
+@bp.route("/_debug/test_transport")
 def _debug_test_transport():
     q = request.args.get("q", "") or ""
     m, ok = get_transport_reply(q)
@@ -9888,7 +10064,7 @@ def _answer_from_entries_rich(question: str):
     txt = "\n".join(lines)
     return [TextSendMessage(text=p) for p in _split_for_line(txt, LINE_SAFE_CHARS)], True
 
-@app.route("/admin/manual")
+@bp.route("/admin/manual")
 @login_required
 def admin_manual():
     if session.get("role") != "admin":
@@ -10033,7 +10209,7 @@ def _answer_from_data_txt(question: str) -> str:
         return ""
 
 # ② 例外を握ってログ＋フラッシュにして 500 を防ぐ
-@app.route("/admin/data_files", methods=["GET"])
+@bp.route("/admin/data_files", methods=["GET"])
 @login_required
 def admin_data_files():
     if session.get("role") != "admin":
@@ -10062,7 +10238,7 @@ def admin_data_files():
         files=files, edit=edit, content=content, used_enc=used_enc
     )
 
-@app.route("/admin/data_files/upload", methods=["POST"])
+@bp.route("/admin/data_files/upload", methods=["POST"])
 @login_required
 def admin_data_files_upload():
     if session.get("role") != "admin":
@@ -10103,7 +10279,7 @@ def admin_data_files_upload():
     flash(f"{count} ファイルをアップロードしました")
     return redirect(url_for("admin_data_files"))
 
-@app.route("/admin/data_files/new", methods=["POST"])
+@bp.route("/admin/data_files/new", methods=["POST"])
 @login_required
 def admin_data_files_new():
     if session.get("role") != "admin":
@@ -10127,7 +10303,7 @@ def admin_data_files_new():
     flash("新規ファイルを作成しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
-@app.route("/admin/data_files/save", methods=["POST"])
+@bp.route("/admin/data_files/save", methods=["POST"])
 @login_required
 def admin_data_files_save():
     if session.get("role") != "admin":
@@ -10158,7 +10334,7 @@ def admin_data_files_save():
         flash("保存に失敗しました")
     return redirect(url_for("admin_data_files", edit=safe))
 
-@app.route("/admin/data_files/delete", methods=["POST"])
+@bp.route("/admin/data_files/delete", methods=["POST"])
 @login_required
 def admin_data_files_delete():
     if session.get("role") != "admin":
@@ -10180,7 +10356,7 @@ def admin_data_files_delete():
         flash("削除に失敗しました: " + str(e))
     return redirect(url_for("admin_data_files"))
 
-@app.route("/admin/data_files/download")
+@bp.route("/admin/data_files/download")
 @login_required
 def admin_data_files_download():
     if session.get("role") != "admin":
@@ -10193,7 +10369,7 @@ def admin_data_files_download():
     # send_from_directory はパス検証込みで安全
     return send_from_directory(DATA_DIR, safe, as_attachment=True)
 
-@app.route("/admin/data_files/rename", methods=["POST"])
+@bp.route("/admin/data_files/rename", methods=["POST"])
 @login_required
 def admin_data_files_rename():
     if session.get("role") != "admin":
@@ -10218,7 +10394,7 @@ def admin_data_files_rename():
     return redirect(url_for("admin_data_files", edit=new_s))
 # ======== ▲▲▲ 追記ここまで ▲▲▲
 
-@app.route("/_debug/quick")
+@bp.route("/_debug/quick")
 def _debug_quick():
     # 本番はトークン必須にしたい場合は下を有効化
     # if APP_ENV in {"prod","production"} and request.headers.get("X-Debug-Token") != os.getenv("DEBUG_TOKEN"):
@@ -10256,7 +10432,7 @@ def _debug_quick():
 # =========================
 #  トップ/ヘルスチェック
 # =========================
-@app.route("/")
+@bp.route("/")
 def home():
     return "<a href='/admin/entry'>[観光データ管理]</a>"
 
@@ -10595,7 +10771,7 @@ def smart_search_answer_with_hitflag(question):
 # =========================
 #  API: /ask
 # =========================
-@app.route("/ask", methods=["POST"])
+@bp.route("/ask", methods=["POST"])
 @limit_deco(ASK_LIMITS)
 def ask():
     data = request.get_json(silent=True) or {}
@@ -10650,7 +10826,7 @@ def ask():
     return jsonify({"answer": answer, "hit_db": hit_db, "meta": meta})
 
 
-@app.route("/admin/unhit_report")
+@bp.route("/admin/unhit_report")
 @login_required
 def admin_unhit_report():
     if session.get("role") != "admin":
@@ -10850,13 +11026,13 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
 # =========================
 #  お知らせ管理
 # =========================
-@app.route("/admin/notices", methods=["GET", "POST"])
+@bp.route("/admin/notices", methods=["GET", "POST"])
 @login_required
 def admin_notices():
     # 必要なら _require_admin() を使ってもOK
     if session.get("role") != "admin":
         flash("権限がありません")
-        return redirect(url_for("login"))
+        return redirect(url_for("main.login"))
     notices = load_notices()
     edit_id = request.values.get("edit")
     edit_notice = None
@@ -10917,12 +11093,12 @@ def admin_notices():
     return render_template("admin_notices.html", notices=notices, edit_notice=edit_notice)
 
 
-@app.route("/admin/notices/delete/<int:idx>", methods=["POST"])
+@bp.route("/admin/notices/delete/<int:idx>", methods=["POST"])
 @login_required
 def delete_notice(idx):
     if session.get("role") != "admin":
         flash("権限がありません")
-        return redirect(url_for("login"))
+        return redirect(url_for("main.login"))
     notices = load_notices()
     notices = [n for n in notices if n.get("id") != idx]
     save_notices(notices)
@@ -10930,7 +11106,7 @@ def delete_notice(idx):
     return redirect(url_for("admin_notices"))
 
 
-@app.route("/notices")
+@bp.route("/notices")
 def notices():
     notices = load_notices()
     return render_template("notices.html", notices=notices)
@@ -11003,11 +11179,10 @@ try:
             return e
 except Exception:
     # ここで失敗してもアプリ動作は継続
-    app.logger.exception("norm-entry post patch failed")
+    _get_logger().exception("norm-entry post patch failed")
 # ===== ここまでパッチ =====
-# ... 全ての @app.route(...) 定義が終わった一番最後に置く
+# ... 全ての @bp.route(...) 定義が終わった一番最後に置く
 from watermark_ext import init_watermark_ext
-init_watermark_ext(app)
 
 
 # ===== 未ヒット：テキスト保存＆要約API（admin専用） =========================
@@ -11019,7 +11194,7 @@ def _slug_for_filename(s: str, max_len: int = 40) -> str:
     s = re.sub(r"_+", "_", s).strip("_")
     return (s or "text")[:max_len]
 
-@app.post("/api/text_summarize")
+@bp.post("/api/text_summarize")
 @login_required
 @limit_deco(ASK_LIMITS)   # 既存のレート制限デコレータ
 def api_text_summarize():
@@ -11049,7 +11224,7 @@ def api_text_summarize():
 
     return jsonify({"ok": True, "summary": summary})
 
-@app.post("/admin/unhit/save_text")
+@bp.post("/admin/unhit/save_text")
 @login_required
 def admin_unhit_save_text():
     # 管理者のみ
@@ -11073,7 +11248,7 @@ def admin_unhit_save_text():
             text_short = (text_full.replace("\r\n", "\n").strip())[:220]
 
     # 保存先: 既存の DATA_DIR（app.py 冒頭で定義済み）を使う
-    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+    _safe_mkdir_p(DATA_DIR)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     fname = f"{stamp}_{_slug_for_filename(title)}.txt"
@@ -11102,7 +11277,164 @@ def admin_unhit_save_text():
 # ===== ここまで ==============================================================
 
 
-# メイン起動（重複禁止：これ1つだけ残す）
-if __name__ == "__main__":
-    port = int(os.getenv("PORT","5000"))
-    app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))
+# --- config bootstrap (phase-1: no invasive rewrites) ---
+def _init_config(flask_app):
+    """Load env-driven defaults into app.config without rewriting call sites yet."""
+    import os, os.path as _op
+    from pathlib import Path as _Path
+
+    # 既にどこかで決めている値は尊重（setdefault）
+    static_fallback = os.getenv("STATIC_FOLDER") or str((_Path(__file__).parent / "static").resolve())
+    flask_app.config.setdefault("STATIC_FOLDER", getattr(flask_app, "static_folder", None) or static_fallback)
+
+    # 秘密鍵系（import時に落ちないようにフォールバック利用）
+    secret_fb = (os.getenv("IMAGES_SIGNING_KEY") or
+                 os.getenv("FLASK_SECRET_KEY") or
+                 os.getenv("SECRET_KEY") or "change-me")
+    # create_app 内で app.secret_key が無ければ初期化
+    try:
+        if not getattr(flask_app, "secret_key", None):
+            flask_app.secret_key = os.getenv("FLASK_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-me"
+    except Exception:
+        flask_app.secret_key = "change-me"
+
+    # 画像署名キー（利用側は当面そのまま、徐々に current_app.config に寄せる）
+    flask_app.config.setdefault("IMAGES_SIGNING_KEY", os.getenv("IMAGES_SIGNING_KEY") or secret_fb)
+
+    # メディア／透かしの既定値（既存のグローバル参照は未変更）
+    media_root = os.getenv("MEDIA_ROOT") or "media/img"
+    images_dir = os.getenv("IMAGES_DIR") or media_root
+    url_prefix = os.getenv("URL_PREFIX") or "/media/img"
+    watermark_dir = os.getenv("WATERMARK_DIR") or _op.join(flask_app.config["STATIC_FOLDER"], "watermarks")
+
+    flask_app.config.setdefault("MEDIA_ROOT", media_root)
+    flask_app.config.setdefault("IMAGES_DIR", images_dir)
+    flask_app.config.setdefault("URL_PREFIX", url_prefix)
+    flask_app.config.setdefault("WATERMARK_DIR", watermark_dir)
+
+    # アプリ環境
+    flask_app.config.setdefault("APP_ENV", os.getenv("APP_ENV", "dev"))
+    flask_app.config.setdefault("APP_VERSION", os.getenv("APP_VERSION", "unknown"))
+# --- /config bootstrap ---
+
+def create_app():
+
+    return __safe_create_app()
+# === SAFE FACTORY FALLBACK (auto-registered) ===
+def __safe_create_app():
+    import os
+    from flask import Flask, redirect, url_for
+    # 静的フォルダのフォールバック
+    static_folder = os.getenv("STATIC_FOLDER", "static")
+    flask_app = Flask(__name__, static_folder=static_folder)
+
+    # 可能なら設定ブートストラップを呼ぶ
+    try:
+        _init_config(flask_app)  # 先に注入済みのヘルパ
+    except Exception:
+        pass
+
+    # 既存の Blueprint オブジェクトがグローバルにあれば登録（重複は安全ラッパでスキップ）
+    for name in ("bp", "main_bp", "main", "admin_bp"):
+        bp = globals().get(name)
+        if bp is not None:
+            try:
+                flask_app.register_blueprint(bp)
+            except Exception:
+                pass
+
+    # index → login へリダイレクト（未登録なら）
+    try:
+        rules = {r.rule for r in flask_app.url_map.iter_rules()}
+        if "/" not in rules:
+            flask_app.add_url_rule("/", "index", lambda: redirect(url_for("main.login")))
+    except Exception:
+        pass
+
+    # -- LINE init (lazy) --
+    try:
+        import os
+        from linebot import LineBotApi, WebhookHandler
+        tok = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+        sec = os.getenv("LINE_CHANNEL_SECRET")
+        if tok and sec:
+            _line_api = LineBotApi(tok)
+            _line_handler = WebhookHandler(sec)
+            def _line_add(*a, **kw):  # real decorator
+                return _line_handler.add(*a, **kw)
+        else:
+            _line_api = None
+            _line_handler = None
+            def _line_add(*a, **kw):  # no-op fallback
+                return _noop_decorator(*a, **kw)
+    except Exception:
+        _line_api = None
+        _line_handler = None
+        def _line_add(*a, **kw):
+            return _noop_decorator(*a, **kw)
+    # -- /LINE init --
+    __register_admin_media_folders_alias(flask_app)
+    __register_admin_media_browse_alias(flask_app)
+
+
+
+    return flask_app
+
+# 既存の create_app が壊れていても上書きして安全側に寄せる
+create_app = __safe_create_app
+# === /SAFE FACTORY FALLBACK ===
+
+
+# --- admin media folders alias (safe & idempotent) ---
+def __register_admin_media_folders_alias(flask_app):
+    """
+    互換: /admin/media/folders -> /admin/data_files へリダイレクト。
+    既に /admin/media/folders がある場合は何もしない。
+    """
+    try:
+        rules = [r.rule for r in flask_app.url_map.iter_rules()]
+        if "/admin/media/folders" in rules:
+            return  # 既に存在
+
+        from flask import redirect, url_for
+
+        def _alias_view():
+            # 永続のURLに寄せたいなら 301、暫定なら 302（ここでは 302 にします）
+            return redirect(url_for("main.admin_data_files"), code=302)
+
+        endpoint = "admin_media_folders_alias"
+        i = 1
+        while endpoint in flask_app.view_functions:
+            i += 1
+            endpoint = f"admin_media_folders_alias_{i}"
+
+        flask_app.add_url_rule(
+            "/admin/media/folders",
+            endpoint=endpoint,
+            view_func=_alias_view,
+            methods=["GET", "HEAD"],
+        )
+    except Exception:
+        # 何があっても落とさない
+        pass
+# --- /admin media folders alias ---
+
+# --- admin media browse alias (safe & idempotent) ---
+def __register_admin_media_browse_alias(flask_app):
+    """
+    互換: /admin/media/browse -> /admin/data_files（暫定302）
+    既に /admin/media/browse がある場合は何もしない。
+    """
+    try:
+        rules = [r.rule for r in flask_app.url_map.iter_rules()]
+        if "/admin/media/browse" in rules:
+            return
+        from flask import redirect, url_for
+        def _alias_view():
+            return redirect(url_for("main.admin_data_files"), code=302)
+        endpoint = "admin_media_browse_alias"; i = 1
+        while endpoint in flask_app.view_functions:
+            i += 1; endpoint = f"admin_media_browse_alias_{i}"
+        flask_app.add_url_rule("/admin/media/browse", endpoint=endpoint, view_func=_alias_view, methods=["GET","HEAD"])
+    except Exception:
+        pass

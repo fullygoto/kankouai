@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <!DOCTYPE html>
 <html>
 <head>
@@ -207,3 +208,214 @@
     </div>
 </body>
 </html>
+=======
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>観光スポット管理</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            background: #f7fbfa;
+            font-family: 'Segoe UI', 'Noto Sans JP', sans-serif;
+            margin: 0;
+        }
+        .container {
+            max-width: 600px;
+            background: #fff;
+            margin: 40px auto 32px auto;
+            border-radius: 18px;
+            box-shadow: 0 4px 16px rgba(88,168,146,0.09);
+            padding: 36px 28px 32px 28px;
+        }
+        h1 {
+            text-align: center;
+            color: #19a87a;
+            font-size: 1.38em;
+            margin-bottom: 22px;
+            font-weight: bold;
+        }
+        .logout-link {
+            display: block;
+            text-align: right;
+            font-size: 0.98em;
+            margin-bottom: 16px;
+        }
+        .logout-link a {
+            color: #19a87a;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .message-list {
+            margin-bottom: 18px;
+        }
+        .message-list li {
+            color: #36a077;
+            font-size: 1.06em;
+            margin-bottom: 3px;
+        }
+        form.spot-form {
+            background: #f3f8f6;
+            border-radius: 10px;
+            padding: 20px 18px 16px 18px;
+            margin-bottom: 26px;
+            box-shadow: 0 2px 8px rgba(88,168,146,0.06);
+        }
+        .form-row {
+            margin-bottom: 13px;
+        }
+        .form-row label {
+            display: inline-block;
+            min-width: 70px;
+            color: #2e6b57;
+            font-size: 1em;
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+        .form-row input {
+            border: 1.2px solid #bae8d6;
+            border-radius: 7px;
+            padding: 7px 8px;
+            font-size: 1em;
+            width: 78%;
+            background: #fcfefe;
+            transition: border 0.2s;
+        }
+        .form-row input:focus {
+            border-color: #43bb8c;
+        }
+        button {
+            background: linear-gradient(90deg, #22c993 0%, #8fe9c2 100%);
+            color: #155542;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.09em;
+            padding: 7px 22px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.17s;
+            box-shadow: 0 2px 10px rgba(40,200,140,0.07);
+            margin-right: 6px;
+        }
+        button:hover {
+            background: linear-gradient(90deg, #2e8a67 0%, #36ceb0 100%);
+            color: #fff;
+        }
+        hr {
+            margin: 28px 0 18px 0;
+            border: 0;
+            border-top: 1.5px solid #e2f4ef;
+        }
+        .spot-list {
+            margin: 0;
+            padding: 0;
+        }
+        .spot-card {
+            background: #f7faf7;
+            border-radius: 13px;
+            box-shadow: 0 1px 7px rgba(19,168,122,0.07);
+            padding: 17px 15px 13px 17px;
+            margin-bottom: 18px;
+            position: relative;
+            border-left: 6px solid #a5efd1;
+        }
+        .spot-title {
+            font-size: 1.12em;
+            font-weight: bold;
+            color: #169e73;
+            margin-bottom: 4px;
+        }
+        .spot-info {
+            font-size: 0.99em;
+            color: #395b49;
+            margin-bottom: 2px;
+        }
+        .spot-card .btn-row {
+            margin-top: 7px;
+        }
+        .spot-card button {
+            font-size: 0.98em;
+            padding: 4px 13px;
+            margin-right: 7px;
+            margin-top: 0;
+        }
+        @media (max-width: 700px) {
+            .container { margin: 12px 1vw 12px 1vw; padding: 11px 1vw 10px 1vw;}
+            .spot-card { padding: 12px 6px 9px 12px;}
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logout-link">
+            <a href="{{ url_for('logout') }}">ログアウト</a>
+        </div>
+        <h1>
+            {% if edit_id %}
+                観光スポット編集
+            {% else %}
+                観光スポット登録
+            {% endif %}
+        </h1>
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            <ul class="message-list">
+            {% for message in messages %}
+              <li>{{ message }}</li>
+            {% endfor %}
+            </ul>
+          {% endif %}
+        {% endwith %}
+        <form method="post" class="spot-form">
+            <input type="hidden" name="edit_id" value="{{ edit_id or '' }}">
+            <div class="form-row">
+                <label>スポット名</label>
+                <input name="name" value="{{ spot_edit.name if spot_edit else '' }}" required>
+            </div>
+            <div class="form-row">
+                <label>説明</label>
+                <input name="desc" value="{{ spot_edit.desc if spot_edit else '' }}" required>
+            </div>
+            <div class="form-row">
+                <label>住所</label>
+                <input name="address" value="{{ spot_edit.address if spot_edit else '' }}" required>
+            </div>
+            <div class="form-row">
+                <label>地図URL</label>
+                <input name="map" value="{{ spot_edit.map if spot_edit else '' }}">
+            </div>
+            <div class="form-row">
+                <label>備考</label>
+                <input name="note" value="{{ spot_edit.note if spot_edit else '' }}">
+            </div>
+            <button type="submit">{{ '編集' if edit_id else '登録' }}</button>
+        </form>
+        <hr>
+        <h2 style="color:#19a87a; font-size:1.07em; margin-bottom:13px;">登録済みスポット</h2>
+        <div class="spot-list">
+        {% for s in spots %}
+            <div class="spot-card">
+                <div class="spot-title">{{s.name}}</div>
+                <div class="spot-info">{{s.desc}}</div>
+                <div class="spot-info"><span style="color:#28a49b;">住所:</span> {{s.address}}</div>
+                <div class="spot-info"><span style="color:#28a49b;">地図:</span> <a href="{{s.map}}" target="_blank" style="color:#268883;">{{s.map}}</a></div>
+                {% if s.note %}
+                    <div class="spot-info"><span style="color:#28a49b;">備考:</span> {{s.note}}</div>
+                {% endif %}
+                <div class="btn-row">
+                    <form method="get" action="{{ url_for('admin_spot') }}" style="display:inline;">
+                        <input type="hidden" name="edit" value="{{ loop.index0 }}">
+                        <button type="submit">編集</button>
+                    </form>
+                    <form method="post" action="{{ url_for('delete_spot', idx=loop.index0) }}" style="display:inline;" onsubmit="return confirm('本当に削除しますか？');">
+                        <button type="submit" style="background:linear-gradient(90deg,#e9576a,#e6b5b7);color:#fff;">削除</button>
+                    </form>
+                </div>
+            </div>
+        {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+>>>>>>> origin/import/windows-snapshot
