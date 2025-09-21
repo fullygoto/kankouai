@@ -470,7 +470,7 @@
 
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
-        <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
+        <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ一覧]</a>
         <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
         <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
         <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
@@ -527,7 +527,7 @@
     ) %}
 
     <!-- ===== 登録フォーム ===== -->
-    <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
+    <form method="post" action="{{ url_for('main.admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
         {% if edit_id %}<input type="hidden" name="edit_id" value="{{ edit_id }}">{% endif %}
 
         <!-- 代表（サーバに送る唯一の値） -->
@@ -1098,7 +1098,7 @@
                     <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
 
                     <div class="entry-actions" style="margin-top:8px;">
-                        <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
+                        <form method="get" action="{{ url_for('main.admin_entry') }}" style="display:inline;">
                             <input type="hidden" name="edit" value="{{ loop.index0 }}">
                             <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
                         </form>
@@ -1704,7 +1704,7 @@
 
     {% if role == "admin" %}
     <div class="nav" style="float:right;">
-        <a href="{{ url_for('admin_logs') }}">[質問・回答ログ一覧]</a>
+        <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ一覧]</a>
         <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
         <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
         <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
@@ -1761,7 +1761,7 @@
     ) %}
 
     <!-- ===== 登録フォーム ===== -->
-    <form method="post" action="{{ url_for('admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
+    <form method="post" action="{{ url_for('main.admin_entry') }}" enctype="multipart/form-data" id="entry_form" style="margin-bottom:28px;" onsubmit="return validateAreas('entry_form')">
         {% if edit_id %}<input type="hidden" name="edit_id" value="{{ edit_id }}">{% endif %}
 
         <!-- 代表（サーバに送る唯一の値） -->
@@ -2332,7 +2332,7 @@
                     <span class="card-label">カテゴリー：</span>{{ e.category or "" }}<br>
 
                     <div class="entry-actions" style="margin-top:8px;">
-                        <form method="get" action="{{ url_for('admin_entry') }}" style="display:inline;">
+                        <form method="get" action="{{ url_for('main.admin_entry') }}" style="display:inline;">
                             <input type="hidden" name="edit" value="{{ loop.index0 }}">
                             <button type="submit" class="btn" style="background:#6abf4b;">編集</button>
                         </form>

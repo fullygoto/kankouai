@@ -2435,7 +2435,7 @@ def _too_large(e):
         flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
     else:
         flash(f"ファイルが大きすぎます（上限 {MAX_UPLOAD_MB} MB）")
-    return redirect(request.referrer or url_for("admin_entry"))
+    return redirect(request.referrer or url_for("main.admin_entry"))
 
 # ==== 追加（Flask設定の近くでOK）====
 ADMIN_IP_ENFORCE = os.getenv("ADMIN_IP_ENFORCE", "1").lower() in {"1","true","on","yes"}
@@ -6492,7 +6492,7 @@ def admin_entry():
             # ★ 失敗時も編集中行を維持
             if idx_edit is not None:
                 return redirect(url_for("admin_entry", edit=idx_edit))
-            return redirect(url_for("admin_entry"))
+            return redirect(url_for("main.admin_entry"))
 
         # 新規エントリの骨格
         new_entry = {
@@ -6531,7 +6531,7 @@ def admin_entry():
                 flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
                 if idx_edit is not None:
                     return redirect(url_for("admin_entry", edit=idx_edit))
-                return redirect(url_for("admin_entry"))
+                return redirect(url_for("main.admin_entry"))
             except Exception:
                 result_final = None
                 app.logger.exception("image handler (final) failed")
@@ -6554,7 +6554,7 @@ def admin_entry():
                 flash(f"画像のピクセル数が大きすぎます（上限 {MAX_IMAGE_PIXELS:,} ピクセル）")
                 if idx_edit is not None:
                     return redirect(url_for("admin_entry", edit=idx_edit))
-                return redirect(url_for("admin_entry"))
+                return redirect(url_for("main.admin_entry"))
             except Exception:
                 result = None
                 app.logger.exception("image handler failed")
@@ -6797,7 +6797,7 @@ def delete_entry(idx):
 
     if idx is None:
         flash("削除対象が指定されていません")
-        return redirect(url_for("admin_entry"))
+        return redirect(url_for("main.admin_entry"))
 
     entries = load_entries()
     if 0 <= idx < len(entries):
@@ -6806,7 +6806,7 @@ def delete_entry(idx):
         flash("削除しました")
     else:
         flash("指定された項目が見つかりません")
-    return redirect(url_for("admin_entry"))
+    return redirect(url_for("main.admin_entry"))
 
 
 
@@ -6994,7 +6994,7 @@ def admin_watermark_generate():
 @login_required
 def shop_entry():
     if session.get("role") != "shop":
-        return redirect(url_for("admin_entry"))
+        return redirect(url_for("main.admin_entry"))
     user_id = session["user_id"]
 
     if request.method == "POST":
@@ -7677,7 +7677,7 @@ def admin_add_entry():
     except Exception:
         flash("DBに追加しました（シノニム自動更新でエラーが出ました。ログを確認してください）")
 
-    return redirect(url_for("admin_entry"))
+    return redirect(url_for("main.admin_entry"))
 # =========================
 
 
@@ -7966,11 +7966,11 @@ def admin_restore():
     file = request.files.get("backup_zip")
     if not file:
         flash("アップロードファイルがありません")
-        return redirect(url_for("admin_entry"))
+        return redirect(url_for("main.admin_entry"))
     with zipfile.ZipFile(file, "r") as zf:
         _safe_extractall(zf, BASE_DIR)
     flash("復元が完了しました。データを確認してください。")
-    return redirect(url_for("admin_entry"))
+    return redirect(url_for("main.admin_entry"))
 
 @bp.route("/admin/restore_from_url", methods=["POST"])
 @login_required
@@ -8086,14 +8086,14 @@ def admin_line_pause():  # 既存の endpoint 名が admin_line_pause ならそ�
     _pause_set_admin(True)   # 管理者停止ON
     # 利用者停止はそのままでもOK（残しておく）。必要なら同時に消すなら _pause_set_user(False)
     flash("LINE応答を一時停止しました（管理者）")
-    return redirect(url_for("admin_entry"))
+    return redirect(url_for("main.admin_entry"))
 
 @bp.post("/admin/line/resume")
 def admin_line_resume():  # 既存の endpoint 名が admin_line_resume ならそちらに合わせて
     _pause_set_admin(False)  # 管理者停止OFF
     _pause_set_user(False)   # ついでに利用者停止も全解除（“全ての返事を再開”）
     flash("LINE応答を再開しました（管理者）")
-    return redirect(url_for("admin_entry"))
+    return redirect(url_for("main.admin_entry"))
 # ============================================================================
 
 @bp.route("/admin/line/mutes", methods=["GET","POST"])
@@ -8129,7 +8129,7 @@ def login():
             session["role"] = user["role"]
             flash("ログインしました")
             if user["role"] == "admin":
-                return redirect(url_for("admin_entry"))
+                return redirect(url_for("main.admin_entry"))
             else:
                 return redirect(url_for("shop_entry"))
         else:
@@ -8548,11 +8548,11 @@ def admin_line_test_push():
 
     if not _line_enabled() or not line_bot_api:
         flash("LINEが無効です（環境変数を確認）")
-        return redirect(url_for("admin_entry"))
+        return redirect(url_for("main.admin_entry"))
 
     if not to:
         flash("to（userId）が指定されていません")
-        return redirect(url_for("admin_entry"))
+        return redirect(url_for("main.admin_entry"))
 
     try:
         parts = _split_for_line(text, LINE_SAFE_CHARS)
@@ -8567,7 +8567,7 @@ def admin_line_test_push():
         if LINE_RETHROW_ON_SEND_ERROR:
             # /callback 側まで例外を伝播させ、500 を返して気付けるようにする
             raise
-    return redirect(url_for("admin_entry"))
+    return redirect(url_for("main.admin_entry"))
 # ===== ここまで貼り付け =====
 
 # --- 最低限のDB回答（ヒット/複数/未ヒット） ---
@@ -11438,3 +11438,7 @@ def __register_admin_media_browse_alias(flask_app):
         flask_app.add_url_rule("/admin/media/browse", endpoint=endpoint, view_func=_alias_view, methods=["GET","HEAD"])
     except Exception:
         pass
+# --- legacy default for IMAGES_DIR (hotfix) ---
+import os as _os
+if 'IMAGES_DIR' not in globals():
+    IMAGES_DIR = _os.getenv("IMAGES_DIR", "media/img")

@@ -39,7 +39,7 @@
   <div class="container">
     <div class="topbar">
       <h1>透かし一括生成</h1>
-      <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+      <a class="btn ghost" href="{{ url_for('main.admin_entry') }}">データ管理に戻る</a>
     </div>
 
     {% set _order = (order or 'new') if order is defined else 'new' %}
@@ -193,7 +193,7 @@
     </form>
 
     <div class="row" style="margin-top:18px">
-      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← 観光データ管理に戻る</a>
+      <a class="btn ghost" href="{{ url_for('main.admin_entry') }}">← 観光データ管理に戻る</a>
     </div>
   </div>
 

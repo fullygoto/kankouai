@@ -153,7 +153,7 @@
           <div class="row" style="margin-top:6px;gap:6px">
             <button class="btn ghost" type="button" onclick="copyText(\`${qEsc}\`)">質問コピー</button>
             <a class="btn ghost" href="{{ url_for('admin_unhit_questions') }}?q=${encodeURIComponent(r.q)}" target="_blank">該当の未ヒット一覧を開く</a>
-            <a class="btn ghost" href="{{ url_for('admin_entry') }}?prefill=1&title=${encodeURIComponent(r.q)}&desc=&tags=&areas=" target="_blank">DB下書き追加（編集で開く）</a>
+            <a class="btn ghost" href="{{ url_for('main.admin_entry') }}?prefill=1&title=${encodeURIComponent(r.q)}&desc=&tags=&areas=" target="_blank">DB下書き追加（編集で開く）</a>
             <label style="display:inline-flex;gap:6px;align-items:center;margin-left:8px">
               <input type="checkbox" ${isDone?'checked':''} onchange="toggleDone('${r.q.replace(/["'\\]/g,'\\$&')}', this.checked)"> 処理済み
             </label>
@@ -269,7 +269,7 @@
   {% include '_back_to_data.html' %}
   <div class="container">
     <div class="nav" style="float:right;">
-      <a href="{{ url_for('admin_logs') }}">[質問・回答ログ]</a>
+      <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
       <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
       <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
       <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
@@ -512,7 +512,7 @@
           <div class="row" style="margin-top:6px;gap:6px">
             <button class="btn ghost" type="button" onclick="copyText(\`${qEsc}\`)">質問コピー</button>
             <a class="btn ghost" href="{{ url_for('admin_unhit_questions') }}?q=${encodeURIComponent(r.q)}" target="_blank">該当の未ヒット一覧を開く</a>
-            <a class="btn ghost" href="{{ url_for('admin_entry') }}?prefill=1&title=${encodeURIComponent(r.q)}&desc=&tags=&areas=" target="_blank">DB下書き追加（編集で開く）</a>
+            <a class="btn ghost" href="{{ url_for('main.admin_entry') }}?prefill=1&title=${encodeURIComponent(r.q)}&desc=&tags=&areas=" target="_blank">DB下書き追加（編集で開く）</a>
             <label style="display:inline-flex;gap:6px;align-items:center;margin-left:8px">
               <input type="checkbox" ${isDone?'checked':''} onchange="toggleDone('${r.q.replace(/["'\\]/g,'\\$&')}', this.checked)"> 処理済み
             </label>
@@ -628,7 +628,7 @@
   {% include '_back_to_data.html' %}
   <div class="container">
     <div class="nav" style="float:right;">
-      <a href="{{ url_for('admin_logs') }}">[質問・回答ログ]</a>
+      <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
       <a href="{{ url_for('admin_unhit_questions') }}">[未ヒット質問一覧]</a>
       <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
       <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
