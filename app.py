@@ -9668,7 +9668,7 @@ def readyz():
     errors = []
 
     # 必須ENV（最低限）
-    if not os.getenv("OPENAI_API_KEY"):
+    if not _cfg(None, "OPENAI_API_KEY"):
         errors.append("missing_env:OPENAI_API_KEY")
 
     # users.json の存在/可読チェック（既存ロジックを維持）
