@@ -7,7 +7,10 @@
   <a href="{{ url_for('admin_synonyms') }}"         style="{{ 'font-weight:bold' if here=='admin_synonyms' else '' }}">[類義語辞書管理]</a>
   <a href="{{ url_for('admin_backup') }}"           style="{{ 'font-weight:bold' if here=='admin_backup' else '' }}">[全体バックアップ]</a>
   <a href="{{ url_for('admin_entries_edit') }}"     style="{{ 'font-weight:bold' if here=='admin_entries_edit' else '' }}">[観光データ一括編集]</a>
-  <a href="{{ url_for('admin_notices_admin') }}"    style="{{ 'font-weight:bold' if here=='admin_notices_admin' else '' }}">[お知らせ管理]</a>
+
+  <!-- ここを修正：存在する admin_notices に統一 -->
+  <a href="{{ url_for('admin_notices') }}"          style="{{ 'font-weight:bold' if here=='admin_notices' else '' }}">[お知らせ管理]</a>
   <a href="{{ url_for('admin_notices') }}"          style="{{ 'font-weight:bold' if here=='admin_notices' else '' }}">[お知らせ一覧]</a>
+
   <a href="{{ url_for('admin_manual') }}"           style="margin-right:14px; {{ 'font-weight:bold' if here=='admin_manual' else '' }}">[運用マニュアル]</a>
 </div>
