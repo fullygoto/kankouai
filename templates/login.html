@@ -1,51 +1,43 @@
-<<<<<<< HEAD
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
     <meta charset="utf-8">
     <title>管理画面ログイン</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      body {font-family: system-ui, -apple-system, "Segoe UI", "メイリオ", sans-serif; background:#f6faf9; margin:0; padding:0;}
+      .container {max-width:420px; margin:8vh auto; background:#fff; padding:28px 26px; border-radius:14px; box-shadow:0 6px 24px rgba(0,0,0,.07);}
+      h1 {font-size:1.25rem; margin:0 0 14px; color:#234;}
+      .msg {margin:0 0 12px; padding:10px 12px; border-radius:8px; background:#fff2f2; color:#b00020; list-style:none;}
+      label{display:block; font-size:.95rem; color:#345; margin:10px 0 6px;}
+      input[type="text"], input[type="password"]{width:100%; padding:10px 12px; font-size:1rem; border:1px solid #c9d7e1; border-radius:8px; background:#fff;}
+      .btn {margin-top:14px; width:100%; padding:10px 14px; font-size:1rem; border:none; border-radius:8px; background:#2a8ed8; color:#fff; cursor:pointer;}
+      .btn:hover{opacity:.96}
+    </style>
 </head>
 <body>
+  <div class="container">
     <h1>管理画面ログイン</h1>
+
     {% with messages = get_flashed_messages() %}
       {% if messages %}
-        <ul>
-        {% for message in messages %}
-          <li style="color: red;">{{ message }}</li>
-        {% endfor %}
+        <ul class="msg">
+          {% for message in messages %}
+            <li>{{ message }}</li>
+          {% endfor %}
         </ul>
       {% endif %}
     {% endwith %}
+
     <form method="post">
-        ユーザー名: <input name="username"><br>
-        パスワード: <input name="password" type="password"><br>
-        <button type="submit">ログイン</button>
+      <label for="username">ユーザー名</label>
+      <input id="username" name="username" type="text" autocomplete="username" autofocus>
+
+      <label for="password">パスワード</label>
+      <input id="password" name="password" type="password" autocomplete="current-password">
+
+      <button class="btn" type="submit">ログイン</button>
     </form>
+  </div>
 </body>
 </html>
-=======
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>管理画面ログイン</title>
-</head>
-<body>
-    <h1>管理画面ログイン</h1>
-    {% with messages = get_flashed_messages() %}
-      {% if messages %}
-        <ul>
-        {% for message in messages %}
-          <li style="color: red;">{{ message }}</li>
-        {% endfor %}
-        </ul>
-      {% endif %}
-    {% endwith %}
-    <form method="post">
-        ユーザー名: <input name="username"><br>
-        パスワード: <input name="password" type="password"><br>
-        <button type="submit">ログイン</button>
-    </form>
-</body>
-</html>
->>>>>>> origin/import/windows-snapshot
