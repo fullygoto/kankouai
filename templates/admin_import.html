@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -56,62 +55,3 @@
 </div>
 </body>
 </html>
-=======
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<title>インポート（JSON）</title>
-<style>
-  body{font-family:'Segoe UI','メイリオ',sans-serif;background:#f6faf9;margin:0}
-  .container{max-width:880px;margin:36px auto;background:#fff;border-radius:16px;box-shadow:0 4px 18px #b7d3e033;padding:26px;position:relative}
-  h1{margin:0 0 18px}
-  .top-actions{position:absolute;right:26px;top:26px;display:flex;gap:8px}
-  .btn{border:none;border-radius:9px;padding:8px 14px;cursor:pointer}
-  .primary{background:#2a8ed8;color:#fff}
-  .ghost{background:#fff;border:1px solid #cfe1ef;color:#2a8ed8}
-  .card{border:1px solid #e6edf3;border-radius:12px;padding:14px 16px;margin:12px 0;background:#fbfefe}
-  label{display:block;font-weight:600;margin:.4rem 0 .2rem}
-  input[type=file],select{width:100%}
-  .row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  @media (max-width:760px){.row{grid-template-columns:1fr}}
-</style>
-</head>
-<body>
-<div class="container">
-  <div class="top-actions">
-    <a href="{{ url_for('main.admin_entry') }}" class="btn ghost">データ管理に戻る</a>
-  </div>
-  <h1>インポート（JSON）</h1>
-
-  <form method="post" enctype="multipart/form-data">
-    <div class="card">
-      <h3>entries.json をインポート</h3>
-      <label>ファイル</label>
-      <input type="file" name="entries_json" accept=".json">
-      <label>モード</label>
-      <select name="entries_mode">
-        <option value="merge">マージ（追記・結合）</option>
-        <option value="replace">上書き（既存を全置換）</option>
-      </select>
-    </div>
-
-    <div class="card">
-      <h3>synonyms.json をインポート</h3>
-      <label>ファイル</label>
-      <input type="file" name="synonyms_json" accept=".json">
-      <label>モード</label>
-      <select name="synonyms_mode">
-        <option value="merge">マージ（既存に統合）</option>
-        <option value="replace">上書き（既存を全置換）</option>
-      </select>
-    </div>
-
-    <div style="margin-top:14px">
-      <button type="submit" class="btn primary">実行</button>
-    </div>
-  </form>
-</div>
-</body>
-</html>
->>>>>>> origin/import/windows-snapshot
