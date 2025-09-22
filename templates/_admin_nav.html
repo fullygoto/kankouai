@@ -1,12 +1,13 @@
 <!-- templates/_admin_nav.html -->
+{% set here = request.endpoint %}
 <div class="nav" style="float:right;">
-  <a href="{{ url_for('admin_logs') }}">[質問・回答ログ]</a>
-  <a href="{{ url_for('admin_unhit') }}">[未ヒット質問一覧]</a>
-  <a href="{{ url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-  <a href="{{ url_for('admin_synonyms') }}">[類義語辞書管理]</a>
-  <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
-  <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-  <a href="{{ url_for('admin_notices_admin') }}">[お知らせ管理]</a>
-  <a href="{{ url_for('admin_notices') }}">[お知らせ一覧]</a>
-  <a href="{{ url_for('admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
+  <a href="{{ url_for('admin_logs') }}"           style="{{ 'font-weight:bold' if here=='admin_logs' else '' }}">[質問・回答ログ]</a>
+  <a href="{{ url_for('admin_unhit') }}"          style="{{ 'font-weight:bold' if here=='admin_unhit' else '' }}">[未ヒット質問一覧]</a>
+  <a href="{{ url_for('admin_unhit_report') }}"   style="{{ 'font-weight:bold' if here=='admin_unhit_report' else '' }}">[未ヒット頻出レポート]</a>
+  <a href="{{ url_for('admin_synonyms') }}"       style="{{ 'font-weight:bold' if here=='admin_synonyms' else '' }}">[類義語辞書管理]</a>
+  <a href="{{ url_for('admin_backup') }}"         style="{{ 'font-weight:bold' if here=='admin_backup' else '' }}">[全体バックアップ]</a>
+  <a href="{{ url_for('admin_entries_edit') }}"   style="{{ 'font-weight:bold' if here=='admin_entries_edit' else '' }}">[観光データ一括編集]</a>
+  <a href="{{ url_for('admin_notices_admin') }}"  style="{{ 'font-weight:bold' if here=='admin_notices_admin' else '' }}">[お知らせ管理]</a>
+  <a href="{{ url_for('admin_notices') }}"        style="{{ 'font-weight:bold' if here=='admin_notices' else '' }}">[お知らせ一覧]</a>
+  <a href="{{ url_for('admin_manual') }}"         style="margin-right:14px; {{ 'font-weight:bold' if here=='admin_manual' else '' }}">[運用マニュアル]</a>
 </div>
