@@ -267,18 +267,9 @@
 <body>
   {% include '_back_to_data.html' %}
   <div class="container">
-    <div class="nav" style="float:right;">
-      <a href="{{ url_for('main.admin_logs') }}">[質問・回答ログ]</a>
-      <a href="{{ url_for('main.admin_unhit_questions') }}">[未ヒット質問一覧]</a>
-      <a href="{{ url_for('main.admin_unhit_report') }}">[未ヒット頻出レポート]</a>
-      <a href="{{ url_for('main.admin_synonyms') }}">[類義語辞書管理]</a>
-      <a href="{{ url_for('main.admin_backup') }}">[全体バックアップ]</a>
-      <a href="{{ url_for('main.admin_entries_edit') }}">[観光データ一括編集]</a>
-      <a href="{{ url_for('main.admin_notices') }}">[お知らせ管理]</a>
-      <a href="{{ url_for('notices') }}">[お知らせ一覧]</a>
-      <a href="{{ url_for('main.admin_manual') }}" style="margin-right:14px;">[運用マニュアル]</a>
-    </div>
-
+    <div style="float:right;">
+  {% include '_admin_nav.html' %}
+  </div>
     <h1>未ヒット頻出レポート</h1>
     <div class="muted">
       {% if period_label %}{{ period_label }}{% else %}直近7〜30日{% endif %}の未ヒット質問を集計。件数順で優先対応できます。
