@@ -100,6 +100,13 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+@app.template_global()
+def safe_url_for(endpoint, **values):
+    try:
+        return url_for(endpoint, **values)
+    except BuildError:
+        return ""  # 存在しないエンドポイントは空文字
+        
 from config import get_config
 app.config.from_object(get_config())
 
@@ -11106,3 +11113,4 @@ def admin_unhit_save_text():
 if __name__ == "__main__":
     port = int(os.getenv("PORT","5000"))
     app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))
+
