@@ -1,0 +1,30 @@
+{# templates/_admin_nav.html #}
+{% macro nav(label, endpoint, **kwargs) -%}
+  {# safe_url_for は存在しないエンドポイントなら空文字を返す想定 #}
+  {% set href = safe_url_for(endpoint, **kwargs) %}
+  {% if href %}
+    {% set is_active = (request.endpoint == endpoint) %}
+    <a href="{{ href }}" class="admin-nav__link{{ ' is-active' if is_active }}">{{ label }}</a>
+  {% endif %}
+{%- endmacro %}
+
+<nav class="admin-nav">
+  {{ nav('質問・回答ログ',     'main.admin_logs') }}
+  {{ nav('未ヒット質問一覧',   'main.admin_unhit_questions') }}
+  {{ nav('未ヒット頻出レポート','main.admin_unhit_report') }}
+  {{ nav('類義語辞書管理',     'main.admin_synonyms') }}
+  {{ nav('全体バックアップ',   'main.admin_backup') }}
+  {{ nav('観光データ一括編集', 'main.admin_entries_edit') }}
+  {{ nav('テキストデータ管理', 'main.admin_entry') }}
+  {{ nav('お知らせ管理',       'main.admin_notices') }}
+  {{ nav('お知らせ一覧',       'notices') }}
+  {{ nav('透かし一括生成',     'main.admin_watermark') }}
+  {{ nav('運用マニュアル',     'main.admin_manual') }}
+</nav>
+
+<style>
+  .admin-nav{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px}
+  .admin-nav__link{font-weight:500;color:#2a8ed8;text-decoration:none}
+  .admin-nav__link:hover{text-decoration:underline}
+  .admin-nav__link.is-active{border-bottom:2px solid #2a8ed8}
+</style>
