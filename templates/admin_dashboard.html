@@ -51,31 +51,31 @@
     <div class="card">
       <p class="desc">下記メニューから各管理機能に移動できます。</p>
       <div class="grid">
-        <a class="tile" href="{{ safe_url_for('main.admin_entry') or url_for('main.admin_entry') }}">
+        <a class="tile" href="{{ safe_url_for('admin_entry') or url_for('admin_entry') }}">
           <p class="t">観光データ 登録・編集</p>
           <p class="s">施設・スポットの追加/修正、画像、タグ、エリアなど</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_entries_edit') or url_for('main.admin_entries_edit') }}">
+        <a class="tile" href="{{ safe_url_for('admin_entries_edit') or url_for('admin_entries_edit') }}">
           <p class="t">観光データ 一括編集</p>
           <p class="s">一覧からまとめて編集/削除</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_category') or url_for('main.admin_category') }}">
+        <a class="tile" href="{{ safe_url_for('admin_category') or url_for('admin_category') }}">
           <p class="t">カテゴリー管理</p>
           <p class="s">カテゴリーと入力項目（フィールド）の管理</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_backup') or url_for('main.admin_backup') }}">
+        <a class="tile" href="{{ safe_url_for('admin_backup') or url_for('admin_backup') }}">
           <p class="t">全体バックアップ / 復元</p>
           <p class="s">ZIP作成・ダウンロード／ZIPアップロードで復元</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_synonyms') or '/admin_synonyms.html' }}">
+        <a class="tile" href="{{ safe_url_for('admin_synonyms') or '/admin_synonyms.html' }}">
           <p class="t">類義語（シノニム）</p>
           <p class="s">検索/回答向けの言い換え辞書</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_watermark') or '/admin_watermark.html' }}">
+        <a class="tile" href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">
           <p class="t">透かし一括生成</p>
           <p class="s">GOTO透かしの一括作成・プレビュー</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_notices') or url_for('main.admin_notices') }}">
+        <a class="tile" href="{{ safe_url_for('admin_notices') or url_for('admin_notices') }}">
           <p class="t">お知らせ管理</p>
           <p class="s">サイト内のお知らせ投稿・編集</p>
         </a>
@@ -83,30 +83,30 @@
           <p class="t">お知らせ一覧（公開）</p>
           <p class="s">公開画面を別タブで確認</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_logs') or url_for('main.admin_logs') }}">
+        <a class="tile" href="{{ safe_url_for('admin_logs') or url_for('admin_logs') }}">
           <p class="t">質問・回答ログ</p>
           <p class="s">直近の対話ログの確認</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_unhit_questions') or url_for('main.admin_unhit_questions') }}">
+        <a class="tile" href="{{ safe_url_for('admin_unhit_questions') or url_for('admin_unhit_questions') }}">
           <p class="t">未ヒット質問一覧</p>
           <p class="s">回答できなかった質問の収集</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_unhit_report') or url_for('main.admin_unhit_report') }}">
+        <a class="tile" href="{{ safe_url_for('admin_unhit_report') or url_for('admin_unhit_report') }}">
           <p class="t">未ヒット頻出レポート</p>
           <p class="s">改善が必要なテーマの分析</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_data_files') or url_for('main.admin_data_files') }}">
+        <a class="tile" href="{{ safe_url_for('admin_data_files') or url_for('admin_data_files') }}">
           <p class="t">テキストデータ管理（.txt）</p>
           <p class="s">補助データの閲覧・編集</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('main.admin_manual') or url_for('main.admin_manual') }}">
+        <a class="tile" href="{{ safe_url_for('admin_manual') or url_for('admin_manual') }}">
           <p class="t">運用マニュアル</p>
           <p class="s">各画面の使い方・手順</p>
         </a>
       </div>
 
       <div class="footer-links">
-        <a class="btn" href="{{ safe_url_for('main.admin_entry') or url_for('main.admin_entry') }}">データ管理へ移動</a>
+        <a class="btn" href="{{ safe_url_for('admin_entry') or url_for('admin_entry') }}">データ管理へ移動</a>
       </div>
     </div>
   </div>
