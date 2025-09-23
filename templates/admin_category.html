@@ -1,85 +1,124 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>カテゴリー管理</title>
-    <style>
-        body {font-family:sans-serif;background:#f6faf9;}
-        .container {background:#fff;padding:30px;margin:30px auto;max-width:600px;border-radius:13px;}
-        .cat-title {font-weight:bold;margin-bottom:3px;color:#18a772;}
-        label{display:inline-block;min-width:60px;}
-        input[type="text"]{margin-bottom:6px;padding:4px;}
-        .fields{margin-bottom:12px;}
-        .del-btn{color:#d44;background:none;border:none;}
-    </style>
+  <meta charset="utf-8">
+  <title>カテゴリー管理</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    /* できるだけ素直なレイアウトにして“おかしい表示”を避ける */
+    :root{
+      --bg:#f6faf9; --card:#fff; --pri:#2a8ed8; --mut:#6b7280; --bd:#e5eef5; --danger:#e11d48;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:'Segoe UI','メイリオ',sans-serif;background:var(--bg)}
+    .container{max-width:840px;margin:36px auto;padding:24px;background:var(--card);border-radius:16px;border:1px solid var(--bd)}
+    h1{margin:0 0 14px}
+    .flash{background:#ecfeff;border:1px solid #bae6fd;color:#075985;padding:8px 10px;border-radius:8px;margin:8px 0}
+    .block{border:1px solid var(--bd);border-radius:12px;padding:14px;margin:12px 0;background:#fbfefe}
+    .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    label{min-width:72px}
+    input[type=text], select{
+      padding:7px 9px;border:1px solid #cfe1ef;border-radius:8px;background:#fff
+    }
+    .btn{padding:8px 12px;border:none;border-radius:9px;background:var(--pri);color:#fff;cursor:pointer}
+    .btn.ghost{background:#fff;color:var(--pri);border:1px solid #cfe1ef}
+    .btn.danger{background:var(--danger)}
+    .del-btn{background:none;border:none;color:#d33;cursor:pointer}
+    .muted{color:var(--mut);font-size:.92em}
+    ul{margin:6px 0 0 20px;padding:0}
+    li{margin:4px 0}
+    a.link-back{text-decoration:none}
+    @media (max-width:640px){
+      label{min-width:0}
+      .container{margin:16px 8px;padding:16px}
+    }
+  </style>
 </head>
 <body>
-<div class="container">
-<h1>カテゴリー管理</h1>
-{% with messages = get_flashed_messages() %}
-  {% if messages %}
-    <ul>
-    {% for message in messages %}
-      <li style="color:green;">{{ message }}</li>
-    {% endfor %}
-    </ul>
-  {% endif %}
-{% endwith %}
-<!-- 新規カテゴリー -->
-<form method="post" style="margin-bottom:20px;">
-    <input type="hidden" name="mode" value="add">
-    <label>新規カテゴリー:</label>
-    <input name="name" required>
-    <button type="submit">追加</button>
-</form>
-<hr>
-<!-- カテゴリー一覧 -->
-{% for cat in categories %}
-    {% set cat_idx = loop.index0 %}
-    <div style="margin-bottom:18px;">
-        <span class="cat-title">{{cat.name}}</span>
-        <form method="post" style="display:inline;">
+  {% include '_back_to_data.html' %}
+  <div class="container">
+    <h1>カテゴリー管理</h1>
+
+    {# フラッシュメッセージ #}
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for message in messages %}
+          <div class="flash">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <!-- 新規カテゴリー -->
+    <div class="block">
+      <form method="post" class="row">
+        <input type="hidden" name="mode" value="add">
+        <label>新規カテゴリー</label>
+        <input type="text" name="name" required placeholder="カテゴリー名" style="flex:1 1 220px">
+        <button type="submit" class="btn">追加</button>
+      </form>
+      <div class="muted" style="margin-top:6px">※ 追加後、この下のリストで「入力項目（フィールド）」を登録できます。</div>
+    </div>
+
+    {% set _cats = categories if categories is defined else [] %}
+
+    <!-- 既存カテゴリー一覧 -->
+    {% for cat in _cats %}
+      {% set cat_idx = loop.index0 %}
+      <div class="block">
+        <div class="row" style="justify-content:space-between">
+          <div style="font-weight:700;color:#18a772">{{ cat.name }}</div>
+          <form method="post" onsubmit="return confirm('本当に削除しますか？');">
             <input type="hidden" name="mode" value="delete">
             <input type="hidden" name="del_idx" value="{{ cat_idx }}">
-            <button class="del-btn" type="submit" onclick="return confirm('本当に削除しますか？');">[削除]</button>
-        </form>
-        <div class="fields">
-            <b>入力項目：</b>
-            <ul>
-            {% for f in cat.fields %}
-                <li>{{f.label}} ({{f.name}}, {{f.type}}) {% if f.required %}[必須]{% endif %}
-                    <form method="post" style="display:inline;">
-                        <input type="hidden" name="mode" value="delete_field">
-                        <input type="hidden" name="cat_idx" value="{{ cat_idx }}">
-                        <input type="hidden" name="field_idx" value="{{ loop.index0 }}">
-                        <button class="del-btn" type="submit">×</button>
-                    </form>
-                </li>
-            {% endfor %}
-            </ul>
-            <!-- 項目追加フォーム -->
-            <form method="post" style="margin-top:5px;">
-                <input type="hidden" name="mode" value="edit_fields">
-                <input type="hidden" name="cat_idx" value="{{ cat_idx }}">
-                <label>項目名</label>
-                <input name="field_name" required style="width:100px;">
-                <label>ラベル</label>
-                <input name="field_label" required style="width:100px;">
-                <label>型</label>
-                <select name="field_type">
-                    <option value="text">テキスト</option>
-                    <option value="textarea">複数行</option>
-                    <option value="number">数字</option>
-                    <option value="url">URL</option>
-                </select>
-                <label>必須</label>
-                <input type="checkbox" name="field_required">
-                <button type="submit">追加</button>
-            </form>
+            <button class="del-btn" type="submit">[削除]</button>
+          </form>
         </div>
-    </div>
-{% endfor %}
-<a href="{{ url_for('admin_entry') }}">→ データ管理へ</a>
-</div>
+
+        <div style="margin-top:6px">
+          <b>入力項目：</b>
+          {% if cat.fields and cat.fields|length > 0 %}
+            <ul>
+              {% for f in cat.fields %}
+                <li>
+                  {{ f.label }}
+                  <span class="muted">({{ f.name }}, {{ f.type }}){% if f.required %} [必須]{% endif %}</span>
+                  <form method="post" style="display:inline">
+                    <input type="hidden" name="mode" value="delete_field">
+                    <input type="hidden" name="cat_idx" value="{{ cat_idx }}">
+                    <input type="hidden" name="field_idx" value="{{ loop.index0 }}">
+                    <button class="del-btn" type="submit" title="この項目を削除">×</button>
+                  </form>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <div class="muted">（まだ項目がありません）</div>
+          {% endif %}
+        </div>
+
+        <!-- 項目追加フォーム -->
+        <form method="post" class="row" style="gap:10px;margin-top:8px">
+          <input type="hidden" name="mode" value="edit_fields">
+          <input type="hidden" name="cat_idx" value="{{ cat_idx }}">
+          <label>項目名</label>
+          <input name="field_name" required placeholder="field_name" style="width:150px">
+          <label>ラベル</label>
+          <input name="field_label" required placeholder="表示名" style="width:150px">
+          <label>型</label>
+          <select name="field_type">
+            <option value="text">テキスト</option>
+            <option value="textarea">複数行</option>
+            <option value="number">数字</option>
+            <option value="url">URL</option>
+          </select>
+          <label>必須</label>
+          <input type="checkbox" name="field_required" value="1">
+          <button class="btn" type="submit">項目を追加</button>
+        </form>
+      </div>
+    {% endfor %}
+
+    <a class="link-back btn ghost" href="{{ url_for('main.admin_entry') }}">← データ管理へ戻る</a>
+  </div>
 </body>
 </html>

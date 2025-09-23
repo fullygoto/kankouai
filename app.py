@@ -100,6 +100,13 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+@app.template_global()
+def safe_url_for(endpoint, **values):
+    try:
+        return url_for(endpoint, **values)
+    except BuildError:
+        return ""  # 存在しないエンドポイントは空文字
+        
 from config import get_config
 app.config.from_object(get_config())
 
@@ -9530,47 +9537,55 @@ def _debug_test_weather():
 
 @app.route("/healthz", methods=["GET", "HEAD"])
 def healthz():
-    from flask import jsonify
-    return jsonify({"ok": True}), 200
+    # 必要なら軽い自己診断をここに追加可
+    return ("ok", 200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+    })
 
 @app.route("/readyz", methods=["GET"])
 def readyz():
-    from flask import jsonify
-    import os, json
-    from pathlib import Path
+    problems = []
 
-    errors = []
+    # Redis（レート制限などで使用している場合）
+    try:
+        uri = app.config.get("RATE_STORAGE_URI")
+        if uri and uri not in ("memory://",):
+            import redis  # pip install redis
+            r = redis.from_url(uri)
+            r.ping()
+    except Exception as ex:
+        problems.append(f"redis:{ex}")
 
-    # 1) OPENAI キー
-    if not os.getenv("OPENAI_API_KEY"):
-        errors.append("missing_env:OPENAI_API_KEY")
+    # DB（SQLAlchemyを使っている場合のみ）
+    try:
+        db = globals().get("db")
+        if db:
+            # SQLAlchemy 2.x でも通るように text を使う
+            try:
+                from sqlalchemy import text as _sql_text
+                db.session.execute(_sql_text("SELECT 1"))
+            except Exception:
+                # SQLAlchemyを使っていない・未インストールでもここは素通り
+                db.session.execute("SELECT 1")
+    except Exception as ex:
+        problems.append(f"db:{ex}")
 
-    # 2) users.json の存在と内容チェック
-    base = Path(os.getenv("DATA_BASE_DIR") or ".")
-    users_path = base / "users.json"
-    if not users_path.exists():
-        errors.append(f"missing_file:{users_path}")
-    else:
-        try:
-            raw = users_path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-            users = []
-            if isinstance(data, dict):
-                for k, v in data.items():
-                    if isinstance(v, dict):
-                        u = dict(v)
-                        u.setdefault("user_id", k)
-                        users.append(u)
-            elif isinstance(data, list):
-                users = data
-            has_admin = any(isinstance(u, dict) and u.get("role")=="admin" and u.get("active") for u in users)
-            if not has_admin:
-                errors.append("no_active_admin")
-        except Exception:
-            errors.append("unreadable_or_invalid:users.json")
+    # mediaディレクトリに書き込めるか
+    import os, tempfile
+    try:
+        mdir = app.config.get("MEDIA_DIR", ".")
+        os.makedirs(mdir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=mdir, delete=True) as _:
+            pass
+    except Exception as ex:
+        problems.append(f"media:{ex}")
 
-    status = 200 if not errors else 503
-    return jsonify({"ok": not errors, "errors": errors}), status
+    if problems:
+        return {"status": "degraded", "errors": problems}, 503
+    return {"status": "ready"}, 200
+
+
 
 @app.route("/_debug/test_transport")
 def _debug_test_transport():
@@ -11098,3 +11113,4 @@ def admin_unhit_save_text():
 if __name__ == "__main__":
     port = int(os.getenv("PORT","5000"))
     app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))
+

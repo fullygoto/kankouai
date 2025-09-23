@@ -193,7 +193,7 @@
                     <div class="spot-info"><span style="color:#28a49b;">備考:</span> {{s.note}}</div>
                 {% endif %}
                 <div class="btn-row">
-                    <form method="get" action="{{ url_for('admin_spot') }}" style="display:inline;">
+                    <form method="get" action="{{ url_for('main.admin_spot') }}" style="display:inline;">
                         <input type="hidden" name="edit" value="{{ loop.index0 }}">
                         <button type="submit">編集</button>
                     </form>

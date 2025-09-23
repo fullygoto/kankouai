@@ -27,10 +27,10 @@
         window.onload = function() { onCategoryChange(); }
     </script>
 </head>
-{% include '_back_to_data.html' %}
 <body>
+{% include '_back_to_data.html' %}
 <div class="container">
-    <a href="{{ url_for('admin_entry') }}" class="top-btn">← 管理画面トップに戻る</a>
+    <a href="{{ url_for('main.admin_entry') }}" class="top-btn">← 管理画面トップに戻る</a>
     <h1>お知らせ・イベント・特売管理</h1>
     {% with messages = get_flashed_messages() %}
       {% if messages %}
@@ -75,7 +75,7 @@
 
         <button class="add-btn" type="submit">{% if edit_notice %}更新{% else %}お知らせ追加{% endif %}</button>
         {% if edit_notice %}
-        <a href="{{ url_for('admin_notices') }}" class="top-btn" style="background:#ffe;">キャンセル</a>
+        <a href="{{ url_for('main.admin_notices') }}" class="top-btn" style="background:#ffe;">キャンセル</a>
         {% endif %}
     </form>
     <hr>
@@ -95,7 +95,7 @@
         {% elif n.expire_date %}
             <span class="card-label">有効期限：</span>{{ n.expire_date }}<br>
         {% endif %}
-        <form method="get" action="{{ url_for('admin_notices') }}" style="display:inline;">
+        <form method="get" action="{{ url_for('main.admin_notices') }}" style="display:inline;">
             <input type="hidden" name="edit" value="{{ n.id }}">
             <button type="submit" class="edit-btn">編集</button>
         </form>

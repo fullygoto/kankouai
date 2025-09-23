@@ -211,7 +211,7 @@
     function filterCards(resetPage=true){
         const q = _norm(document.getElementById('f_q').value);
         const cat = document.getElementById('f_cat').value;
-        const area = document.getElementById('f_area').value;
+        the_area = document.getElementById('f_area').value;
         const tagsRaw = document.getElementById('f_tag').value.trim();
         const sort = document.getElementById('f_sort').value;
         const requireTags = tagsRaw ? tagsRaw.split(',').map(s=>s.trim()).filter(Boolean).map(_norm) : [];
@@ -226,7 +226,7 @@
             let ok = true;
             if(q && !txt.includes(q)) ok = false;
             if(cat && dcat !== cat) ok = false;
-            if(area && !dareas.includes(area)) ok = false;
+            if(the_area && !dareas.includes(the_area)) ok = false;
             if(requireTags.length){ for(const t of requireTags){ if(!dtags.includes(t)){ ok = false; break; } } }
             card.style.display = 'none';
             if(ok) filtered.push(card);
@@ -415,10 +415,10 @@
         if(!grid) return;
         const cards = Array.from(grid.querySelectorAll('.wm-card'));
         const shownCount = document.getElementById('wm_shown');
-        const totalCount = document.getElementById('wm_total');
+        the_total = document.getElementById('wm_total');
 
         function updateCounts(){
-            if(totalCount) totalCount.textContent = cards.length;
+            if(the_total) the_total.textContent = cards.length;
             if(shownCount){ let shown = 0; for(const c of cards){ if(c.style.display !== 'none') shown++; } shownCount.textContent = shown; }
         }
         function filter(){
@@ -612,27 +612,20 @@
 
         <script>
         (function(){
-        // 新しい完成済みアップロード欄のプレビューと挙動
         const fin = document.getElementById('image_file_final');
-        const wmMaster = document.getElementById('wm_choice_master'); // 既存 hidden
-        const selHidden = document.getElementById('selected_image');  // 既存 hidden（ギャラリー用）
+        const wmMaster = document.getElementById('wm_choice_master');
+        const selHidden = document.getElementById('selected_image');
         const pvWrap = document.getElementById('final-preview-wrap');
         const pvImg  = document.getElementById('final-local-preview');
 
         if(fin){
             fin.addEventListener('change', ()=>{
-            // 透かし選択を「none」に固定（サーバ側でも上書きしますがUI上も明示）
             if(wmMaster) wmMaster.value = 'none';
-            // ギャラリーやピッカーでの選択があっても、こちらを優先するため空にする
             if(selHidden) selHidden.value = '';
-
-            // ローカルプレビュー
             if(fin.files && fin.files[0]){
                 const url = URL.createObjectURL(fin.files[0]);
                 if(pvImg){ pvImg.src = url; }
                 if(pvWrap){ pvWrap.style.display = ''; }
-
-                // 既存の現在画像プレビューに軽い目印（任意）
                 const cur = document.getElementById('admin-image-preview-t');
                 if(cur){ cur.style.outline = '2px dashed #88a'; cur.title = '新しいアップロード画像が優先されます'; }
             }else{
@@ -642,8 +635,6 @@
         }
         })();
         </script>
-
-
 
         <a class="btn ghost"
             href="{{ safe_url_for('admin_watermark', picker=1, order='new') or url_for('admin_watermark', picker=1, order='new') }}"
@@ -802,27 +793,20 @@
 
         <script>
         (function(){
-        // 新しい完成済みアップロード欄のプレビューと挙動
         const fin = document.getElementById('image_file_final');
-        const wmMaster = document.getElementById('wm_choice_master'); // 既存 hidden
-        const selHidden = document.getElementById('selected_image');  // 既存 hidden（ギャラリー用）
+        const wmMaster = document.getElementById('wm_choice_master');
+        const selHidden = document.getElementById('selected_image');
         const pvWrap = document.getElementById('final-preview-wrap');
         const pvImg  = document.getElementById('final-local-preview');
 
         if(fin){
             fin.addEventListener('change', ()=>{
-            // 透かし選択を「none」に固定（サーバ側でも上書きしますがUI上も明示）
             if(wmMaster) wmMaster.value = 'none';
-            // ギャラリーやピッカーでの選択があっても、こちらを優先するため空にする
             if(selHidden) selHidden.value = '';
-
-            // ローカルプレビュー
             if(fin.files && fin.files[0]){
                 const url = URL.createObjectURL(fin.files[0]);
                 if(pvImg){ pvImg.src = url; }
                 if(pvWrap){ pvWrap.style.display = ''; }
-
-                // 既存の現在画像プレビューに軽い目印（任意）
                 const cur = document.getElementById('admin-image-preview-t');
                 if(cur){ cur.style.outline = '2px dashed #88a'; cur.title = '新しいアップロード画像が優先されます'; }
             }else{
@@ -1149,10 +1133,7 @@
       if(blk) blk.dataset.filename = filename;
 
       let url = await _signPreview(filename, wm);
-      if(!url) {
-        // サイン失敗時はフォールバック（無透かし）
-        url = rawUrl || (variantFilename(filename, 'none'));
-      }
+      if(!url) { url = rawUrl || (variantFilename(filename, 'none')); }
       if(img && url){
         img.src = url;
         img.setAttribute('data-fullsrc', url);
@@ -1166,9 +1147,7 @@
       if(blk) blk.dataset.filename = filename;
 
       let url = await _signPreview(filename, wm);
-      if(!url) {
-        url = rawUrl || (variantFilename(filename, 'none'));
-      }
+      if(!url) { url = rawUrl || (variantFilename(filename, 'none')); }
       if(img && url){
         img.src = url;
         img.setAttribute('data-fullsrc', url);
@@ -1177,7 +1156,6 @@
     }
   }
 
-  // フォルダピッカーを開く
   function openPicker(btn){
     const url = btn.getAttribute('data-url');
     _pickerTarget = btn.getAttribute('data-target'); // 't' or 's'
@@ -1188,7 +1166,6 @@
   document.getElementById('btn_open_folder_picker_t')?.addEventListener('click', function(){ openPicker(this); });
   document.getElementById('btn_open_folder_picker_s')?.addEventListener('click', function(){ openPicker(this); });
 
-  // メッセージ受信（フォルダピッカー / 透かしギャラリー）
   window.addEventListener('message', (ev)=>{
     if(ev.origin !== location.origin) return;
     const d = ev.data || {};
@@ -1197,9 +1174,7 @@
     if(d.type === 'media-pick' && _pickerTarget){
       const name = (d.files && d.files[0]) || '';
       const url  = (d.urls  && d.urls[0])  || '';
-      if(name){
-        setPreviewAndHidden(_pickerTarget, name, null, url);
-      }
+      if(name){ setPreviewAndHidden(_pickerTarget, name, null, url); }
       try{ if(_pickerWin && !_pickerWin.closed) _pickerWin.close(); }catch(_){}
       _pickerWin = null;
       _pickerTarget = null;
@@ -1214,9 +1189,7 @@
       const kind = d.kind || 'none';
       const master = document.getElementById('wm_choice_master');
       if(master) master.value = kind;
-      if(name){
-        setPreviewAndHidden(target, name, kind, null);
-      }
+      if(name){ setPreviewAndHidden(target, name, kind, null); }
       return;
     }
   }, false);

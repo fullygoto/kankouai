@@ -26,8 +26,8 @@
   <div class="topbar">
     <h1>画像一覧：{{ folder }}</h1>
     <div class="row">
-      <a class="btn" href="{{ url_for('admin_media_folders', picker=picker or 0) }}">← フォルダ一覧へ</a>
-      <a class="btn" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
+      <a class="btn" href="{{ url_for('main.admin_media_folders', picker=picker or 0) }}">← フォルダ一覧へ</a>
+      <a class="btn" href="{{ url_for('main.admin_entry') }}">データ管理に戻る</a>
     </div>
   </div>
 
@@ -44,9 +44,9 @@
         <div class="card">
           <div class="muted">プレビュー（透かし：なし）</div>
           {% if '.' in fn %}
-            <img src="{{ url_for('admin_media_img', filename=fn[:-fn.rfind('.')-1] ~ '__none' ~ fn[fn.rfind('.'):]) }}" alt="{{ fn }}" loading="lazy">
+            <img src="{{ url_for('main.admin_media_img', filename=fn[:-fn.rfind('.')-1] ~ '__none' ~ fn[fn.rfind('.'):]) }}" alt="{{ fn }}" loading="lazy">
           {% else %}
-            <img src="{{ url_for('admin_media_img', filename=fn) }}" alt="{{ fn }}" loading="lazy">
+            <img src="{{ url_for('main.admin_media_img', filename=fn) }}" alt="{{ fn }}" loading="lazy">
           {% endif %}
           <span class="name">{{ fn }}</span>
 
@@ -59,8 +59,8 @@
           {% endif %}
 
           <div class="row">
-            <a class="btn" href="{{ url_for('admin_watermark_one', src=fn) }}">編集</a>
-            <form method="post" action="{{ url_for('admin_media_delete') }}" onsubmit="return confirm('本当に削除しますか？');">
+            <a class="btn" href="{{ url_for('main.admin_watermark_one', src=fn) }}">編集</a>
+            <form method="post" action="{{ url_for('main.admin_media_delete') }}" onsubmit="return confirm('本当に削除しますか？');">
               <input type="hidden" name="filename" value="{{ fn }}">
               <button type="submit" class="btn danger">削除</button>
             </form>

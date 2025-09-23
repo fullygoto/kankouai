@@ -1,39 +1,114 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <meta charset="utf-8">
-    <title>管理ダッシュボード</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { background: #f5f9f8; font-family: 'Segoe UI', 'Noto Sans JP', sans-serif; margin:0;}
-        .container { max-width: 440px; margin:60px auto 0 auto; background:#fff; border-radius:15px; box-shadow:0 4px 22px rgba(22,180,150,0.08); padding: 36px 26px 32px 26px;}
-        h1 { text-align:center; font-size:1.33em; color:#18a772; margin-bottom:30px;}
-        .nav-menu { display: flex; flex-direction:column; gap:22px; }
-        .nav-link {
-            display:flex; align-items:center; gap:17px;
-            background:linear-gradient(90deg, #19a87a 0%, #80e7c1 100%);
-            color:#fff; border-radius:9px; padding:17px 18px; text-decoration:none; font-weight:600;
-            font-size:1.08em; transition:background 0.15s; box-shadow:0 2px 8px rgba(40,200,140,0.07);
-        }
-        .nav-link:hover { background:linear-gradient(90deg,#16cfa8 0%,#28a49b 100%); color:#fff;}
-        .desc {color:#27725a; font-size:0.98em; margin-bottom:19px; text-align:center;}
-        .logout-link { text-align:right; margin-bottom:10px;}
-        .logout-link a { color:#aaa; text-decoration:none; font-size:0.96em;}
-        @media (max-width:500px) {.container {margin:16px 1vw; padding:12px 2vw 10px 2vw;}}
-    </style>
+  <meta charset="utf-8">
+  <title>管理ダッシュボード</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{
+      --bg:#f5f9f8; --card:#fff; --bd:#e6edf3; --pri:#2a8ed8; --pri2:#18a772; --mut:#6b7280;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);font-family:'Segoe UI','Noto Sans JP',sans-serif}
+    .wrap{max-width:880px;margin:40px auto;padding:20px}
+    .head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+    .title{margin:0;font-size:1.3rem;color:var(--pri2)}
+    .logout a{color:#999;text-decoration:none}
+    .card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:18px}
+    .desc{color:var(--mut);margin:6px 0 14px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+    .tile{
+      display:block;padding:14px 16px;border-radius:12px;border:1px solid var(--bd);
+      text-decoration:none;color:#0f172a;background:#ffffff;transition:.12s;
+    }
+    .tile:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(0,0,0,.06)}
+    .tile .t{font-weight:700;color:#0b5aa7;margin:0 0 4px}
+    .tile .s{color:var(--mut);font-size:.92em;margin:0}
+    .footer-links{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+    .btn{display:inline-block;padding:8px 12px;border-radius:9px;border:1px solid var(--bd);text-decoration:none;color:#0b5aa7;background:#fff}
+    @media (max-width:560px){.wrap{margin:16px auto;padding:12px}}
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="logout-link"><a href="{{ url_for('logout') }}">ログアウト</a></div>
-        <h1>観光AI 管理ダッシュボード</h1>
-        <div class="desc">
-            ようこそ！下記メニューから各管理機能に移動できます。
-        </div>
-        <div class="nav-menu">
-            <a href="{{ url_for('admin_entry') }}" class="nav-link">観光データ登録・編集</a>
-            <a href="{{ url_for('admin_category') }}" class="nav-link">カテゴリー管理</a>
-            <!-- 必要に応じてここに他の管理機能メニューを追加 -->
-        </div>
+  <div class="wrap">
+    <div class="head">
+      <h1 class="title">観光AI 管理ダッシュボード</h1>
+      <div class="logout">
+        <a href="{{ safe_url_for('logout') or url_for('logout') }}">ログアウト</a>
+      </div>
     </div>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="card" style="margin-bottom:12px">
+          {% for m in messages %}
+            <div style="padding:8px 10px;margin:6px 0;border:1px solid #bae6fd;background:#ecfeff;border-radius:8px;color:#075985">{{ m }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <div class="card">
+      <p class="desc">下記メニューから各管理機能に移動できます。</p>
+      <div class="grid">
+        <a class="tile" href="{{ safe_url_for('main.admin_entry') or url_for('main.admin_entry') }}">
+          <p class="t">観光データ 登録・編集</p>
+          <p class="s">施設・スポットの追加/修正、画像、タグ、エリアなど</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_entries_edit') or url_for('main.admin_entries_edit') }}">
+          <p class="t">観光データ 一括編集</p>
+          <p class="s">一覧からまとめて編集/削除</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_category') or url_for('main.admin_category') }}">
+          <p class="t">カテゴリー管理</p>
+          <p class="s">カテゴリーと入力項目（フィールド）の管理</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_backup') or url_for('main.admin_backup') }}">
+          <p class="t">全体バックアップ / 復元</p>
+          <p class="s">ZIP作成・ダウンロード／ZIPアップロードで復元</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_synonyms') or '/admin_synonyms.html' }}">
+          <p class="t">類義語（シノニム）</p>
+          <p class="s">検索/回答向けの言い換え辞書</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_watermark') or '/admin_watermark.html' }}">
+          <p class="t">透かし一括生成</p>
+          <p class="s">GOTO透かしの一括作成・プレビュー</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_notices') or url_for('main.admin_notices') }}">
+          <p class="t">お知らせ管理</p>
+          <p class="s">サイト内のお知らせ投稿・編集</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('notices') or url_for('notices') }}">
+          <p class="t">お知らせ一覧（公開）</p>
+          <p class="s">公開画面を別タブで確認</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_logs') or url_for('main.admin_logs') }}">
+          <p class="t">質問・回答ログ</p>
+          <p class="s">直近の対話ログの確認</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_unhit_questions') or url_for('main.admin_unhit_questions') }}">
+          <p class="t">未ヒット質問一覧</p>
+          <p class="s">回答できなかった質問の収集</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_unhit_report') or url_for('main.admin_unhit_report') }}">
+          <p class="t">未ヒット頻出レポート</p>
+          <p class="s">改善が必要なテーマの分析</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_data_files') or url_for('main.admin_data_files') }}">
+          <p class="t">テキストデータ管理（.txt）</p>
+          <p class="s">補助データの閲覧・編集</p>
+        </a>
+        <a class="tile" href="{{ safe_url_for('main.admin_manual') or url_for('main.admin_manual') }}">
+          <p class="t">運用マニュアル</p>
+          <p class="s">各画面の使い方・手順</p>
+        </a>
+      </div>
+
+      <div class="footer-links">
+        <a class="btn" href="{{ safe_url_for('main.admin_entry') or url_for('main.admin_entry') }}">データ管理へ移動</a>
+      </div>
+    </div>
+  </div>
 </body>
 </html>
