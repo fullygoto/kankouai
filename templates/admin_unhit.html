@@ -52,15 +52,17 @@ function clip(str, n){ return (str || '').length>n ? str.slice(0,n) : (str||'');
 </script>
 </head>
 <body>
+{% set admin_entry_url = url_for('admin_entry') %}
 {% include '_back_to_data.html' %}
 <!-- 右上の戻るボタン（常に表示） -->
 <div class="topbar">
   <div class="inner">
-    <a href="{{ url_for('admin_entry') }}" class="btn ghost mini">データ管理に戻る</a>
+    <a href="{{ admin_entry_url }}" class="btn ghost mini">データ管理に戻る</a>
   </div>
 </div>
 
 <div class="container">
+  {% include '_admin_nav.html' %}
   <h1>未ヒット質問一覧（直近100件）</h1>
   <div class="hint">「編集して追加」相当の処理を <b>POST</b> に変更済み。長文でもURL制限にかかりません。</div>
 
