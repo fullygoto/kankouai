@@ -17,6 +17,10 @@
 !templates/
 !templates/**
 
+# tests も許可
+!tests/
+!tests/**
+
 # logs フォルダ自体は保持するが、ログ本体は無視
 !logs/
 logs/*

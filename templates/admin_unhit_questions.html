@@ -373,7 +373,7 @@ function fillSlug(idx){
 }
 function openEntryWithPrefill(idx){
   const root = document.getElementById('card-'+idx);
-  const base = '{{ url_for("main.admin_entry") }}';
+  const base = '{{ url_for("admin_entry") }}';
   const params = new URLSearchParams({
     prefill: 1,
     title: root.querySelector('input[name="title"]').value || '',
@@ -446,9 +446,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 <body>
   {% include '_back_to_data.html' %}
   <div class="container">
-    <div style="float:right;">
-  {% include '_admin_nav.html' %}
-  </div>
+    {% include '_admin_nav.html' %}
 
     <h1>未ヒット質問一覧</h1>
     <div class="muted">未ヒット（DBに該当がない）ログから、観光DB追加 または data への要約テキスト保存を行えます。</div>
@@ -549,7 +547,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
             <!-- 観光DB 登録ボックス -->
             <div class="box db">
-              <form method="post" action="{{ url_for('main.admin_add_entry') }}">
+              <form method="post" action="{{ url_for('admin_add_entry') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="__q" value="{{ q }}">
 
@@ -606,7 +604,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
             <!-- data 保存ボックス -->
             <div class="box txt" style="display:none">
-              <form method="post" action="{{ url_for('main.admin_unhit_save_text') }}">
+              <form method="post" action="{{ url_for('admin_unhit_save_text') }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="original_question" value="{{ q }}">
                 <div class="row3">

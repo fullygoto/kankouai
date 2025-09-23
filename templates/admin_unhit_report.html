@@ -130,7 +130,7 @@
     if(CUR_PAGE < 1) CUR_PAGE = 1;
     if(CUR_PAGE > totalPages) CUR_PAGE = totalPages;
     const start = (CUR_PAGE-1)*PAGE_SIZE;
-    the end   = Math.min(start+PAGE_SIZE, total);
+    const end   = Math.min(start+PAGE_SIZE, total);
     const pageIdx = FILTERED_IDX.slice(start, end);
 
     for(const i of pageIdx){
@@ -152,7 +152,7 @@
           <div class="row" style="margin-top:6px;gap:6px">
             <button class="btn ghost" type="button" onclick="copyText(\`${qEsc}\`)">質問コピー</button>
             <a class="btn ghost" href="{{ url_for('admin_unhit_questions') }}?q=${encodeURIComponent(r.q)}" target="_blank">該当の未ヒット一覧を開く</a>
-            <a class="btn ghost" href="{{ url_for('main.admin_entry') }}?prefill=1&title=${encodeURIComponent(r.q)}&desc=&tags=&areas=" target="_blank">DB下書き追加（編集で開く）</a>
+            <a class="btn ghost" href="{{ url_for('admin_entry') }}?prefill=1&title=${encodeURIComponent(r.q)}&desc=&tags=&areas=" target="_blank">DB下書き追加（編集で開く）</a>
             <label style="display:inline-flex;gap:6px;align-items:center;margin-left:8px">
               <input type="checkbox" ${isDone?'checked':''} onchange="toggleDone('${r.q.replace(/["'\\]/g,'\\$&')}', this.checked)"> 処理済み
             </label>
@@ -267,9 +267,8 @@
 <body>
   {% include '_back_to_data.html' %}
   <div class="container">
-    <div style="float:right;">
-  {% include '_admin_nav.html' %}
-  </div>
+    {% include '_admin_nav.html' %}
+
     <h1>未ヒット頻出レポート</h1>
     <div class="muted">
       {% if period_label %}{{ period_label }}{% else %}直近7〜30日{% endif %}の未ヒット質問を集計。件数順で優先対応できます。
@@ -290,9 +289,9 @@
         <input type="checkbox" id="f_hide" onchange="applyFilter()"> 処理済みを隠す
       </label>
       <span style="margin-left:auto"></span>
-      <a class="btn ghost" href="{{ url_for('main.admin_unhit_report', days=7) }}">7日</a>
-      <a class="btn ghost" href="{{ url_for('main.admin_unhit_report', days=14) }}">14日</a>
-      <a class="btn ghost" href="{{ url_for('main.admin_unhit_report', days=30) }}">30日</a>
+      <a class="btn ghost" href="{{ url_for('admin_unhit_report', days=7) }}">7日</a>
+      <a class="btn ghost" href="{{ url_for('admin_unhit_report', days=14) }}">14日</a>
+      <a class="btn ghost" href="{{ url_for('admin_unhit_report', days=30) }}">30日</a>
       <button class="btn ghost" type="button" onclick="exportJSON()">JSON出力</button>
       <button class="btn ghost" type="button" onclick="exportCSV()">CSV出力</button>
     </div>

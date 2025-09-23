@@ -290,9 +290,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 <body>
   {% include '_back_to_data.html' %}
   <div class="container">
-    <div style="float:right;">
-  {% include '_admin_nav.html' %}
-  </div>
+    {% include '_admin_nav.html' %}
 
     <h1>質問・回答ログ</h1>
     <div class="muted">
@@ -405,7 +403,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
               {% if not hit_db %}
                 <!-- 最小情報で DB へ下書き追加 -->
-                <form method="post" action="{{ url_for('main.admin_add_entry') }}" style="display:inline;">
+                <form method="post" action="{{ url_for('admin_add_entry') }}" style="display:inline;">
                   {% if csrf_token is defined %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
                   <input type="hidden" name="title" value="{{ q[:80] }}">
                   <textarea name="desc" style="display:none">{{ a[:400] }}</textarea>

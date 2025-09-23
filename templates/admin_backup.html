@@ -24,6 +24,7 @@
   .kv{border-collapse:collapse;margin-top:8px}
   .kv td{border:1px solid #e6edf3;padding:6px 8px}
   .kv td.k{background:#f6f9fb;font-weight:600;color:#345;min-width:140px}
+  /* 追加: レイアウト崩れ対策（ボタン行 & 入力行） */
   .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
   .actions .btn{flex:0 1 auto}
   .input-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
@@ -32,36 +33,18 @@
   @media(max-width:860px){.grid{grid-template-columns:1fr}}
   code{background:#f3f4f6;padding:0 4px;border-radius:4px}
 </style>
-
-{# ------- ルートを両対応で解決（admin_xxx / main.admin_xxx / フォールバック） ------- #}
-{% set _u = namespace(
-  logs = (safe_url_for('admin_logs') or safe_url_for('main.admin_logs') or '/admin_logs.html'),
-  unhit = (safe_url_for('admin_unhit_questions') or safe_url_for('main.admin_unhit_questions') or '/admin_unhit_questions.html'),
-  unhit_report = (safe_url_for('admin_unhit_report') or safe_url_for('main.admin_unhit_report') or '/admin_unhit_report.html'),
-  synonyms = (safe_url_for('admin_synonyms') or safe_url_for('main.admin_synonyms') or '/admin_synonyms.html'),
-  backup = (safe_url_for('admin_backup') or safe_url_for('main.admin_backup') or '/admin_backup.html'),
-  entries_edit = (safe_url_for('admin_entries_edit') or safe_url_for('main.admin_entries_edit') or '/admin_entries_edit.html'),
-  notices_admin = (safe_url_for('admin_notices') or safe_url_for('main.admin_notices') or '/admin_notices.html'),
-  notices = (safe_url_for('notices') or '/notices.html'),
-  manual = (safe_url_for('admin_manual') or safe_url_for('main.admin_manual') or '/admin_manual.html'),
-  entry = (safe_url_for('admin_entry') or safe_url_for('main.admin_entry') or '/admin_entry.html'),
-  storage_stats = (safe_url_for('admin_storage_stats') or safe_url_for('main.admin_storage_stats') or '/admin/storage-stats'),
-  restore = (safe_url_for('admin_restore') or safe_url_for('main.admin_restore') or '/admin_restore'),
-  restore_from_url = (safe_url_for('admin_restore_from_url') or safe_url_for('main.admin_restore_from_url') or '/admin_restore_from_url')
-) %}
-
 <script>
 function confirmRestore(){ return confirm('現在のデータが上書きされます。本当に復元しますか？'); }
 async function showStorage(){
   const el = document.getElementById('storage');
   el.textContent = '読み込み中…';
   try{
-    const r = await fetch('{{ _u.storage_stats }}');
+    const r = await fetch('{{ url_for("admin_storage_stats") }}');
     const j = await r.json();
     function human(n){
       const u=['B','KB','MB','GB','TB']; let i=0; let x=Number(n||0);
       while(x>=1024 && i<u.length-1){ x/=1024; i++; }
-      return (x>=10?x.toFixed(1):x.toFixed(2))+' '+u[i];
+      return x.toFixed(1)+' '+u[i];
     }
     let html = '<table class="kv">';
     html += '<tr><td class="k">BASE_DIR</td><td>'+ (j.base_dir||'') +'</td></tr>';
@@ -82,17 +65,7 @@ async function showStorage(){
 <body>
   {% include '_back_to_data.html' %}
   <div class="container">
-    <div class="nav" style="float:right;">
-      <a href="{{ _u.logs }}">[質問・回答ログ]</a>
-      <a href="{{ _u.unhit }}">[未ヒット質問一覧]</a>
-      <a href="{{ _u.unhit_report }}">[未ヒット頻出レポート]</a>
-      <a href="{{ _u.synonyms }}">[類義語辞書管理]</a>
-      <a href="{{ _u.backup }}">[全体バックアップ]</a>
-      <a href="{{ _u.entries_edit }}">[観光データ一括編集]</a>
-      <a href="{{ _u.notices_admin }}">[お知らせ管理]</a>
-      <a href="{{ _u.notices }}">[お知らせ一覧]</a>
-      <a href="{{ _u.manual }}" style="margin-right:14px;">[運用マニュアル]</a>
-    </div>
+    {% include '_admin_nav.html' %}
 
     <h1>全体バックアップ / 復元</h1>
     <div class="muted">
@@ -101,6 +74,7 @@ async function showStorage(){
       容量不足時は<strong>ストリーミング（tar.gz）</strong>をご利用ください。
     </div>
 
+    <!-- フラッシュ表示 -->
     {% with messages = get_flashed_messages() %}
       {% if messages %}
         {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
@@ -113,8 +87,8 @@ async function showStorage(){
         <h2 style="margin:0 0 8px">バックアップの作成</h2>
         <p class="muted">現在の保存内容をダウンロードします。</p>
         <div class="actions">
-          <a class="btn" href="{{ _u.backup }}?download=1">ZIPを作成してダウンロード</a>
-          <a class="btn gray" href="{{ _u.backup }}?stream=1">容量不足のとき：ストリーミング（tar.gz）</a>
+          <a class="btn" href="{{ url_for('admin_backup', download='1') }}">ZIPを作成してダウンロード</a>
+          <a class="btn gray" href="{{ url_for('admin_backup', stream='1') }}">容量不足のとき：ストリーミング（tar.gz）</a>
           <button class="btn ghost" type="button" onclick="location.reload()">再読込</button>
           <button class="btn ghost" type="button" onclick="showStorage()">サーバーの容量状況を表示</button>
         </div>
@@ -137,7 +111,7 @@ async function showStorage(){
           ZIPの内容で現在のデータを<strong>上書き</strong>します。<br>
           事前に「バックアップの作成」で退避しておくことを推奨します。
         </p>
-        <form method="post" action="{{ _u.restore }}" enctype="multipart/form-data" onsubmit="return confirmRestore()">
+        <form method="post" action="{{ url_for('admin_restore') }}" enctype="multipart/form-data" onsubmit="return confirmRestore()">
           <input type="file" name="backup_zip" accept=".zip">
           <div class="actions">
             <button class="btn danger" type="submit">ZIPをアップロードして復元</button>
@@ -157,7 +131,7 @@ async function showStorage(){
         Google Drive / Dropbox / S3 などに置いた ZIP の<strong>直リンク</strong>を指定すると、<br>
         サーバー側が直接ダウンロードして復元します。
       </p>
-      <form method="post" action="{{ _u.restore_from_url }}" onsubmit="return confirmRestore()">
+      <form method="post" action="{{ url_for('admin_restore_from_url') }}" onsubmit="return confirmRestore()">
         <div class="input-row">
           <input type="url" name="backup_url" placeholder="https://example.com/your-backup.zip" required>
           <button class="btn danger" type="submit">URLから復元</button>
@@ -178,7 +152,7 @@ async function showStorage(){
             <li>リンクの末尾が <code>dl=0</code> になっている場合、<b><code>dl=1</code>に書き換える</b>か、<br>
                 ドメインを <code>www.dropbox.com</code> → <code>dl.dropboxusercontent.com</code> に変えて貼り付けます。</li>
           </ol>
-<pre><code>例（共有リンク）:
+          <pre><code>例（共有リンク）:
 https://www.dropbox.com/s/ABCDEFG12345/my-backup.zip?dl=0
 
 → そのまま使える直ダウンロード:
@@ -207,7 +181,7 @@ https://dl.dropboxusercontent.com/s/ABCDEFG12345/my-backup.zip</code></pre>
     </div>
 
     <div style="margin-top:8px">
-      <a class="btn ghost" href="{{ _u.entry }}">← データ管理に戻る</a>
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← データ管理に戻る</a>
     </div>
   </div>
 </body>
