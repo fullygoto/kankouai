@@ -39,7 +39,7 @@
   <div class="container">
     <div class="topbar">
       <h1>透かし一括生成</h1>
-      <a class="btn ghost" href="{{ url_for('main.admin_entry') }}">データ管理に戻る</a>
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
     </div>
 
     {% set _order = (order or 'new') if order is defined else 'new' %}
@@ -163,14 +163,14 @@
       <div id="grid" class="grid" data-total="{{ existing|length if existing else 0 }}">
         {% if existing and existing|length %}
           {% for fn in existing %}
-            {% set _edit_href = (safe_url_for('main.admin_watermark_one', src=fn) or url_for('main.admin_watermark_one', src=fn)) %}
+            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or url_for('admin_watermark_one', src=fn)) %}
             <div class="card" data-name="{{ fn|lower }}">
               <label class="sel">
                 <input type="checkbox" name="selected_existing" value="{{ fn }}">
                 <span class="name">{{ fn }}</span>
               </label>
               <div class="small muted">プレビュー</div>
-              <img class="thumb" src="{{ url_for('main.admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
+              <img class="thumb" src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
               <div class="card-actions">
                 <a class="btn small" href="{{ _edit_href }}">編集</a>
                 <button class="btn ghost small" type="button" data-del="{{ fn }}">削除</button>
@@ -184,7 +184,7 @@
     </form>
 
     <!-- 削除専用フォーム（現在の表示条件も同梱してPOST） -->
-    <form id="delForm" method="post" action="{{ safe_url_for('main.admin_media_delete') or url_for('main.admin_media_delete') }}" style="display:none">
+    <form id="delForm" method="post" action="{{ safe_url_for('admin_media_delete') or url_for('admin_media_delete') }}" style="display:none">
       <input type="hidden" name="filename" id="delName">
       <input type="hidden" name="order"    id="delOrder"  value="{{ _order }}">
       <input type="hidden" name="picker"   id="delPicker" value="{{ '1' if picker else '' }}">
@@ -193,7 +193,7 @@
     </form>
 
     <div class="row" style="margin-top:18px">
-      <a class="btn ghost" href="{{ url_for('main.admin_entry') }}">← 観光データ管理に戻る</a>
+      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← 観光データ管理に戻る</a>
     </div>
   </div>
 
@@ -216,8 +216,8 @@
       const endpointUpload = "/admin/_watermark_generate"; // サーバ側のAPI（既に実装済み想定）
       const upBtn = document.getElementById('btnUploadOnly');
       const upStatus = document.getElementById('upStatus');
-      const imgBase  = "{{ url_for('main.admin_media_img', filename='') }}";
-      const editBase = "{{ url_for('main.admin_watermark_one') }}"; // ?src=... を付ける
+      const imgBase  = "{{ url_for('admin_media_img', filename='') }}";
+      const editBase = "{{ url_for('admin_watermark_one') }}"; // ?src=... を付ける
 
       function buildCard(name, previewUrl){
         const div = document.createElement('div');
@@ -347,7 +347,7 @@
         applyPick.addEventListener('click', (e)=>{
           e.preventDefault();
           const files = Array.from(document.querySelectorAll('input[name="selected_existing"]:checked')).map(cb=>cb.value);
-          const base = '{{ url_for('main.admin_media_img', filename='') }}';
+          const base = '{{ url_for('admin_media_img', filename='') }}';
           const urls = files.map(fn => base + encodeURIComponent(fn));
           try{ window.opener && window.opener.postMessage({ type:'media-pick', files, urls }, '*'); }catch(_){/* ignore */ }
           window.close();

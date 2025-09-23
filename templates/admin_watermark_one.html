@@ -29,7 +29,7 @@
   <div class="container">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
       <h1>透かし：単体編集</h1>
-      <a class="btn ghost" href="{{ url_for('main.admin_watermark') }}">← 一覧に戻る</a>
+      <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧に戻る</a>
     </div>
 
     {% set src_name = src %}
@@ -52,7 +52,7 @@
 
     <div class="row">
       <div class="muted">元画像</div>
-      <img id="orig" src="{{ url_for('main.admin_media_img', filename=src_name) }}" alt="{{ src_name }}" loading="lazy">
+      <img id="orig" src="{{ url_for('admin_media_img', filename=src_name) }}" alt="{{ src_name }}" loading="lazy">
       <div class="name">{{ src_name }}</div>
     </div>
 
@@ -60,7 +60,7 @@
       <fieldset>
         <legend>再生成</legend>
         <!-- ★ 単体専用エンドポイントへPOST -->
-        <form method="post" action="{{ url_for('main.admin_watermark_one_regen') }}" class="actions">
+        <form method="post" action="{{ url_for('admin_watermark_one_regen') }}" class="actions">
           <input type="hidden" name="src" value="{{ src_name }}">
           <div class="radios">
             <label><input type="radio" name="wm" value="all"   checked> 全部（__none / __goto / __fullygoto）</label>
@@ -80,7 +80,7 @@
     <div class="row">
       <fieldset>
         <legend>削除</legend>
-        <form method="post" action="{{ safe_url_for('main.admin_media_delete') or url_for('main.admin_media_delete') }}"
+        <form method="post" action="{{ safe_url_for('admin_media_delete') or url_for('admin_media_delete') }}"
               onsubmit="return confirm('元画像と派生（__none/__goto/__fullygoto）を削除します。よろしいですか？');" class="actions">
           <input type="hidden" name="filename" value="{{ src_name }}">
           <button class="btn ghost" type="submit">この画像を削除する</button>
@@ -112,13 +112,13 @@
     </div>
 
     <div class="row" style="margin-top:18px">
-      <a class="btn ghost" href="{{ url_for('main.admin_watermark') }}">← 一覧に戻る</a>
+      <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧に戻る</a>
     </div>
   </div>
 
   <script>
     (function(){
-      const base = "{{ url_for('main.admin_media_img', filename='') }}";
+      const base = "{{ url_for('admin_media_img', filename='') }}";
       document.querySelectorAll('#derivs img[data-fn]').forEach(img => {
         const fn = img.getAttribute('data-fn') || '';
         img.src = base + encodeURIComponent(fn);

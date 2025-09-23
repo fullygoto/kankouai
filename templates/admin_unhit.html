@@ -56,7 +56,7 @@ function clip(str, n){ return (str || '').length>n ? str.slice(0,n) : (str||'');
 <!-- 右上の戻るボタン（常に表示） -->
 <div class="topbar">
   <div class="inner">
-    <a href="{{ url_for('main.admin_entry') }}" class="btn ghost mini">データ管理に戻る</a>
+    <a href="{{ url_for('admin_entry') }}" class="btn ghost mini">データ管理に戻る</a>
   </div>
 </div>
 
@@ -72,7 +72,7 @@ function clip(str, n){ return (str || '').length>n ? str.slice(0,n) : (str||'');
 
         {% set initial_title = (log.question or '')[:40] %}
         {% set initial_desc  = (log.answer or '') %}
-        <form method="post" action="{{ url_for('main.admin_add_entry') }}">
+        <form method="post" action="{{ url_for('admin_add_entry') }}">
           <!-- 実際にDBへ入れる値 -->
           <label>タイトル（登録名）</label>
           <input type="text" name="title" value="{{ initial_title }}" required>
