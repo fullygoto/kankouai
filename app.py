@@ -13,6 +13,7 @@ import uuid
 import hmac, hashlib, base64
 import zipfile
 import io
+import tempfile
 # 追加が必要な標準ライブラリ
 import shutil      # _has_free_space で disk_usage を使用
 import tarfile     # _stream_backup_targz で使用
@@ -187,6 +188,15 @@ def _snapshot_list():
         })
     return list(reversed(out))  # 新しい順
 
+
+_SNAPSHOT_NAME_RE = re.compile(r"^snapshot-\d{8}-\d{6}(?:-[A-Za-z0-9_-]+)?\.zip$")
+
+
+def _is_safe_snapshot_name(name: str) -> bool:
+    if not isinstance(name, str):
+        return False
+    return bool(_SNAPSHOT_NAME_RE.match(name))
+
 def _snapshot_create_internal(tag: str | None = None):
     """
     サーバ内にZIPを作成してパスを返す。失敗時は例外。
@@ -268,6 +278,8 @@ def admin_snapshot_download(fname):
         abort(403)
     from flask import send_from_directory, abort as _abort
     import os, os.path as op
+    if not _is_safe_snapshot_name(fname):
+        _abort(400)
     base = op.abspath(_snapshot_dir())
     path = op.abspath(op.join(base, fname))
     if not path.startswith(base) or not op.isfile(path):
@@ -283,6 +295,9 @@ def admin_snapshot_restore():
     fname = (request.form.get("fname") or "").strip()
     if not fname:
         flash("スナップショットが選択されていません。")
+        return redirect(url_for("admin_entries_edit"))
+    if not _is_safe_snapshot_name(fname):
+        flash("不正なスナップショット名です。")
         return redirect(url_for("admin_entries_edit"))
     try:
         path = _snapshot_restore_internal(fname)
@@ -4642,11 +4657,42 @@ os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # 便利関数: JSONをアトミックに保存
-def _atomic_json_dump(path, obj):
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+def _atomic_json_dump(path, obj, *, create_backup: bool = False):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if create_backup and path.exists():
+            ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            backup_path = path.with_name(f"{path.name}.bak-{ts}")
+            shutil.copy2(path, backup_path)
+
+        os.replace(tmp_path, path)
+
+        try:
+            flags = getattr(os, "O_RDONLY", 0)
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            dir_fd = os.open(str(path.parent), flags)
+        except (FileNotFoundError, NotADirectoryError, AttributeError, PermissionError, OSError):
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
 
 
 def _append_jsonl(path: str, obj: dict):
@@ -5639,12 +5685,47 @@ def load_entries():
     raw = _safe_read_json(ENTRIES_FILE, [])
     return [_norm_entry(e) for e in raw if isinstance(e, dict)]
 
+
+def _validate_entries_payload(entries, *, allow_empty: bool = False) -> list[dict]:
+    """entries.json 向けデータの最小検証と正規化を行う"""
+    if not isinstance(entries, list):
+        raise ValueError("entries は配列(list)である必要があります")
+
+    normalized: list[dict] = []
+    for idx, item in enumerate(entries):
+        if not isinstance(item, dict):
+            raise ValueError(f"{idx + 1}件目がオブジェクト(dict)ではありません")
+
+        norm = _norm_entry(item)
+        title = (norm.get("title") or "").strip()
+        norm["title"] = title
+        areas = [a for a in (norm.get("areas") or []) if a]
+        norm["areas"] = areas
+
+        missing: list[str] = []
+        if not title:
+            missing.append("title")
+        if not areas:
+            missing.append("areas")
+
+        if missing:
+            joined = "/".join(missing)
+            raise ValueError(f"{idx + 1}件目で必須項目({joined})が不足しています")
+
+        normalized.append(norm)
+
+    if not normalized and not allow_empty:
+        raise ValueError("0件のデータは保存できません（空配列の保存は拒否されました）")
+
+    return normalized
+
+
 def save_entries(entries):
     """
     保存前に正規化＋（設定オンなら）タイトル重複統合。
     壊れ値が混じっても dict のみ採用して落ちないように。
     """
-    items = [_norm_entry(e) for e in (entries or []) if isinstance(e, dict)]
+    items = _validate_entries_payload(list(entries or []), allow_empty=True)
     if DEDUPE_ON_SAVE:
         try:
             items, stats, _ = dedupe_entries_by_title(items, use_ai=DEDUPE_USE_AI, dry_run=False)
@@ -5654,7 +5735,7 @@ def save_entries(entries):
             )
         except Exception:
             app.logger.exception("[dedupe] failed")
-    _atomic_json_dump(ENTRIES_FILE, items)
+    _atomic_json_dump(ENTRIES_FILE, items, create_backup=True)
 
 
 def load_synonyms():
@@ -6911,23 +6992,61 @@ def admin_entries_edit():
 
     old_entries = load_entries()
 
+    def _render_page(status_code: int = 200):
+        entries_ctx = [_norm_entry(x) for x in load_entries()]
+        paused, by = _pause_state()
+        try:
+            snapshots = _snapshot_list()
+        except NameError:
+            os.makedirs("backups", exist_ok=True)
+            files = sorted(glob.glob(_op.join("backups", "snapshot-*.zip")))
+            snapshots = []
+            for f in reversed(files):
+                try:
+                    st = os.stat(f)
+                    snapshots.append({
+                        "name": _op.basename(f),
+                        "size": st.st_size,
+                        "mtime": _dt.fromtimestamp(st.st_mtime),
+                    })
+                except Exception:
+                    pass
+
+        return render_template(
+            "admin_entries_edit.html",
+            entries=entries_ctx,
+            global_paused=paused,
+            paused_by=by,
+            snapshots=snapshots,
+        ), status_code
+
     # ① 生JSONでの上書き（従来互換）
-    if request.method == "POST" and request.form.get("entries_raw"):
-        raw_json = request.form.get("entries_raw")
+    if request.method == "POST" and ("entries_raw" in request.form):
+        allow_empty = (request.form.get("allow_empty") == "1")
+        raw_json = request.form.get("entries_raw", "")
+        if not raw_json.strip():
+            flash("JSONエラー: 入力が空です")
+            return _render_page(422)
         try:
             data = json.loads(raw_json)
-            if not isinstance(data, list):
-                raise ValueError("ルート要素は配列(list)にしてください")
-            data = [_norm_entry(e) for e in data]
-            save_entries(data)
-            flash("entries.jsonを上書きしました")
-            return redirect(url_for("admin_entries_edit"))
-        except Exception as e:
+        except json.JSONDecodeError as e:
             flash("JSONエラー: " + str(e))
+            return _render_page(422)
+
+        try:
+            normalized = _validate_entries_payload(data, allow_empty=allow_empty)
+        except ValueError as e:
+            flash(str(e))
+            return _render_page(422)
+
+        save_entries(normalized)
+        flash("entries.jsonを上書きしました")
+        return redirect(url_for("admin_entries_edit"))
 
     # ② UIフォームからの保存（未表示フィールドは既存からマージして保持）
-    if request.method == "POST" and not request.form.get("entries_raw"):
+    if request.method == "POST" and ("entries_raw" not in request.form):
         getl = request.form.getlist
+        allow_empty = (request.form.get("allow_empty") == "1")
 
         row_ids       = getl("row_id[]")            # ★ hidden（未導入なら空配列）
         cats          = getl("category[]")
@@ -6996,11 +7115,13 @@ def admin_entries_edit():
 
             e = _norm_entry(base)
 
-            # エリア必須（従来挙動を維持）
-            if not e.get("areas"):
-                continue
-
             new_entries.append(e)
+
+        try:
+            new_entries = _validate_entries_payload(new_entries, allow_empty=allow_empty)
+        except ValueError as exc:
+            flash(str(exc))
+            return _render_page(422)
 
         # 保存前に自動バックアップ（復元用）
         try:
@@ -7027,35 +7148,7 @@ def admin_entries_edit():
         return redirect(url_for("admin_entries_edit"))
 
     # GET（またはPOSTエラー後の再表示）
-    entries = [_norm_entry(x) for x in old_entries]
-    paused, by = _pause_state()  # ← 既存の一時停止表示に合わせて維持
-
-    # スナップショット一覧（ヘルパ未導入でも動くようフォールバック）
-    try:
-        snapshots = _snapshot_list()
-    except NameError:
-        # backups/snapshot-*.zip を新しい順で列挙（テンプレの表示に合わせた dict 形式）
-        os.makedirs("backups", exist_ok=True)
-        files = sorted(glob.glob(_op.join("backups", "snapshot-*.zip")))
-        snapshots = []
-        for f in reversed(files):
-            try:
-                st = os.stat(f)
-                snapshots.append({
-                    "name": _op.basename(f),
-                    "size": st.st_size,
-                    "mtime": _dt.fromtimestamp(st.st_mtime),
-                })
-            except Exception:
-                pass
-
-    return render_template(
-        "admin_entries_edit.html",
-        entries=entries,
-        global_paused=paused,
-        paused_by=by,
-        snapshots=snapshots,   # ★ スナップショットUI用
-    )
+    return _render_page()
 
 
 @app.route("/admin/entries_dedupe", methods=["GET", "POST"])
@@ -7078,7 +7171,10 @@ def admin_entries_dedupe():
         use_ai = DEDUPE_USE_AI if use_ai_param is None else _boolish(use_ai_param)
 
         new_entries, stats, preview = dedupe_entries_by_title(entries, use_ai=use_ai, dry_run=False)
-        save_entries(new_entries)
+        try:
+            save_entries(new_entries)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 422
         return jsonify({"ok": True, "saved": True, "stats": stats, "preview": preview})
 
     # プレビュー: GET
@@ -7217,8 +7313,12 @@ def admin_entries_import_csv():
         return redirect(url_for("admin_entries_edit"))
 
     entries = load_entries()
-    entries.extend(new_entries)
-    save_entries(entries)
+    merged_entries = list(entries) + new_entries
+    try:
+        save_entries(merged_entries)
+    except ValueError as exc:
+        flash(str(exc))
+        return redirect(url_for("admin_entries_edit"))
 
     try:
         auto_update_synonyms_from_entries(new_entries)
