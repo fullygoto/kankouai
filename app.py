@@ -66,6 +66,8 @@ import warnings  # ← 追加！
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
+from watermark_utils import media_path_for
+
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
     # Pillow >= 9.1
@@ -556,6 +558,11 @@ except Exception:
     pass
 
 
+# watermark_utils などから Flask 設定経由で参照できるようにする
+app.config["MEDIA_ROOT"] = MEDIA_ROOT
+app.config["IMAGES_DIR"] = IMAGES_DIR
+
+
 # === 保存ヘルパー（/media/img 配下に“確実に保存”＋mtimeで新しい順を保証） ===
 MEDIA_DIR = Path(MEDIA_ROOT).resolve()
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
@@ -648,6 +655,7 @@ def _render_watermark_bytes(src_path: Path, mode: str) -> tuple[bytes, str]:
 
 # --- Watermark assets (static/watermarks 以下) ---
 WATERMARK_DIR = os.getenv("WATERMARK_DIR") or os.path.join(app.static_folder, "watermarks")
+app.config.setdefault("WATERMARK_DIR", WATERMARK_DIR)
 WATERMARK_FILES = {
     "fullygoto": "wm_fullygoto.png",
     "gotocity":  "wm_gotocity.png",
@@ -6779,6 +6787,10 @@ def _wm_save_jpeg(im: Image.Image, out_path: str, quality: int = 90):
 
 # === 管理プレビュー用 admin_media_img（重複安全・ダブル透かし防止） ===
 def _admin_media_img_impl(filename: str):
+    try:
+        media_path_for(filename)
+    except Exception:
+        abort(400)
     # 派生ファイルはダブル透かし防止で wm=none、元画像はプレビュー用に wm=1
     low = (filename or "").lower()
     if any(s in low for s in ("__goto", "__gotocity", "__fullygoto", "__none")):
