@@ -5,27 +5,25 @@
   <title>透かし編集：{{ filename }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:#f6faf9;padding:20px}
-    .container{background:#fff;max-width:980px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
-    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
-    .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;text-decoration:none}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:#f6faf9;padding:20px;margin:0}
+    .container{max-width:960px;margin:0 auto;background:#fff;border-radius:14px;box-shadow:0 4px 18px #b7d3e033;padding:22px}
+    h1{margin:0 0 16px}
+    .btn{display:inline-block;padding:8px 14px;border-radius:8px;border:none;background:#2a8ed8;color:#fff;text-decoration:none;cursor:pointer}
     .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
-    .row{display:flex;gap:10px;flex-wrap:wrap}
-    .muted{color:#567}
-    img{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
-    fieldset{border:1px solid #e7eef5;border-radius:10px;padding:10px 12px;margin-top:12px}
-    legend{padding:0 6px;color:#234}
-    .radios{display:flex;gap:10px;flex-wrap:wrap}
-    .radios label{display:flex;gap:6px;align-items:center;background:#f3f8fc;border:1px solid #dbe8f3;border-radius:10px;padding:6px 10px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start}
+    fieldset{border:1px solid #e4edf6;border-radius:12px;padding:14px;margin:16px 0}
+    legend{padding:0 8px;color:#234;font-weight:600}
+    img{max-width:100%;border-radius:12px;border:1px solid #e4edf6;background:#fff}
+    label{display:flex;flex-direction:column;gap:6px;font-size:.95em;color:#234}
+    input[type="number"],select{padding:8px 10px;border-radius:8px;border:1px solid #b7cfe2;background:#fff}
+    .muted{color:#567;font-size:.9em}
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="topbar">
-      <h1 style="margin:0">透かし編集</h1>
-      <div class="row">
-        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧へ</a>
-      </div>
+    <div class="row" style="justify-content:space-between">
+      <h1>透かし編集</h1>
+      <a class="btn ghost" href="{{ url_for('admin_watermark') }}">← 一覧へ戻る</a>
     </div>
 
     <div class="row">
@@ -36,39 +34,47 @@
         </a>
         <div class="muted" style="margin-top:6px;word-break:break-all">{{ filename }}</div>
       </div>
-      {% if preview %}
       <div style="flex:1;min-width:260px">
-        <div class="muted">現在の外部公開バリエーション</div>
-        <div class="row">
-          {% if preview.none %}<a href="{{ preview.none }}" target="_blank" rel="noopener" class="btn ghost">none</a>{% endif %}
-          {% if preview.goto %}<a href="{{ preview.goto }}" target="_blank" rel="noopener" class="btn ghost">@Goto</a>{% endif %}
-          {% if preview.fully %}<a href="{{ preview.fully }}" target="_blank" rel="noopener" class="btn ghost">@fullyGOTO</a>{% endif %}
-        </div>
+        <div class="muted">現在の透かしプレビュー</div>
+        {% if preview.wm %}
+          <a href="{{ preview.wm }}" target="_blank" rel="noopener">
+            <img src="{{ preview.wm }}" loading="lazy" alt="preview">
+          </a>
+        {% else %}
+          <div class="muted">透かし画像はまだ生成されていません。</div>
+        {% endif %}
       </div>
-      {% endif %}
     </div>
 
-    <form method="post" action="{{ url_for('admin_watermark_edit_apply') }}" style="margin-top:12px">
+    <form method="post" action="{{ url_for('admin_watermark_edit_apply') }}" style="margin-top:18px">
       <input type="hidden" name="filename" value="{{ filename }}">
       <fieldset>
-        <legend>生成する透かし</legend>
-        {% set current = wm or 'all' %}
-        <div class="radios">
-          <label><input type="radio" name="wm" value="all"   {{ 'checked' if current=='all' }}> 全部（none/@Goto/@fully を生成）</label>
-          <label><input type="radio" name="wm" value="none"  {{ 'checked' if current=='none' }}> なし（__none）</label>
-          <label><input type="radio" name="wm" value="goto"  {{ 'checked' if current=='goto' }}> ＠Goto City（__goto）</label>
-          <label><input type="radio" name="wm" value="fully" {{ 'checked' if current=='fully' }}> ＠fullyGOTO（__fullygoto）</label>
-        </div>
-        <div style="margin-top:8px">
-          <label style="display:flex;gap:6px;align-items:center">
-            <input type="checkbox" name="force" value="1"> 既存の __none / __goto / __fullygoto を上書きする
+        <legend>透かしを再生成</legend>
+        <div class="row">
+          <label>透かしPNG：
+            <select name="watermark_file">
+              {% if watermark_files and watermark_files|length %}
+                {% for f in watermark_files %}
+                  <option value="{{ f }}" {{ 'selected' if selected_watermark==f else '' }}>{{ f }}</option>
+                {% endfor %}
+              {% else %}
+                <option value="">透かしPNGが見つかりません</option>
+              {% endif %}
+            </select>
+          </label>
+          <label>スケール（短辺比率 %）：
+            <input type="number" name="scale" min="0.08" max="0.12" step="0.005" value="{{ scale }}">
+          </label>
+          <label>不透明度（0〜1）：
+            <input type="number" name="opacity" min="0.05" max="1" step="0.05" value="{{ opacity }}">
           </label>
         </div>
+        <div class="muted" style="margin-top:6px">保存時はバックアップを作成し、安全に置き換えます。</div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn" type="submit">再生成する</button>
+          <a class="btn ghost" href="{{ url_for('admin_watermark') }}">キャンセル</a>
+        </div>
       </fieldset>
-      <div style="margin-top:12px" class="row">
-        <button class="btn" type="submit">再生成する</button>
-        <a class="btn ghost" href="{{ url_for('admin_watermark') }}">キャンセル</a>
-      </div>
     </form>
   </div>
 </body>
