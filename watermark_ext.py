@@ -19,24 +19,6 @@ from flask import (
     url_for,
 )
 
-from watermark_utils import (
-    DEFAULT_OPACITY,
-    DEFAULT_SCALE,
-    DEFAULT_WATERMARK_SUFFIX,
-    WatermarkOptions,
-    apply_watermark,
-    atomic_write,
-    choose_unique_filename,
-    derivative_path,
-    ensure_within_media,
-    list_media_files,
-    list_watermark_files,
-    max_batch_size,
-    media_path_for,
-    strip_derivative_suffix,
-    validate_upload,
-)
-
 WM_SUFFIX_NONE = "__none"
 WM_SUFFIX_GOTO = "__goto"
 WM_SUFFIX_FULLY = "__fullygoto"
@@ -632,3 +614,27 @@ def init_watermark_ext(app) -> None:
     app.add_url_rule("/admin/media/browse", endpoint="admin_media_browse", view_func=view_admin_media_browse, methods=["GET"])
     app.add_url_rule("/admin/media/pick", endpoint="admin_media_pick", view_func=view_admin_media_pick, methods=["GET"])
     app.add_url_rule("/admin/media/picker", endpoint="admin_media_picker", view_func=view_admin_media_picker, methods=["GET"])
+# --- compatibility: provide media_path_for expected by app ---
+from pathlib import Path
+import os
+
+def media_path_for(filename: str, folder: str | None = None) -> str:
+    """
+    Resolve an absolute path under the configured media directory.
+    - Uses app.config['MEDIA_ROOT'] or ['MEDIA_DIR'] or 'media' as fallback.
+    - Guards against path traversal ('..', absolute paths).
+    """
+    base = Path(
+        current_app.config.get("MEDIA_ROOT")
+        or current_app.config.get("MEDIA_DIR")
+        or "media"
+    )
+    if folder:
+        base = base / folder
+
+    safe = os.path.normpath(str(filename)).replace("\\", "/")
+    # prevent traversal / absolute
+    if safe.startswith("../") or safe.startswith("/"):
+        safe = os.path.basename(safe)
+
+    return str(base / safe)

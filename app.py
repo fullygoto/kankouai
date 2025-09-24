@@ -66,7 +66,7 @@ import warnings  # ← 追加！
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
-from watermark_utils import media_path_for
+from watermark_ext import media_path_for
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
@@ -11226,3 +11226,20 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT","5000"))
     app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))
 
+
+
+# --- guard: ensure handler exists even when LINE is disabled ---
+try:
+    _h = handler  # noqa
+except NameError:
+    _h = None
+if _h is None:
+    class _NoopHandler:
+        def add(self, *args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+        def handle(self, *args, **kwargs):
+            # do nothing when LINE callback hits; route should still return 200
+            return None
+    handler = _NoopHandler()
