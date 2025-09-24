@@ -19,24 +19,6 @@ from flask import (
     url_for,
 )
 
-from watermark_utils import (
-    DEFAULT_OPACITY,
-    DEFAULT_SCALE,
-    DEFAULT_WATERMARK_SUFFIX,
-    WatermarkOptions,
-    apply_watermark,
-    atomic_write,
-    choose_unique_filename,
-    derivative_path,
-    ensure_within_media,
-    list_media_files,
-    list_watermark_files,
-    max_batch_size,
-    media_path_for,
-    strip_derivative_suffix,
-    validate_upload,
-)
-
 WM_SUFFIX_NONE = "__none"
 WM_SUFFIX_GOTO = "__goto"
 WM_SUFFIX_FULLY = "__fullygoto"

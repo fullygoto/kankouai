@@ -66,7 +66,7 @@ import warnings  # ← 追加！
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
-from watermark_utils import media_path_for
+from watermark_ext import media_path_for
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
