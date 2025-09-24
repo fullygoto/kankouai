@@ -2887,31 +2887,25 @@ try:
         line_bot_api = None
         handler = None
         app.logger.warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
+        # ensure handler exists even when LINE is disabled
 
-# --- guard: ensure handler exists even when LINE is disabled (placed near LINE init) ---
-try:
-    _h = handler  # noqa
-except NameError:
-    _h = None
-if _h is None:
-    class _NoopHandler:
-        def add(self, *args, **kwargs):
-            def decorator(f):
-                return f
-            return decorator
-        def handle(self, *args, **kwargs):
-            return None
-    handler = _NoopHandler()
-except Exception as e:
-    line_bot_api = None
-    handler = None
-    app.logger.exception("LINE init failed: %s", e)
+        if handler is None:
 
-# === 出典フッター強制付与ラッパ（すべての reply/push を横取り） ===
+            class _NoopHandler:
 
-def _messages_with_sources_footer(messages):
-    """
-    どんな送信形でも、最後のテキストの末尾に — 出典 — を付ける。
+                def add(self, *args, **kwargs):
+
+                    def decorator(f):
+
+                        return f
+
+                    return decorator
+
+                def handle(self, *args, **kwargs):
+
+                    return None
+
+            handler = _NoopHandler()
     テキストが無い場合は出典だけの1通を末尾に追加。
     出典が未登録なら何もしない。
     """
@@ -11240,21 +11234,3 @@ def admin_unhit_save_text():
 if __name__ == "__main__":
     port = int(os.getenv("PORT","5000"))
     app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))
-
-
-
-# --- guard: ensure handler exists even when LINE is disabled ---
-try:
-    _h = handler  # noqa
-except NameError:
-    _h = None
-if _h is None:
-    class _NoopHandler:
-        def add(self, *args, **kwargs):
-            def decorator(f):
-                return f
-            return decorator
-        def handle(self, *args, **kwargs):
-            # do nothing when LINE callback hits; route should still return 200
-            return None
-    handler = _NoopHandler()
