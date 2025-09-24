@@ -2887,6 +2887,21 @@ try:
         line_bot_api = None
         handler = None
         app.logger.warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
+
+# --- guard: ensure handler exists even when LINE is disabled (placed near LINE init) ---
+try:
+    _h = handler  # noqa
+except NameError:
+    _h = None
+if _h is None:
+    class _NoopHandler:
+        def add(self, *args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+        def handle(self, *args, **kwargs):
+            return None
+    handler = _NoopHandler()
 except Exception as e:
     line_bot_api = None
     handler = None
