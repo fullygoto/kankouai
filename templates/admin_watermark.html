@@ -5,392 +5,155 @@
   <title>透かし一括生成</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    :root{ --bg:#f6faf9; --card:#fff; --muted:#567; --line:#e7eef5; --brand:#2a8ed8; }
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:var(--bg);padding:20px}
-    .container{background:var(--card);max-width:1100px;margin:20px auto;padding:22px;border-radius:14px;box-shadow:0 4px 18px #b7d3e033}
-    h1{margin:0 0 14px}
-    .row{margin:10px 0}
-    .muted{color:var(--muted);font-size:.95em}
-    .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:var(--brand);color:#fff;cursor:pointer;text-decoration:none}
-    .btn.ghost{background:#fff;color:var(--brand);border:1px solid #b7d3e0}
-    .btn.small{padding:6px 10px;font-size:.92em}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:12px}
-    .card{border:1px solid #e5eef5;border-radius:10px;padding:10px;background:#fbfdff}
-    .name{display:block;margin-top:6px;font-size:.92em;color:#345;word-break:break-all}
-    img{max-width:100%;height:auto;border:1px solid #e5eef5;border-radius:8px;background:#fff}
-    label.sel{display:flex;gap:8px;align-items:center}
-    .small{font-size:.9em;color:#567;margin-top:4px}
-    hr{border:1px solid var(--line);margin:18px 0}
-    fieldset{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
-    legend{padding:0 6px;color:#234}
-    .radios{display:flex;flex-wrap:wrap;gap:10px}
-    .radios label{display:flex;gap:6px;align-items:center;background:#f3f8fc;border:1px solid #dbe8f3;border-radius:10px;padding:6px 10px}
-    .tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-    .tools .grow{flex:1}
-    .input{width:100%;padding:8px 10px;border:1px solid #b7cfe2;border-radius:8px;background:#fff}
-    .counts{font-size:.9em;color:var(--muted)}
-    .flex{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-    .topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
-    .card-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:8px}
-    .crumb{font-size:.9em;color:#567}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:#f6faf9;padding:20px;margin:0}
+    .container{max-width:1100px;margin:0 auto;background:#fff;border-radius:14px;box-shadow:0 4px 18px #b7d3e033;padding:22px}
+    h1{margin:0 0 16px}
+    .muted{color:#567;font-size:.92em}
+    .btn{display:inline-block;padding:8px 14px;border:none;border-radius:8px;background:#2a8ed8;color:#fff;text-decoration:none;cursor:pointer}
+    .btn.ghost{background:#fff;color:#2a8ed8;border:1px solid #b7d3e0}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    fieldset{border:1px solid #e4edf6;border-radius:12px;padding:14px;margin:14px 0}
+    legend{padding:0 8px;color:#234;font-weight:600}
+    input[type="text"],input[type="number"],select{padding:8px 10px;border-radius:8px;border:1px solid #b7cfe2;background:#fff;font-size:14px}
+    input[type="file"]{border:1px solid #d0dbe8;border-radius:8px;padding:10px;background:#fff}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;margin-top:14px}
+    .card{border:1px solid #e4edf6;border-radius:12px;padding:12px;background:#fbfdff;display:flex;flex-direction:column;gap:8px}
+    .name{font-size:.92em;color:#234;word-break:break-all}
+    img{width:100%;height:160px;object-fit:cover;border-radius:10px;border:1px solid #e4edf6;background:#fff}
+    .counts{font-size:.9em;color:#567}
+    .section-title{margin:24px 0 8px;font-size:1.1em;font-weight:600}
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="topbar">
+    <div class="row" style="justify-content:space-between">
       <h1>透かし一括生成</h1>
       <a class="btn ghost" href="{{ url_for('admin_entry') }}">データ管理に戻る</a>
     </div>
 
-    {% set _order = (order or 'new') if order is defined else 'new' %}
-    {% set picker = (picker or 0) if picker is defined else 0 %}
-    {% set _subdir = (subdir or '') if subdir is defined else '' %}
-    {% if _subdir %}<div class="crumb">フォルダ: <strong>{{ _subdir }}</strong></div>{% endif %}
-
-    {% if picker %}
-      <div class="row flex" style="justify-content:space-between">
-        <div class="muted">ピッカー表示中：チェックした画像を呼び出し元へ返せます。作成結果カードの「この画像を選ぶ」でも即反映できます。</div>
-        <div class="flex">
-          <button id="applyPick" class="btn">選択を反映して閉じる</button>
-          <button type="button" class="btn ghost" onclick="window.close()">閉じる</button>
+    <form method="post" enctype="multipart/form-data">
+      <fieldset>
+        <legend>透かし設定</legend>
+        <div class="row">
+          <label>透かしPNG：
+            <select name="watermark_file" style="min-width:180px">
+              {% if available_watermarks and available_watermarks|length %}
+                {% for f in available_watermarks %}
+                  <option value="{{ f }}" {{ 'selected' if wm==f else '' }}>{{ f }}</option>
+                {% endfor %}
+              {% else %}
+                <option value="" selected>透かしPNGが見つかりません</option>
+              {% endif %}
+            </select>
+          </label>
+          <label>スケール（短辺比率 %）：
+            <input type="number" name="scale" min="0.08" max="0.12" step="0.005" value="{{ scale_value }}">
+          </label>
+          <label>不透明度（0〜1）：
+            <input type="number" name="opacity" min="0.05" max="1" step="0.05" value="{{ opacity_value }}">
+          </label>
         </div>
+        <div class="muted" style="margin-top:6px">※ スケールは短辺の 8〜12% の間で指定してください。透かしPNGは管理ディレクトリ内のファイルから選択されます。</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>アップロード</legend>
+        <input type="file" name="files" accept="image/jpeg,image/png" multiple>
+        <div class="muted" style="margin-top:6px">JPEG / PNG（最大 {{ current_app.config.get('MAX_IMAGE_BYTES', 30*1024*1024)//1024//1024 }}MB）。アップロードした画像は元データとして保存され、すぐ下の一覧に追加されます。</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>既存画像から選択</legend>
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <label class="muted">検索：<input type="text" id="search" placeholder="ファイル名で絞り込み" value="{{ q }}"></label>
+          </div>
+          <div class="counts"><span id="shown">0</span> / {{ existing|length if existing else 0 }} 件表示中</div>
+        </div>
+        <div class="grid" id="existingGrid">
+          {% if existing and existing|length %}
+            {% for fn in existing %}
+              <div class="card" data-name="{{ fn|lower }}">
+                <label class="row" style="align-items:flex-start">
+                  <input type="checkbox" name="selected_existing" value="{{ fn }}">
+                  <span class="name">{{ fn }}</span>
+                </label>
+                <img src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
+                <div class="row">
+                  <a class="btn ghost" href="{{ url_for('admin_watermark_one', src=fn) }}">単体編集</a>
+                  <button class="btn ghost" type="button" data-delete="{{ fn }}">削除</button>
+                </div>
+              </div>
+            {% endfor %}
+          {% else %}
+            <div class="muted">対象画像が見つかりません。</div>
+          {% endif %}
+        </div>
+      </fieldset>
+
+      <div class="row" style="margin-top:16px">
+        <button class="btn" type="submit">選択した画像に透かしを適用</button>
+        <span class="muted">生成結果はこのページに表示されます。既存の透かし画像はバックアップを作成してから置き換えます。</span>
+      </div>
+    </form>
+
+    {% if results and results|length %}
+      <div class="section-title">生成結果</div>
+      <div class="grid">
+        {% for item in results %}
+          <div class="card">
+            <div class="muted">元画像</div>
+            <a href="{{ item.url_src }}" target="_blank" rel="noopener">
+              <img src="{{ item.url_src }}" loading="lazy" alt="{{ item.src }}">
+            </a>
+            <div class="name">{{ item.src }}</div>
+            <div class="muted" style="margin-top:10px">透かし適用後</div>
+            <a href="{{ item.url_wm }}" target="_blank" rel="noopener">
+              <img src="{{ item.url_wm }}" loading="lazy" alt="{{ item.wm }}">
+            </a>
+            <div class="name">{{ item.wm }}</div>
+          </div>
+        {% endfor %}
       </div>
     {% endif %}
 
-    <form id="mainForm" method="post" enctype="multipart/form-data">
-      {% set wm_current = (wm or 'all') if wm is defined else 'all' %}
-      <fieldset class="row">
-        <legend>出力する透かし</legend>
-        <div class="radios">
-          <label><input type="radio" name="wm" value="all"   {{ 'checked' if wm_current=='all'   else '' }}> 全部（従来どおり）</label>
-          <label><input type="radio" name="wm" value="fully" {{ 'checked' if wm_current=='fully' else '' }}> @fullyGOTO（__fullygoto）</label>
-          <label><input type="radio" name="wm" value="goto"  {{ 'checked' if wm_current=='goto'  else '' }}> @Goto City（__goto）</label>
-          <label><input type="radio" name="wm" value="none"  {{ 'checked' if wm_current=='none'  else '' }}> なし（__none）</label>
-        </div>
-        <div class="small muted">※ 選んだ種類のみ生成します。「全部」を選ぶと3種類すべて生成します。</div>
-      </fieldset>
-
-      <div class="row">
-        <label>新規アップロード（複数可）：</label><br>
-        <input type="file" name="files" accept="image/jpeg,image/png,image/webp" multiple>
-        <div class="small muted">JPEG / PNG / WebP（最大10MB）。アップロード時に自動リサイズされます。</div>
-      </div>
-
-      <div class="row">
-        <label class="sel">
-          <input type="checkbox" name="force" value="1">
-          既存の __none / __goto / __fullygoto を上書きする
-        </label>
-      </div>
-
-      <div class="row flex">
-        <button class="btn" type="submit">生成する</button>
-        <button class="btn ghost" type="button" id="btnUploadOnly">新規だけ即時生成</button>
-        <span id="upStatus" class="muted"></span>
-        <span class="muted">※ 「新規だけ即時生成」はアップロード分を保存→一覧の先頭に即時追加します（既存のチェック処理は行いません）。</span>
-      </div>
-
-      <!-- ▼▼▼ 既存一覧より上：作成結果 ▼▼▼ -->
-      {% if results and results|length %}
-        <hr>
-        <h2 style="margin:0 0 8px">作成結果</h2>
-        <div class="grid">
-          {% for r in results %}
-            {# 変換しやすいよう拡張子・ベース名を算出 #}
-            {% set __ext = '.' ~ (r.src.split('.')[-1]) %}
-            {% set __base = r.src[:-(__ext|length)] %}
-            {% set __name_none = __base ~ '__none' ~ __ext %}
-            {% set __name_goto = __base ~ '__goto' ~ __ext %}
-            {% set __name_fully = __base ~ '__fullygoto' ~ __ext %}
-
-            <div class="card">
-              <div class="small muted">元画像</div>
-              <a href="{{ r.url_src }}" target="_blank" rel="noopener"><img src="{{ r.url_src }}" loading="lazy" alt="src"></a>
-              <div class="name">{{ r.src }}</div>
-
-              {% if r.url_none %}
-                <div class="small muted" style="margin-top:10px">透かし：なし（__none）</div>
-                <a href="{{ r.url_none }}" target="_blank" rel="noopener"><img src="{{ r.url_none }}" loading="lazy" alt="none"></a>
-                <div class="card-actions">
-                  <button class="btn small pick" type="button"
-                          data-filename="{{ __name_none }}" data-kind="none">この画像を選ぶ</button>
-                </div>
-              {% endif %}
-
-              {% if r.url_goto %}
-                <div class="small muted" style="margin-top:10px">透かし：＠Goto City（__goto）</div>
-                <a href="{{ r.url_goto }}" target="_blank" rel="noopener"><img src="{{ r.url_goto }}" loading="lazy" alt="goto"></a>
-                <div class="card-actions">
-                  <button class="btn small pick" type="button"
-                          data-filename="{{ __name_goto }}" data-kind="gotocity">この画像を選ぶ</button>
-                </div>
-              {% endif %}
-
-              {% if r.url_fully %}
-                <div class="small muted" style="margin-top:10px">透かし：＠fullyGOTO（__fullygoto）</div>
-                <a href="{{ r.url_fully }}" target="_blank" rel="noopener"><img src="{{ r.url_fully }}" loading="lazy" alt="fully"></a>
-                <div class="card-actions">
-                  <button class="btn small pick" type="button"
-                          data-filename="{{ __name_fully }}" data-kind="fullygoto">この画像を選ぶ</button>
-                </div>
-              {% endif %}
-            </div>
-          {% endfor %}
-        </div>
-      {% endif %}
-      <!-- ▲▲▲ 作成結果ここまで ▲▲▲ -->
-
-      <hr>
-
-      <h2 style="margin:0 0 8px">既存ファイルから選ぶ</h2>
-
-      <div class="row tools">
-        <div class="grow">
-          <input id="q" class="input" type="search" name="q" value="{{ q|e }}" placeholder="ファイル名で検索（例: beach, 2024_, DSC_ など）" autocomplete="off">
-        </div>
-        <label class="flex">
-          並び順：
-          <select id="order" class="input" style="width:auto">
-            <option value="new"  {{ 'selected' if _order=='new'  else '' }}>新しい順</option>
-            <option value="name" {{ 'selected' if _order=='name' else '' }}>名前順</option>
-          </select>
-        </label>
-        <button class="btn ghost small" type="button" id="selectVisible">表示中を全選択</button>
-        <button class="btn ghost small" type="button" id="clearAll">全選択解除</button>
-        <span class="counts"><span id="shownCount">0</span> / <span id="totalCount">0</span> 表示・<span id="selectedCount">0</span> 件選択中</span>
-      </div>
-
-      <div id="grid" class="grid" data-total="{{ existing|length if existing else 0 }}">
-        {% if existing and existing|length %}
-          {% for fn in existing %}
-            {% set _edit_href = (safe_url_for('admin_watermark_one', src=fn) or url_for('admin_watermark_one', src=fn)) %}
-            <div class="card" data-name="{{ fn|lower }}">
-              <label class="sel">
-                <input type="checkbox" name="selected_existing" value="{{ fn }}">
-                <span class="name">{{ fn }}</span>
-              </label>
-              <div class="small muted">プレビュー</div>
-              <img class="thumb" src="{{ url_for('admin_media_img', filename=fn) }}" loading="lazy" alt="{{ fn }}">
-              <div class="card-actions">
-                <a class="btn small" href="{{ _edit_href }}">編集</a>
-                <button class="btn ghost small" type="button" data-del="{{ fn }}">削除</button>
-              </div>
-            </div>
-          {% endfor %}
-        {% else %}
-          <div class="muted">対象画像が見つかりません。</div>
-        {% endif %}
-      </div>
+    <form id="deleteForm" method="post" action="{{ url_for('admin_media_delete') }}" style="display:none">
+      <input type="hidden" name="filename" id="deleteTarget">
     </form>
-
-    <!-- 削除専用フォーム（現在の表示条件も同梱してPOST） -->
-    <form id="delForm" method="post" action="{{ safe_url_for('admin_media_delete') or url_for('admin_media_delete') }}" style="display:none">
-      <input type="hidden" name="filename" id="delName">
-      <input type="hidden" name="order"    id="delOrder"  value="{{ _order }}">
-      <input type="hidden" name="picker"   id="delPicker" value="{{ '1' if picker else '' }}">
-      <input type="hidden" name="subdir"   id="delSubdir" value="{{ _subdir }}">
-      <input type="hidden" name="q"        id="delQ"      value="{{ q|e }}">
-    </form>
-
-    <div class="row" style="margin-top:18px">
-      <a class="btn ghost" href="{{ url_for('admin_entry') }}">← 観光データ管理に戻る</a>
-    </div>
   </div>
 
   <script>
     (function(){
-      const q = document.getElementById('q');
-      const orderSel = document.getElementById('order');
-      const grid = document.getElementById('grid');
-      const getCards = ()=> Array.from(grid.querySelectorAll('.card'));
-
-      const totalCount = document.getElementById('totalCount');
-      const shownCount = document.getElementById('shownCount');
-      const selectedCount = document.getElementById('selectedCount');
-      const btnSelectVisible = document.getElementById('selectVisible');
-      const btnClearAll = document.getElementById('clearAll');
-      const picker = {{ 1 if picker else 0 }};
-      const subdir = "{{ _subdir }}";
-
-      // ===== 即時生成（新規だけ） =====
-      const endpointUpload = "/admin/_watermark_generate"; // サーバ側のAPI（既に実装済み想定）
-      const upBtn = document.getElementById('btnUploadOnly');
-      const upStatus = document.getElementById('upStatus');
-      const imgBase  = "{{ url_for('admin_media_img', filename='') }}";
-      const editBase = "{{ url_for('admin_watermark_one') }}"; // ?src=... を付ける
-
-      function buildCard(name, previewUrl){
-        const div = document.createElement('div');
-        div.className = 'card';
-        div.dataset.name = (name || '').toLowerCase();
-        const editHref = editBase + (editBase.includes('?') ? '&' : '?') + 'src=' + encodeURIComponent(name);
-        div.innerHTML = `
-          <label class="sel">
-            <input type="checkbox" name="selected_existing" value="${name}">
-            <span class="name">${name}</span>
-          </label>
-          <div class="small muted">プレビュー</div>
-          <img class="thumb" src="${previewUrl}" loading="lazy" alt="${name}">
-          <div class="card-actions">
-            <a class="btn small" href="${editHref}">編集</a>
-            <button class="btn ghost small" type="button" data-del="${name}">削除</button>
-          </div>
-        `;
-        return div;
-      }
-
-      function prependSaved(list){
-        // APIが返す saved: [{name, kind, url?}, ...] を想定
-        // 返ってきた順を保ったまま先頭に積む
-        for(const it of list || []){
-          const preview = it.url || (imgBase + encodeURIComponent(it.name));
-          grid.prepend(buildCard(it.name, preview));
-        }
-        updateCounts();
-        filter();
-      }
-
-      async function uploadOne(file){
-        const fd = new FormData();
-        fd.append('file', file);
-        const res = await fetch(endpointUpload, { method:'POST', body: fd, credentials: 'same-origin' });
-        if(!res.ok) throw new Error('HTTP ' + res.status);
-        const j = await res.json();
-        if(!j.ok) throw new Error(j.error || 'upload failed');
-        return j; // {ok:true, saved:[{name,kind,url},...] }
-      }
-
-      if(upBtn){
-        upBtn.addEventListener('click', async ()=>{
-          const input = document.querySelector('input[name="files"]');
-          const files = Array.from((input && input.files) || []);
-          if(!files.length){ if(upStatus) upStatus.textContent = 'ファイルを選んでください'; return; }
-
-          upBtn.disabled = true;
-          if(upStatus) upStatus.textContent = 'アップロード中…';
-
-          let ok = 0, ng = 0;
-          for(const f of files){
-            try{
-              const j = await uploadOne(f);
-              prependSaved(j.saved || []);
-              ok++;
-            }catch(e){
-              console.error(e);
-              ng++;
-            }
-          }
-          if(upStatus) upStatus.textContent = ng ? `完了（成功 ${ok} / 失敗 ${ng}）` : `完了（${ok}件）`;
-          if(input) input.value = '';
-          setTimeout(()=>{ if(upStatus) upStatus.textContent=''; upBtn.disabled=false; }, 1200);
+      const grid=document.getElementById('existingGrid');
+      const shown=document.getElementById('shown');
+      const search=document.getElementById('search');
+      const delForm=document.getElementById('deleteForm');
+      const delInput=document.getElementById('deleteTarget');
+      function cards(){return Array.from(grid.querySelectorAll('.card[data-name]'));}
+      function update(){
+        const term=(search.value||'').toLowerCase();
+        let count=0;
+        cards().forEach(card=>{
+          const name=card.dataset.name||'';
+          const ok=!term||name.includes(term);
+          card.style.display=ok?'' : 'none';
+          if(ok) count++;
         });
+        shown.textContent=count;
       }
-      // ===== /即時生成 =====
-
-      function updateCounts(){
-        const cards = getCards();
-        if(totalCount) totalCount.textContent = cards.length;
-        let shown = 0;
-        for(const c of cards){ if(c.style.display !== 'none'){ shown++; } }
-        if(shownCount) shownCount.textContent = shown;
-        if(selectedCount) selectedCount.textContent = grid.querySelectorAll('input[name="selected_existing"]:checked').length;
+      if(search){
+        search.addEventListener('input', update);
+        update();
       }
-
-      function filter(){
-        const cards = getCards();
-        const term = (q && q.value || '').trim().toLowerCase();
-        for(const c of cards){
-          const name = c.dataset.name || '';
-          const match = !term || name.includes(term);
-          c.style.display = match ? '' : 'none';
-        }
-        updateCounts();
-      }
-
-      function selectVisible(v=true){
-        const cards = getCards();
-        for(const c of cards){
-          if(c.style.display !== 'none'){
-            const cb = c.querySelector('input[name="selected_existing"]');
-            if(cb) cb.checked = v;
-          }
-        }
-        updateCounts();
-      }
-
-      grid.addEventListener('click', (e)=>{
-        const img = e.target.closest('img.thumb');
-        if(!img) return;
-        const card = e.target.closest('.card');
-        const cb = card && card.querySelector('input[name="selected_existing"]');
-        if(cb){ cb.checked = !cb.checked; updateCounts(); }
-      });
-
-      if(btnSelectVisible) btnSelectVisible.addEventListener('click', ()=>selectVisible(true));
-      if(btnClearAll) btnClearAll.addEventListener('click',   ()=>selectVisible(false));
-      if(q) q.addEventListener('input', filter);
-
-      if(orderSel){
-        orderSel.addEventListener('change', ()=>{
-          const params = new URLSearchParams(window.location.search);
-          params.set('order', orderSel.value);
-          const qv = (q && q.value||'').trim();
-          if(qv) params.set('q', qv); else params.delete('q');
-          if(picker) params.set('picker', '1'); else params.delete('picker');
-          if(subdir) params.set('subdir', subdir); else params.delete('subdir');
-          window.location.search = params.toString();
-        });
-      }
-
-      const applyPick = document.getElementById('applyPick');
-      if(applyPick){
-        applyPick.addEventListener('click', (e)=>{
-          e.preventDefault();
-          const files = Array.from(document.querySelectorAll('input[name="selected_existing"]:checked')).map(cb=>cb.value);
-          const base = '{{ url_for('admin_media_img', filename='') }}';
-          const urls = files.map(fn => base + encodeURIComponent(fn));
-          try{ window.opener && window.opener.postMessage({ type:'media-pick', files, urls }, '*'); }catch(_){/* ignore */ }
-          window.close();
-        });
-      }
-
-      // 削除：隠しフォームに現在の表示条件も詰めてPOST
-      const delForm = document.getElementById('delForm');
-      const delName = document.getElementById('delName');
-      const delOrder  = document.getElementById('delOrder');
-      const delPicker = document.getElementById('delPicker');
-      const delSubdir = document.getElementById('delSubdir');
-      const delQ      = document.getElementById('delQ');
-
-      grid.addEventListener('click', (e)=>{
-        const btn = e.target.closest('[data-del]');
+      grid.addEventListener('click', e=>{
+        const btn=e.target.closest('[data-delete]');
         if(!btn) return;
-        const name = btn.getAttribute('data-del');
+        const name=btn.getAttribute('data-delete');
         if(!name) return;
-        if(!confirm('この画像を削除します。よろしいですか？')) return;
-
-        delName.value = name;
-        delOrder.value  = orderSel ? orderSel.value : (delOrder.value || '');
-        delPicker.value = picker ? '1' : '';
-        delSubdir.value = subdir || '';
-        delQ.value      = (q && q.value) ? q.value : (delQ.value || '');
-
+        if(!confirm('選択した画像と透かし派生を削除します。よろしいですか？')) return;
+        delInput.value=name;
         delForm.submit();
       });
-
-      // ===== 作成結果カード：この画像を選ぶ（picker=1 なら即反映＆閉じる） =====
-      document.addEventListener('click', (e)=>{
-        const pick = e.target.closest('.btn.pick[data-filename][data-kind]');
-        if(!pick) return;
-        const filename = pick.getAttribute('data-filename');
-        const kind = pick.getAttribute('data-kind'); // none / gotocity / fullygoto
-        try{
-          window.opener && window.opener.postMessage({ type:'wm-pick', filename, kind }, location.origin);
-        }catch(_){}
-        if(picker){ window.close(); }
-      });
-
-      filter();
     })();
   </script>
 </body>
