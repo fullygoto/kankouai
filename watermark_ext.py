@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import datetime
+import io
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from flask import (
     abort,
@@ -19,41 +20,343 @@ from flask import (
     url_for,
 )
 
+# ============================================================
+# Constants / defaults
+# ============================================================
+
 WM_SUFFIX_NONE = "__none"
 WM_SUFFIX_GOTO = "__goto"
 WM_SUFFIX_FULLY = "__fullygoto"
 
-_ALLOWED_EXTS = {".jpg", ".jpeg", ".png"}
+# 既存コードが参照するデフォルト値（無ければここを使う）
+DEFAULT_SCALE: float = 0.33
+DEFAULT_OPACITY: float = 0.5
+DEFAULT_WATERMARK_SUFFIX: str = "__wm"
+
+_ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 _ALLOWED_ROLES = {"admin", "shop"}
 
+# 一括生成の安全上限
+DEFAULT_BATCH_LIMIT = 100
+
+
+# ============================================================
+# Dataclasses
+# ============================================================
 
 @dataclass
 class BatchSummary:
     processed: int = 0
     skipped: int = 0
-    errors: List[str] = None
+    errors: List[str] | None = None
 
     def __post_init__(self) -> None:
         if self.errors is None:
             self.errors = []
 
 
+@dataclass
+class WatermarkOptions:
+    watermark_path: Path
+    scale: float
+    opacity: float
+    suffix: str
+
+    @classmethod
+    def from_request(
+        cls,
+        wm_name: Optional[str],
+        scale: Optional[str],
+        opacity: Optional[str],
+        suffix: Optional[str] = None,
+    ) -> "WatermarkOptions":
+        # 透明度・スケール
+        try:
+            s = float(scale) if scale is not None else DEFAULT_SCALE
+        except Exception:
+            s = DEFAULT_SCALE
+        if s <= 0:
+            s = DEFAULT_SCALE
+
+        try:
+            op = float(opacity) if opacity is not None else DEFAULT_OPACITY
+        except Exception:
+            op = DEFAULT_OPACITY
+        if op < 0:
+            op = 0.0
+        if op > 1:
+            op = 1.0
+
+        # 透かし素材の解決
+        wm_path = _resolve_watermark_path(wm_name)
+        if wm_path is None:
+            raise ValueError("透かし画像が見つかりません")
+
+        # サフィックス（拡張子前に付くラベル）
+        suf = (suffix or current_app.config.get("WATERMARK_SUFFIX") or DEFAULT_WATERMARK_SUFFIX).strip()
+        if not suf.startswith("__"):
+            suf = "__" + suf
+
+        return cls(watermark_path=wm_path, scale=s, opacity=op, suffix=suf)
+
+
+# ============================================================
+# Internal helpers (paths, scanning, safety)
+# ============================================================
+
 def _media_root() -> Path:
     base = (
         current_app.config.get("MEDIA_ROOT")
         or current_app.config.get("IMAGES_DIR")
-        or (Path(current_app.root_path) / "media")
+        or (Path(current_app.root_path) / "media" / "img")
     )
     root = Path(base)
     root.mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
 
+def ensure_within_media(p: Path) -> None:
+    """Mediaルート外の書き込みを防止。外なら ValueError。"""
+    root = _media_root()
+    rp = p.resolve()
+    if root not in rp.parents and rp != root:
+        raise ValueError("path is outside MEDIA root")
+
+
+def strip_derivative_suffix(name: str) -> str:
+    """拡張子前の '__xxx' を除去（派生ファイル→元名を推定）"""
+    base = os.path.basename(name)
+    stem, ext = os.path.splitext(base)
+    if "__" in stem:
+        stem = stem[: stem.index("__")]
+    return f"{stem}{ext}"
+
+
+def derivative_path(base_path: Path, suffix: str, ext: Optional[str] = None) -> Path:
+    """拡張子前に suffix を付けた出力パスを返す。"""
+    if not suffix.startswith("__"):
+        suffix = "__" + suffix
+    use_ext = (ext or base_path.suffix) or ".jpg"
+    stem = strip_derivative_suffix(base_path.name)
+    stem_no_ext, _ = os.path.splitext(stem)
+    return base_path.with_name(f"{stem_no_ext}{suffix}{use_ext}")
+
+
+def max_batch_size() -> int:
+    return int(current_app.config.get("WATERMARK_BATCH_LIMIT") or DEFAULT_BATCH_LIMIT)
+
+
+def media_path_for(filename: str, folder: str | None = None) -> Path:
+    """
+    Resolve a path under MEDIA root safely.
+    NOTE: Path traversal ('..' / absolute) をガード。
+    """
+    base = _media_root()
+    if folder:
+        base = base / folder
+
+    safe = os.path.normpath(str(filename)).replace("\\", "/")
+    if safe.startswith("../") or safe.startswith("/"):
+        safe = os.path.basename(safe)
+
+    p = (base / safe).resolve()
+    ensure_within_media(p)
+    return p
+
+
+def list_media_files(include_derivatives: bool = True) -> List[str]:
+    """media配下の画像ファイル一覧（相対パス）。"""
+    root = _media_root()
+    out: List[str] = []
+    if not root.exists():
+        return out
+
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in _ALLOWED_EXTS:
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), root)
+            rel = rel.replace("\\", "/")
+            if not include_derivatives:
+                stem = os.path.splitext(os.path.basename(rel))[0]
+                if "__" in stem:
+                    # 派生（__suffixあり）は除く
+                    continue
+            out.append(rel)
+    out.sort()
+    return out
+
+
+def list_watermark_files() -> List[Path]:
+    """
+    透かし素材として使う画像（PNG/WEBP推奨）候補の絶対パス一覧。
+    検索パス:
+      - config WATERMARK_DIR
+      - media/_watermarks, media/watermark
+    """
+    candidates: List[Path] = []
+    cfg = current_app.config.get("WATERMARK_DIR")
+    if cfg:
+        candidates.append(Path(str(cfg)))
+    media_root = _media_root()
+    candidates.append(media_root.parent / "_watermarks")
+    candidates.append(media_root.parent / "watermark")
+    candidates.append(media_root / "_watermarks")  # 念のため
+
+    seen: set[str] = set()
+    out: List[Path] = []
+    exts = {".png", ".webp", ".jpg", ".jpeg"}
+
+    for d in candidates:
+        if not d.exists() or not d.is_dir():
+            continue
+        for name in sorted(os.listdir(d)):
+            if os.path.splitext(name)[1].lower() in exts:
+                p = (d / name).resolve()
+                key = str(p)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(p)
+    return out
+
+
+def _resolve_watermark_path(name_or_path: Optional[str]) -> Optional[Path]:
+    if not name_or_path:
+        files = list_watermark_files()
+        return files[0] if files else None
+
+    p = Path(name_or_path)
+    if p.exists():
+        return p.resolve()
+
+    # 名前一致で候補から探す
+    for cand in list_watermark_files():
+        if cand.name == name_or_path:
+            return cand
+    return None
+
+
+def choose_unique_filename(stem: str, ext: str, existing: Iterable[str] | None = None) -> str:
+    """同名があれば '-1', '-2'…でユニーク化。"""
+    root = _media_root()
+    e = set(existing or ())
+    i = 0
+    while True:
+        suffix = "" if i == 0 else f"-{i}"
+        candidate = f"{stem}{suffix}{ext}"
+        if candidate not in e and not (root / candidate).exists():
+            return candidate
+        i += 1
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    """テンポラリ→rename による原子的書き込み。"""
+    ensure_within_media(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def validate_upload(storage) -> SimpleNamespace:
+    """
+    Werkzeug FileStorage を検証して bytes を返す。
+    - 拡張子チェック
+    - サイズ（任意。必要なら config で制御）
+    """
+    filename = (storage.filename or "").strip()
+    if not filename:
+        raise ValueError("ファイル名が空です")
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in _ALLOWED_EXTS:
+        raise ValueError("対応していない拡張子です")
+    data = storage.read()
+    if not data:
+        raise ValueError("空のファイルです")
+    return SimpleNamespace(filename=filename, data=data)
+
+
+# ============================================================
+# Watermark processing (Pillow)
+# ============================================================
+
+from PIL import Image, ImageOps
+
+def apply_watermark(base_path: Path, opt: WatermarkOptions) -> Tuple[bytes, str]:
+    """
+    ベース画像の右下に透かしを合成。
+    - サイズ: 画像幅 * opt.scale
+    - 不透明度: opt.opacity (0..1)
+    返り値: (生成バイナリ, 拡張子)
+    """
+    # open base
+    with Image.open(base_path) as im:
+        im = im.convert("RGBA")
+
+        # open watermark
+        with Image.open(opt.watermark_path) as wm:
+            wm = wm.convert("RGBA")
+
+            # scale
+            target_w = max(1, int(im.width * opt.scale))
+            aspect = wm.height / wm.width if wm.width else 1.0
+            target_h = max(1, int(target_w * aspect))
+            wm = wm.resize((target_w, target_h), Image.LANCZOS)
+
+            # opacity
+            if opt.opacity < 1.0:
+                alpha = wm.split()[-1]
+                alpha = ImageOps.autocontrast(alpha)
+                alpha = alpha.point(lambda a: int(a * float(opt.opacity)))
+                wm.putalpha(alpha)
+
+            # paste bottom-right with margin
+            margin = max(8, target_w // 16)
+            x = im.width - wm.width - margin
+            y = im.height - wm.height - margin
+
+            composite = Image.new("RGBA", im.size)
+            composite.paste(im, (0, 0))
+            composite.paste(wm, (x, y), mask=wm)
+
+            # format selection
+            base_ext = base_path.suffix.lower()
+            if base_ext in {".jpg", ".jpeg"}:
+                out = composite.convert("RGB")
+                ext = ".jpg"
+                buf = io.BytesIO()
+                out.save(buf, format="JPEG", quality=90, optimize=True)
+                return buf.getvalue(), ext
+            elif base_ext == ".png":
+                ext = ".png"
+                buf = io.BytesIO()
+                composite.save(buf, format="PNG", optimize=True)
+                return buf.getvalue(), ext
+            else:
+                # webpなどはPNGに寄せる
+                ext = ".png"
+                buf = io.BytesIO()
+                composite.save(buf, format="PNG", optimize=True)
+                return buf.getvalue(), ext
+
+
+# ============================================================
+# View helpers
+# ============================================================
+
 def _watermark_suffix() -> str:
     suffix = current_app.config.get("WATERMARK_SUFFIX")
     if isinstance(suffix, str) and suffix.strip():
-        return suffix.strip()
-    return DEFAULT_WATERMARK_SUFFIX
+        suf = suffix.strip()
+    else:
+        suf = DEFAULT_WATERMARK_SUFFIX
+    if not suf.startswith("__"):
+        suf = "__" + suf
+    return suf
 
 
 def _require_login():
@@ -153,7 +456,7 @@ def _list_files_in_folder(folder: str | None) -> list[SimpleNamespace]:
             continue
         if entry.suffix.lower() not in _ALLOWED_EXTS:
             continue
-        rel_name = str(entry.relative_to(root))
+        rel_name = str(entry.relative_to(root)).replace("\\", "/")
         try:
             mtime = entry.stat().st_mtime
         except OSError:
@@ -192,6 +495,10 @@ def _build_gallery(include_derivatives: bool = True) -> list[SimpleNamespace]:
     gallery.sort(key=lambda ns: getattr(ns, "mtime", 0.0), reverse=True)
     return gallery
 
+
+# ============================================================
+# Views
+# ============================================================
 
 def view_admin_watermark():
     need = _require_login()
@@ -270,7 +577,7 @@ def view_admin_watermark():
             try:
                 base_path = media_path_for(unique)
                 atomic_write(base_path, payload.data)
-            except Exception as exc:
+            except Exception:
                 current_app.logger.exception("failed to store upload: %s", storage.filename)
                 summary.errors.append(f"{storage.filename}: 保存に失敗しました")
                 summary.skipped += 1
@@ -478,7 +785,7 @@ def view_admin_media_delete():
 
     suffixes = {"", _watermark_suffix(), WM_SUFFIX_NONE, WM_SUFFIX_GOTO, WM_SUFFIX_FULLY}
     removed = 0
-    extensions = {base_path.suffix.lower(), ".jpg", ".jpeg", ".png"}
+    extensions = {base_path.suffix.lower(), ".jpg", ".jpeg", ".png", ".webp"}
     for suf in suffixes:
         stem = base_path.stem
         if suf and stem.endswith(suf):
@@ -584,9 +891,15 @@ def view_admin_media_picker():
     )
 
 
+# ============================================================
+# URL wiring
+# ============================================================
+
 def init_watermark_ext(app) -> None:
+    # 互換 alias も含めて登録
     app.view_functions["admin_watermark"] = view_admin_watermark
     app.view_functions["admin_media_delete"] = view_admin_media_delete
+
     app.add_url_rule(
         "/admin/media/delete",
         endpoint="admin_media_delete",
@@ -614,27 +927,3 @@ def init_watermark_ext(app) -> None:
     app.add_url_rule("/admin/media/browse", endpoint="admin_media_browse", view_func=view_admin_media_browse, methods=["GET"])
     app.add_url_rule("/admin/media/pick", endpoint="admin_media_pick", view_func=view_admin_media_pick, methods=["GET"])
     app.add_url_rule("/admin/media/picker", endpoint="admin_media_picker", view_func=view_admin_media_picker, methods=["GET"])
-# --- compatibility: provide media_path_for expected by app ---
-from pathlib import Path
-import os
-
-def media_path_for(filename: str, folder: str | None = None) -> str:
-    """
-    Resolve an absolute path under the configured media directory.
-    - Uses app.config['MEDIA_ROOT'] or ['MEDIA_DIR'] or 'media' as fallback.
-    - Guards against path traversal ('..', absolute paths).
-    """
-    base = Path(
-        current_app.config.get("MEDIA_ROOT")
-        or current_app.config.get("MEDIA_DIR")
-        or "media"
-    )
-    if folder:
-        base = base / folder
-
-    safe = os.path.normpath(str(filename)).replace("\\", "/")
-    # prevent traversal / absolute
-    if safe.startswith("../") or safe.startswith("/"):
-        safe = os.path.basename(safe)
-
-    return str(base / safe)
