@@ -72,6 +72,24 @@ function onCategoryChange(sel){
 }
 window.addEventListener('DOMContentLoaded', ()=>{
   document.querySelectorAll('select[name="category[]"]').forEach(onCategoryChange);
+  const uiForm = document.getElementById('entries-ui-form');
+  if(uiForm){
+    uiForm.addEventListener('submit', ev=>{
+      if(!guardUiSubmit(uiForm)){
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    });
+  }
+  const rawForm = document.getElementById('entries-raw-form');
+  if(rawForm){
+    rawForm.addEventListener('submit', ev=>{
+      if(!guardRawSubmit(rawForm)){
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+    });
+  }
 });
 
 /* ===== 重複統合（AI最適化）プレビュー ===== */
@@ -107,6 +125,60 @@ function runDedupe(){
 }
 function escapeHtml(s){
   return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+function markAllowEmpty(form, allow){
+  const hidden = form.querySelector('input[name="allow_empty"]');
+  if(hidden){ hidden.value = allow ? '1' : ''; }
+}
+
+function guardUiSubmit(form){
+  const rows = form.querySelectorAll('#tbody tr');
+  for(const tr of rows){
+    const title = tr.querySelector('input[name="title[]"]');
+    const areas = tr.querySelector('input[name="areas[]"]');
+    if(title && areas){
+      if(title.value.trim() && areas.value.trim()){
+        markAllowEmpty(form, false);
+        return true;
+      }
+    }
+  }
+  if(confirm('全件を空の状態で保存しようとしています。現在の entries.json は空配列で上書きされます。本当に実行しますか？')){
+    markAllowEmpty(form, true);
+    return true;
+  }
+  markAllowEmpty(form, false);
+  return false;
+}
+
+function guardRawSubmit(form){
+  const textarea = form.querySelector('textarea[name="entries_raw"]');
+  const raw = textarea ? textarea.value.trim() : '';
+  let needsConfirm = false;
+  if(!raw){
+    needsConfirm = true;
+  }else{
+    try{
+      const parsed = JSON.parse(raw);
+      if(Array.isArray(parsed) && parsed.length === 0){
+        needsConfirm = true;
+      }
+    }catch(e){
+      markAllowEmpty(form, false);
+      return true;
+    }
+  }
+  if(needsConfirm){
+    if(confirm('0件のデータで entries.json を置換します。現在の内容はすべて削除されます。実行しますか？')){
+      markAllowEmpty(form, true);
+      return true;
+    }
+    markAllowEmpty(form, false);
+    return false;
+  }
+  markAllowEmpty(form, false);
+  return true;
 }
 </script>
 </head>
@@ -194,8 +266,9 @@ function escapeHtml(s){
   <details class="jsonbox">
     <summary>JSON全文上書き（上級者向け）を開く</summary>
     <div class="panel">
-      <form method="post" action="{{ url_for('admin_entries_edit') }}">
+      <form id="entries-raw-form" method="post" action="{{ url_for('admin_entries_edit') }}">
         <p class="note">このエリアに <code>[{{'{'}} ... {{'}'}}]</code> 形式で <b>entries.json</b> の配列を貼り付けて「上書き保存」を押すと、DBを丸ごと置き換えます。</p>
+        <input type="hidden" name="allow_empty" value="">
         <textarea name="entries_raw" placeholder='[
   {"category":"観光","title":"例","desc":"説明","areas":["五島市"],"tags":["教会"],"address":"","map":"","links":[]}
 ]'></textarea>
@@ -207,7 +280,8 @@ function escapeHtml(s){
     </div>
   </details>
 
-  <form method="post" action="{{ url_for('admin_entries_edit') }}">
+  <form id="entries-ui-form" method="post" action="{{ url_for('admin_entries_edit') }}">
+    <input type="hidden" name="allow_empty" value="">
     <div class="table-wrap">
       <table>
         <colgroup>
