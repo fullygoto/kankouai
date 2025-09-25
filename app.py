@@ -18,7 +18,7 @@ import tempfile
 import shutil      # _has_free_space で disk_usage を使用
 import tarfile     # _stream_backup_targz で使用
 import queue       # ストリーミング用の内部キュー
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
@@ -2831,81 +2831,96 @@ from linebot.exceptions import LineBotApiError
 def _line_enabled() -> bool:
     return bool(LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET)
 
-try:
-    if _line_enabled():
-        line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-        handler = WebhookHandler(LINE_CHANNEL_SECRET)
-        # 近く検索の直近状態（超軽量メモ）
-        _LAST = {
-            "mode": {},       # user_id -> 'all' | 'tourism' | 'shop'
-            "location": {},   # user_id -> (lat, lng, ts)
-        }
-        # --- 送信の重複抑止 & リクエスト世代管理 -----------------------------------
-        from collections import defaultdict, deque
-        import re, time  # 念のため
+if _line_enabled():
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-        # 「ユーザーごとの現在世代」。新しいユーザー発話が来たら+1する
-        REQUEST_GENERATION: dict[str, int] = defaultdict(int)
+    # 近く検索の直近状態（超軽量メモ）
+    _LAST = {
+        "mode": {},       # user_id -> 'all' | 'tourism' | 'shop'
+        "location": {},   # user_id -> (lat, lng, ts)
+    }
 
-        # 「直近に送った本文」を保持して同一本文の連投を防ぐ（10分・最大12件）
-        _SENT_HISTORY: dict[str, deque] = defaultdict(lambda: deque(maxlen=12))
-        _SENT_TTL_SEC = 10 * 60  # 10分
+    # --- 送信の重複抑止 & リクエスト世代管理 -----------------------------------
+    from collections import defaultdict, deque
+    import re, time
 
-        def _text_key(s: str) -> str:
-            return re.sub(r"\s+", " ", (s or "")).strip().lower()
+    # 「ユーザーごとの現在世代」。新しいユーザー発話が来たら+1する
+    REQUEST_GENERATION: dict[str, int] = defaultdict(int)
 
-        def _was_sent_recent(target_id: str, text: str, *, mark: bool) -> bool:
-            """直近10分に同一本文を送っていれば True。mark=True なら今回送った扱いに記録。"""
-            now = time.time()
-            dq = _SENT_HISTORY[target_id]
-            # 期限切れを掃除
-            while dq and now - dq[0][1] > _SENT_TTL_SEC:
-                dq.popleft()
-            key = _text_key(text)
-            hit = any(k == key for k, _ in dq)
-            if mark and not hit:
-                dq.append((key, now))
-            return hit
+    # 「直近に送った本文」を保持して同一本文の連投を防ぐ（10分・最大12件）
+    _SENT_HISTORY: dict[str, deque] = defaultdict(lambda: deque(maxlen=12))
+    _SENT_TTL_SEC = 10 * 60  # 10分
 
-        # 待ちメッセージ（未定義だと NameError になるので用意）
-        WAIT_MESSAGES = (
-            "少しお待ちください…",
-            "調べています…",
-            "候補をまとめています…",
-            "もう少々お待ちください…",
-        )
+    def _text_key(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
-        def pick_wait_message(seed: str | None = None) -> str:
-            if not WAIT_MESSAGES:
-                return "少しお待ちください…"
-            idx = (abs(hash(seed)) if seed else 0) % len(WAIT_MESSAGES)
-            return WAIT_MESSAGES[idx]
+    def _was_sent_recent(target_id: str, text: str, *, mark: bool) -> bool:
+        """直近10分に同一本文を送っていれば True。mark=True なら今回送った扱いに記録。"""
+        now = time.time()
+        dq = _SENT_HISTORY[target_id]
+        # 期限切れを掃除
+        while dq and now - dq[0][1] > _SENT_TTL_SEC:
+            dq.popleft()
+        key = _text_key(text)
+        hit = any(k == key for k, _ in dq)
+        if mark and not hit:
+            dq.append((key, now))
+        return hit
 
-        # ---------------------------------------------------------------------------
-        app.logger.info("LINE enabled")
-    else:
-        line_bot_api = None
-        handler = None
-        app.logger.warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
-        # ensure handler exists even when LINE is disabled
+    # 待ちメッセージ
+    WAIT_MESSAGES = (
+        "少しお待ちください…",
+        "調べています…",
+        "候補をまとめています…",
+        "もう少々お待ちください…",
+    )
 
-        if handler is None:
+    def pick_wait_message(seed: str | None = None) -> str:
+        if not WAIT_MESSAGES:
+            return "少しお待ちください…"
+        idx = (abs(hash(seed)) if seed else 0) % len(WAIT_MESSAGES)
+        return WAIT_MESSAGES[idx]
 
-            class _NoopHandler:
+    app.logger.info("LINE enabled")
 
-                def add(self, *args, **kwargs):
+else:
+    line_bot_api = None
+    handler = None
+    app.logger.warning("LINE disabled: set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET")
 
-                    def decorator(f):
+    # ensure handler exists even when LINE is disabled
+    class _NoopHandler:
+        def add(self, *args, **kwargs):
+            def decorator(f):
+                return f
+            return decorator
+        def handle(self, *args, **kwargs):
+            return None
+    handler = _NoopHandler()
 
-                        return f
+    # （LINE無効時のフォールバック：上で使うユーティリティも最小限定義）
+    from collections import defaultdict, deque
+    import re, time
+    REQUEST_GENERATION: dict[str, int] = defaultdict(int)
+    _SENT_HISTORY: dict[str, deque] = defaultdict(lambda: deque(maxlen=12))
+    _SENT_TTL_SEC = 10 * 60
 
-                    return decorator
+    def _text_key(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
-                def handle(self, *args, **kwargs):
+    def _was_sent_recent(target_id: str, text: str, *, mark: bool) -> bool:
+        return False
 
-                    return None
+    WAIT_MESSAGES = ("少しお待ちください…",)
 
-            handler = _NoopHandler()
+    def pick_wait_message(seed: str | None = None) -> str:
+        return "少しお待ちください…"
+
+            
+def _messages_with_sources_footer(messages):
+    """
+    どんな送信形でも、最後のテキストの末尾に — 出典 — を付ける。
     テキストが無い場合は出典だけの1通を末尾に追加。
     出典が未登録なら何もしない。
     """
@@ -2917,8 +2932,7 @@ try:
     # 既に登録されている出典を取得
     foot = _sources_footer_text()
 
-    # 出典が未登録のままなら、最後のテキスト1行目をタイトルとして
-    # entries.json から推定→record_source_from_entry で登録を試みる
+    # 出典が未登録のままなら、最後のテキスト1行目から entries を照合して登録を試みる
     if not foot:
         try:
             last_txt = None
@@ -2939,6 +2953,7 @@ try:
                                 break
             foot = _sources_footer_text()
         except Exception:
+            # 出典の自動推定はベストエフォート
             pass
 
     # まだ出典なしならそのまま返す
@@ -6796,20 +6811,29 @@ def _wm_save_jpeg(im: Image.Image, out_path: str, quality: int = 90):
 
 # === 管理プレビュー用 admin_media_img（重複安全・ダブル透かし防止） ===
 def _admin_media_img_impl(filename: str):
+    # --- strict validation: 不正パスは 400/404 を返す ---
+    if not filename:
+        abort(400)
+    # 絶対パス/親ディレクトリ参照などを拒否
+    if filename.startswith(("/", "\\")) or ".." in PurePosixPath(filename).parts:
+        abort(400)
+
     try:
-        media_path_for(filename)
+        p = media_path_for(filename)   # ※ Path を返す想定（watermark_ext 側でガード済み）
+        ensure_within_media(p)         # 念のため二重ガード
     except Exception:
         abort(400)
+
+    if not Path(p).exists():
+        abort(404)
+
     # 派生ファイルはダブル透かし防止で wm=none、元画像はプレビュー用に wm=1
-    low = (filename or "").lower()
-    if any(s in low for s in ("__goto", "__gotocity", "__fullygoto", "__none")):
-        wm = "none"
-    else:
-        wm = "1"
-    # 署名付きURLに 302 リダイレクト（実体配信は serve_image が担当）
-    return redirect(
-        safe_url_for("serve_image", filename=filename, _sign=True, wm=wm)
-    )
+    low = filename.lower()
+    wm = "none" if any(s in low for s in ("__goto", "__gotocity", "__fullygoto", "__none")) else "1"
+
+    # 署名付きURLへ（実体配信は serve_image が担当）
+    return redirect(safe_url_for("serve_image", filename=filename, _sign=True, wm=wm))
+
 
 # 既に登録済みなら追加しない（重複エラー回避）
 if "admin_media_img" not in app.view_functions:
@@ -6819,7 +6843,6 @@ if "admin_media_img" not in app.view_functions:
         view_func=login_required(_admin_media_img_impl),
         methods=["GET"]
     )
-
 
 
 # === 新規アップロード→透かし生成→保存（統一版） ============================
