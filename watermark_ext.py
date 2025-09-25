@@ -812,7 +812,13 @@ def view_admin_media_delete():
     _ensure_role()
 
     # 入力取得
-    raw = request.form.get("filename") or ""
+    raw = (request.form.get("filename") or "").strip()
+    raw_norm = raw.replace("\\", "/")
+    if raw_norm.startswith("/") or raw_norm.startswith("\\"):
+        abort(400)
+    if ".." in PurePosixPath(raw_norm).parts:
+        abort(400)
+
     name = _normalize_selection(raw)
 
     # --- ここで厳格に弾く（400を返す） ---

@@ -16,6 +16,12 @@ class BaseConfig:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     # 表示用
     ENV_NAME = os.getenv("APP_ENV", "development")
+    # Pamphlet search
+    PAMPHLET_BASE_DIR = os.getenv("PAMPHLET_BASE_DIR", "/var/data/pamphlets")
+    PAMPHLET_TOPK = int(os.getenv("PAMPHLET_TOPK", "3"))
+    PAMPHLET_CHUNK_SIZE = int(os.getenv("PAMPHLET_CHUNK_SIZE", "1500"))
+    PAMPHLET_CHUNK_OVERLAP = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "200"))
+    PAMPHLET_SESSION_TTL = int(os.getenv("PAMPHLET_SESSION_TTL", str(30 * 60)))
 
 class DevelopmentConfig(BaseConfig):
     DEBUG = True
