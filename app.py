@@ -67,6 +67,7 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
 from watermark_ext import media_path_for
+from services import pamphlet_flow, pamphlet_search, pamphlet_summarize
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
@@ -112,6 +113,13 @@ def safe_url_for(endpoint, **values):
         
 from config import get_config
 app.config.from_object(get_config())
+
+# Pamphlet search configuration
+pamphlet_search.configure(app.config)
+try:
+    pamphlet_search.load_all()
+except Exception:
+    app.logger.exception("[pamphlet] initial load failed")
 
 # 以降のメッセージ等で使うため、上限MBを設定から参照
 MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
@@ -2779,6 +2787,7 @@ ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1"
 
 # OpenAI v1 クライアント
 client = OpenAI(timeout=15)
+pamphlet_summarize.configure(client)
 
 
 # --- OpenAIラッパ（モデル切替を一元管理：正規版） ---
@@ -2839,6 +2848,7 @@ if _line_enabled():
     _LAST = {
         "mode": {},       # user_id -> 'all' | 'tourism' | 'shop'
         "location": {},   # user_id -> (lat, lng, ts)
+        "pamphlet": {"city": {}, "pending": {}, "followup": {}},
     }
 
     # --- 送信の重複抑止 & リクエスト世代管理 -----------------------------------
@@ -2881,6 +2891,93 @@ if _line_enabled():
             return "少しお待ちください…"
         idx = (abs(hash(seed)) if seed else 0) % len(WAIT_MESSAGES)
         return WAIT_MESSAGES[idx]
+
+    def _pamphlet_session_store() -> dict:
+        base = globals().setdefault("_LAST", {})
+        pam = base.setdefault("pamphlet", {"city": {}, "pending": {}, "followup": {}})
+        for key in ("city", "pending", "followup"):
+            pam.setdefault(key, {})
+        return base
+
+    def _pamphlet_should_handle_early(text: str) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        choice_texts = {choice["text"] for choice in pamphlet_search.city_choices()}
+        if stripped in choice_texts:
+            return True
+        return stripped.startswith("もっと詳しく")
+
+    def _pamphlet_handle_line(event, text: str) -> bool:
+        session_store = _pamphlet_session_store()
+        try:
+            user_id = _line_target_id(event)
+        except Exception:
+            user_id = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+        topk = int(app.config.get("PAMPHLET_TOPK", 3) or 3)
+        ttl = int(app.config.get("PAMPHLET_SESSION_TTL", 1800) or 1800)
+
+        def _search(city: str, query: str, limit: int):
+            return pamphlet_search.search(city, query, limit)
+
+        def _summarize(query: str, docs, detailed: bool = False):
+            return pamphlet_summarize.summarize_with_gpt_nano(query, docs, detailed=detailed)
+
+        result = pamphlet_flow.build_response(
+            text,
+            user_id=user_id,
+            session_store=session_store,
+            topk=topk,
+            ttl=ttl,
+            searcher=_search,
+            summarizer=_summarize,
+        )
+
+        if result.kind == "noop":
+            return False
+
+        if result.kind == "ask_city":
+            msg = TextSendMessage(text=result.message or "市町を選択してください。")
+            if result.quick_choices:
+                items = [
+                    QuickReplyButton(action=MessageAction(label=choice["label"], text=choice["text"]))
+                    for choice in result.quick_choices
+                ]
+                msg.quick_reply = QuickReply(items=items)
+            line_bot_api.reply_message(event.reply_token, [msg])
+            return True
+
+        if result.kind == "answer":
+            parts = _split_for_line(result.message) or [result.message]
+            messages = []
+            quick_reply = None
+            if result.more_available:
+                quick_reply = QuickReply(
+                    items=[QuickReplyButton(action=MessageAction(label="もっと詳しく", text="もっと詳しく"))]
+                )
+            for idx, part in enumerate(parts):
+                tm = TextSendMessage(text=part)
+                if quick_reply and idx == len(parts) - 1:
+                    tm.quick_reply = quick_reply
+                messages.append(tm)
+            line_bot_api.reply_message(event.reply_token, messages)
+            try:
+                extra = {"kind": "pamphlet"}
+                if result.city:
+                    extra["city"] = result.city
+                if result.sources:
+                    extra["sources"] = result.sources
+                save_qa_log(text, result.message, source="line", hit_db=False, extra=extra)
+            except Exception:
+                pass
+            return True
+
+        if result.kind == "error":
+            _reply_or_push(event, result.message)
+            return True
+
+        return False
 
     app.logger.info("LINE enabled")
 
@@ -3114,6 +3211,13 @@ def handle_message(event):
             return
     except Exception:
         app.logger.exception("_line_mute_gate failed")
+
+    # --- Pamphlet quick handling (city selection / more detail) ---
+    try:
+        if _pamphlet_should_handle_early(text) and _pamphlet_handle_line(event, text):
+            return
+    except Exception:
+        app.logger.exception("pamphlet quick handler failed")
 
     # --- ①.5 透かしコマンド（@Goto City / @fullyGOTO / なし） ----
     # ※ ここで検出したらユーザー設定に保存し、即時に切替メッセージを返して終了
@@ -3403,6 +3507,13 @@ def handle_message(event):
                 img_msg = make_line_image_message(entry_for_img) if entry_for_img else None
                 if img_msg:
                     msgs.append(img_msg)
+
+        if not hit:
+            try:
+                if _pamphlet_handle_line(event, text):
+                    return
+            except Exception:
+                app.logger.exception("pamphlet fallback failed")
 
         # 本文は安全分割して複数通に
         for p in _split_for_line(ans):
@@ -9725,9 +9836,17 @@ def readyz():
     except Exception as ex:
         problems.append(f"media:{ex}")
 
+    pamphlet_state = pamphlet_search.overall_state()
+    if pamphlet_state == "error":
+        problems.append("pamphlet_index:error")
+
+    body = {"status": "ready", "pamphlet_index": pamphlet_state}
+
     if problems:
-        return {"status": "degraded", "errors": problems}, 503
-    return {"status": "ready"}, 200
+        body["status"] = "degraded"
+        body["errors"] = problems
+        return body, 503
+    return body, 200
 
 
 
@@ -10184,6 +10303,19 @@ def _answer_from_data_txt(question: str) -> str:
         return ""
 
 # ② 例外を握ってログ＋フラッシュにして 500 を防ぐ
+@app.route("/admin/pamphlet-reindex", methods=["GET"])
+@login_required
+def admin_pamphlet_reindex():
+    if session.get("role") != "admin":
+        abort(403)
+    result = pamphlet_search.reindex_all()
+    return jsonify({
+        "status": "ok",
+        "result": result,
+        "pamphlet_index": pamphlet_search.overall_state(),
+    })
+
+
 @app.route("/admin/data_files", methods=["GET"])
 @login_required
 def admin_data_files():

@@ -17,6 +17,14 @@
 !templates/
 !templates/**
 
+# docs も許可
+!docs/
+!docs/**
+
+# services パッケージを許可
+!services/
+!services/**
+
 # tests も許可
 !tests/
 !tests/**
