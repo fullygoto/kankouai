@@ -5,9 +5,11 @@ import datetime
 import io
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Iterable, List, Optional, Sequence, Tuple
+import time, shutil  # ファイル先頭の import 群に追加してOK
+
 
 from flask import (
     abort,
@@ -146,20 +148,32 @@ def max_batch_size() -> int:
     return int(current_app.config.get("WATERMARK_BATCH_LIMIT") or DEFAULT_BATCH_LIMIT)
 
 
+# --- compatibility: provide media_path_for expected by app ---
+from pathlib import Path
+import os
+
 def media_path_for(filename: str, folder: str | None = None) -> Path:
     """
-    Resolve a path under MEDIA root safely.
-    NOTE: Path traversal ('..' / absolute) をガード。
+    Resolve an absolute path under the configured media directory.
+    - Uses app.config['MEDIA_ROOT'] or ['MEDIA_DIR'] or 'media/img' as fallback.
+    - Guards against path traversal ('..', absolute paths).
     """
-    base = _media_root()
+    base = Path(
+        current_app.config.get("MEDIA_ROOT")
+        or current_app.config.get("MEDIA_DIR")
+        or "media/img"
+    )
     if folder:
         base = base / folder
 
-    safe = os.path.normpath(str(filename)).replace("\\", "/")
-    if safe.startswith("../") or safe.startswith("/"):
-        safe = os.path.basename(safe)
+    # normalize & guard
+    safe = os.path.normpath(str(filename)).replace("\\", "/").strip()
+    # 明示的に親参照や絶対パスを排除
+    if safe.startswith("../") or safe.startswith("/") or ".." in Path(safe).parts:
+        raise ValueError("invalid path")
 
-    p = (base / safe).resolve()
+    p = base / safe
+    # ルート外参照を禁止
     ensure_within_media(p)
     return p
 
@@ -409,11 +423,34 @@ def _normalize_selection(name: str | None) -> str:
 
 
 def _generate_single(base_path: Path, options: WatermarkOptions) -> str:
+    """
+    元画像 base_path に対して透かしを適用し、派生画像を生成する。
+    既存の派生画像がある場合は、上書き前に同じ場所へ
+    "<ファイル名>.bak-<UNIX時刻>" という名前でバックアップを作成する。
+    戻り値は生成（上書き）後の派生ファイル名。
+    """
     if not base_path.exists():
         raise FileNotFoundError(base_path)
+
+    # 透かし適用（バイト列と拡張子を得る）
     data, ext = apply_watermark(base_path, options)
+
+    # 出力先（派生ファイルのパス）
     out_path = derivative_path(base_path, options.suffix, ext=ext)
+
+    # 既存があれば .bak-<timestamp> へリネームしてバックアップ
+    try:
+        if out_path.exists():
+            ts = int(datetime.datetime.now().timestamp())
+            bak = out_path.with_name(out_path.name + f".bak-{ts}")
+            out_path.replace(bak)
+    except Exception:
+        # バックアップは最善努力。失敗しても処理を続行するがログは残す
+        current_app.logger.exception("failed to backup existing derivative: %s", out_path)
+
+    # 新しい画像を書き込み（原子的に）
     atomic_write(out_path, data)
+
     return out_path.name
 
 
@@ -774,18 +811,26 @@ def view_admin_media_delete():
         return need
     _ensure_role()
 
-    name = _normalize_selection(request.form.get("filename"))
-    if not name:
-        flash("削除対象が指定されていません")
-        return redirect(url_for("admin_watermark"))
-    try:
-        base_path = media_path_for(name)
-    except ValueError:
+    # 入力取得
+    raw = request.form.get("filename") or ""
+    name = _normalize_selection(raw)
+
+    # --- ここで厳格に弾く（400を返す） ---
+    # 空・絶対パス・.. を含む相対移動はいずれも拒否
+    if (not name) or name.startswith(("/", "\\")) or (".." in PurePosixPath(name).parts):
         abort(400)
 
+    # パス解決（media 配下のみ）
+    try:
+        base_path = Path(media_path_for(name))
+    except Exception:
+        abort(400)
+
+    # 派生含めて安全に削除
     suffixes = {"", _watermark_suffix(), WM_SUFFIX_NONE, WM_SUFFIX_GOTO, WM_SUFFIX_FULLY}
     removed = 0
-    extensions = {base_path.suffix.lower(), ".jpg", ".jpeg", ".png", ".webp"}
+    extensions = {base_path.suffix.lower(), ".jpg", ".jpeg", ".png"}
+
     for suf in suffixes:
         stem = base_path.stem
         if suf and stem.endswith(suf):
@@ -793,7 +838,7 @@ def view_admin_media_delete():
         for ext in extensions:
             candidate = base_path.with_name(f"{stem}{suf}{ext}")
             try:
-                ensure_within_media(candidate)
+                ensure_within_media(candidate)  # メディア外なら例外
             except ValueError:
                 continue
             if candidate.exists():
@@ -802,9 +847,10 @@ def view_admin_media_delete():
                     removed += 1
                 except OSError:
                     current_app.logger.exception("failed to remove %s", candidate)
+
     flash("削除しました" if removed else "削除対象が見つかりませんでした")
     return redirect(url_for("admin_watermark"))
-
+    
 
 def view_admin_media_folders():
     need = _require_login()
@@ -927,3 +973,6 @@ def init_watermark_ext(app) -> None:
     app.add_url_rule("/admin/media/browse", endpoint="admin_media_browse", view_func=view_admin_media_browse, methods=["GET"])
     app.add_url_rule("/admin/media/pick", endpoint="admin_media_pick", view_func=view_admin_media_pick, methods=["GET"])
     app.add_url_rule("/admin/media/picker", endpoint="admin_media_picker", view_func=view_admin_media_picker, methods=["GET"])
+    # 既存のエンドポイントがあっても安全版に強制バインド
+    app.view_functions["admin_media_delete"] = view_admin_media_delete
+    app.view_functions["admin_media_delete_short"] = view_admin_media_delete
