@@ -19,6 +19,7 @@ import shutil      # _has_free_space で disk_usage を使用
 import tarfile     # _stream_backup_targz で使用
 import queue       # ストリーミング用の内部キュー
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
@@ -2961,7 +2962,10 @@ if _line_enabled():
             return True
 
         if result.kind == "answer":
-            parts = _split_for_line(result.message) or [result.message]
+            body = result.message or ""
+            if result.sources_md:
+                body = f"{body}\n\n{result.sources_md}" if body else result.sources_md
+            parts = _split_for_line(body) or [body]
             messages = []
             quick_reply = None
             if result.more_available:
@@ -2973,7 +2977,7 @@ if _line_enabled():
                 if quick_reply and idx == len(parts) - 1:
                     tm.quick_reply = quick_reply
                 messages.append(tm)
-            _safe_reply_or_push(event, messages)
+            emit_response(event, messages)
             try:
                 extra = {"kind": "pamphlet"}
                 if result.city:
@@ -3333,11 +3337,11 @@ def handle_message(event):
                 )
             except Exception:
                 try:
-                    if line_bot_api and uid2:
-                        line_bot_api.push_message(
-                            uid2,
-                            TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。")
-                        )
+                    emit_response(
+                        event,
+                        TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。"),
+                        force_push=True,
+                    )
                 except Exception:
                     pass
             return
@@ -3759,18 +3763,8 @@ def _reply_quick_no_dedupe(event, text: str):
     """重複抑止に引っかけず、とにかく1通返す（reply優先・失敗時push）。"""
     if not text:
         return
-    message = TextSendMessage(text=text)
     try:
-        _safe_reply_or_push(event, message)
-    except LineBotApiError as e:
-        logger = _line_logger()
-        logger.warning("LINE quick reply failed (%s); fallback push", e)
-        try:
-            to_id = _to_id_from_source(getattr(event, "source", None)) or _line_target_id(event)
-            if to_id and line_bot_api:
-                line_bot_api.push_message(to_id, [message])
-        except Exception:
-            logger.exception("LINE quick reply fallback push failed")
+        emit_response(event, TextSendMessage(text=text))
     except Exception:
         _line_logger().exception("LINE quick reply unexpected error")
 
@@ -3795,20 +3789,6 @@ def _to_id_from_source(source):
 
 def _is_dummy_reply_token(token: str | None) -> bool:
     return bool(token) and str(token).startswith("000000000000000000000000")
-
-
-_reply_token_cache: dict[str, float] = {}
-
-
-def _mark_and_check_token(token: str) -> bool:
-    now = time.time()
-    for k, ts in list(_reply_token_cache.items()):
-        if now - ts > 120:
-            _reply_token_cache.pop(k, None)
-    if token in _reply_token_cache:
-        return False
-    _reply_token_cache[token] = now
-    return True
 
 
 def _event_elapsed_seconds(event) -> float | None:
@@ -3854,71 +3834,118 @@ def _normalize_line_messages(messages):
     return normalized
 
 
-def _safe_reply_or_push(event, messages):
+_SENT_EVENTS: dict[str, float] = {}
+
+
+def _event_key(event) -> str:
+    if event is None:
+        return f"anon:{uuid.uuid4().hex}"
+    cached = getattr(event, "_dedupe_key", None)
+    if cached:
+        return cached
+    message = getattr(event, "message", None)
+    msg_id = getattr(message, "id", None)
+    token = getattr(event, "reply_token", None)
+    src_id = _to_id_from_source(getattr(event, "source", None)) or "anon"
+    raw = msg_id or token or getattr(event, "timestamp", None) or getattr(event, "type", None)
+    if not raw:
+        raw = uuid.uuid4().hex
+    key = f"{src_id}:{raw}"
+    setattr(event, "_dedupe_key", key)
+    return key
+
+
+def _mark_sent(key: str) -> bool:
+    now = time.time()
+    for k, ts in list(_SENT_EVENTS.items()):
+        if now - ts > 120:
+            _SENT_EVENTS.pop(k, None)
+    if key in _SENT_EVENTS:
+        return False
+    _SENT_EVENTS[key] = now
+    return True
+
+
+def _make_push_event(target_id: str):
+    source = SimpleNamespace(user_id=target_id, group_id=None, room_id=None)
+    event = SimpleNamespace(reply_token=None, source=source, message=None, type="push")
+    setattr(event, "_dedupe_key", f"push:{target_id}:{uuid.uuid4().hex}")
+    return event
+
+
+def emit_response(event, messages, *, force_push: bool = False):
     logger = _line_logger()
     norm_messages = _normalize_line_messages(messages)
     if not norm_messages:
         return "skipped"
 
     if not globals().get("line_bot_api"):
-        logger.info("[LINE disabled] would send: %s", [getattr(m, "text", "(non-text)") for m in norm_messages])
+        logger.info(
+            "[LINE disabled] would send: %s",
+            [getattr(m, "text", "(non-text)") for m in norm_messages],
+        )
         return "disabled"
 
+    if isinstance(event, str):
+        event = _make_push_event(event)
+
+    key = _event_key(event)
+    if key and not _mark_sent(key):
+        logger.info("Skip send (dup): %s", key)
+        return "skipped"
+
     token = getattr(event, "reply_token", None)
-    event_type = getattr(event, "type", "unknown")
-
-    if not token:
-        to_id = _to_id_from_source(getattr(event, "source", None))
-        if to_id:
-            line_bot_api.push_message(to_id, norm_messages)
-            return "pushed"
-        else:
-            logger.error("Reply token missing & no destination (event=%s)", event_type)
-        return "skipped"
-
-    if _is_dummy_reply_token(token):
-        logger.info("Skip reply: dummy token (event=%s)", event_type)
-        return "skipped"
-
-    if not _mark_and_check_token(token):
-        logger.info("Skip: duplicate reply for token=%s (event=%s)", token, event_type)
-        return "skipped"
+    should_reply = bool(not force_push and token and not _is_dummy_reply_token(token))
+    invalid_token = False
 
     try:
-        line_bot_api.reply_message(token, norm_messages)
-        return "replied"
+        if should_reply:
+            line_bot_api.reply_message(token, norm_messages)
+            logger.info("Replied: %s", key)
+            return "replied"
     except LineBotApiError as e:
-        msg = str(e)
-        if getattr(e, "status_code", None) == 400 and "Invalid reply token" in msg:
-            to_id = _to_id_from_source(getattr(event, "source", None))
+        if getattr(e, "status_code", None) == 400 and "Invalid reply token" in str(e):
+            invalid_token = True
             elapsed = _event_elapsed_seconds(event)
-            if to_id:
-                try:
-                    line_bot_api.push_message(to_id, norm_messages)
-                except Exception:
-                    logger.exception("Reply token invalid but push failed (event=%s to=%s)", event_type, to_id)
-                    return "error"
-                if elapsed is not None:
-                    logger.warning("Reply token invalid → pushed to %s (event=%s elapsed=%.1fs)", to_id, event_type, elapsed)
-                else:
-                    logger.warning("Reply token invalid → pushed to %s (event=%s)", to_id, event_type)
-                return "pushed"
+            if elapsed is not None:
+                logger.warning("Reply token invalid: %s (elapsed=%.1fs)", key, elapsed)
             else:
-                logger.error("Reply token invalid & no to_id; drop. (event=%s)", event_type)
-            return "skipped"
+                logger.warning("Reply token invalid: %s", key)
         else:
+            if key:
+                _SENT_EVENTS.pop(key, None)
             raise
 
-# === LINE 返信ユーティリティ（未定義だったので追加） ===
-# === LINE 返信ユーティリティ（安全送信 + エラー計測 + force_push互換） ===
+    to_id = _to_id_from_source(getattr(event, "source", None)) or _line_target_id(event)
+    if to_id:
+        try:
+            line_bot_api.push_message(to_id, norm_messages)
+        except Exception:
+            if key:
+                _SENT_EVENTS.pop(key, None)
+            raise
+        if invalid_token:
+            elapsed = _event_elapsed_seconds(event)
+            if elapsed is not None:
+                logger.info("Pushed: %s -> %s (elapsed=%.1fs)", key, to_id, elapsed)
+            else:
+                logger.info("Pushed: %s -> %s", key, to_id)
+        else:
+            logger.info("Pushed: %s -> %s", key, to_id)
+        return "pushed"
+
+    logger.error("No destination for push: %s", key)
+    return "skipped"
+
+
+def _safe_reply_or_push(event, messages):
+    return emit_response(event, messages)
+
+
 def _reply_or_push(event, text: str, *, force_push: bool = False):
     if isinstance(text, str):
-        text = _append_sources_if_text(text)    
-    """
-    長文は自動分割して返信。5通/呼び出し上限を厳守。
-    force_push=True のときは reply_token があっても push のみで送る。
-    送信失敗は SEND_ERROR_COUNT / SEND_FAIL_COUNT と LAST_SEND_ERROR に記録。
-    """
+        text = _append_sources_if_text(text)
+
     LINE_SAFE = globals().get("LINE_SAFE_CHARS", 3800)
 
     if not _line_enabled() or not line_bot_api:
@@ -3926,7 +3953,6 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
         return
 
     def _compress_to(parts, lim):
-        """分割済みpartsを、1通あたりlim文字以内でできるだけ結合して個数を減らす"""
         out, buf = [], ""
         for p in parts:
             if not buf:
@@ -3945,52 +3971,14 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
     parts = _split_for_line(text, lim) or [""]
     parts = _compress_to(parts, lim)
 
-    MAX_PER_CALL = 5  # reply/push とも5通/呼び出し
+    MAX_PER_CALL = 5
+    if len(parts) > MAX_PER_CALL:
+        head = parts[:MAX_PER_CALL - 1]
+        tail = "\n\n".join(parts[MAX_PER_CALL - 1:])
+        parts = head + [tail]
 
-    def _do_reply(msgs):
-        _safe_reply_or_push(event, [TextSendMessage(text=m) for m in msgs])
-
-    def _do_push(tid, msgs):
-        line_bot_api.push_message(tid, [TextSendMessage(text=m) for m in msgs])
-
-    try:
-        reply_token = getattr(event, "reply_token", None)
-
-        # force_push 指定 or reply_token が無い場合は push 送信のみ
-        if force_push or not reply_token:
-            tid = _line_target_id(event)
-            if tid:
-                for i in range(0, len(parts), MAX_PER_CALL):
-                    _do_push(tid, parts[i:i + MAX_PER_CALL])
-            return
-
-        # まず reply で5通まで
-        head = parts[:MAX_PER_CALL]
-        _do_reply(head)
-        rest = parts[MAX_PER_CALL:]
-
-        # 余りは push で後送（ベストエフォート）
-        if rest:
-            tid = _line_target_id(event)
-            if tid:
-                for i in range(0, len(rest), MAX_PER_CALL):
-                    try:
-                        _do_push(tid, rest[i:i + MAX_PER_CALL])
-                    except LineBotApiError as e:
-                        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-                        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-                        app.logger.warning("LINE push failed on chunk %s: %s", i // MAX_PER_CALL, e)
-                        break
-
-    except LineBotApiError as e:
-        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE send failed")
-
-    except Exception as e:
-        globals()["SEND_FAIL_COUNT"]  = globals().get("SEND_FAIL_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE send failed (unexpected)")
+    messages = [TextSendMessage(text=m) for m in parts]
+    emit_response(event, messages, force_push=force_push)
 
 
 # データ格納先
@@ -8784,7 +8772,7 @@ def admin_line_test_push():
     try:
         parts = _split_for_line(text, LINE_SAFE_CHARS)
         msgs = [TextSendMessage(text=p) for p in parts]
-        line_bot_api.push_message(to, msgs)
+        emit_response(to, msgs, force_push=True)
         flash("push 送信を実行しました")
     except LineBotApiError as e:
         global LAST_SEND_ERROR, SEND_ERROR_COUNT
@@ -11118,20 +11106,8 @@ def _send_messages(event, messages):
 
     status = "noop"
     try:
-        rt = getattr(event, "reply_token", None)
-        if rt:
-            result = _safe_reply_or_push(event, messages)
-            if result in ("replied", "pushed", "error"):
-                status = result
-            else:
-                status = "noop" if result == "skipped" else "replied"
-        else:
-            tid = _line_target_id(event)
-            if tid:
-                line_bot_api.push_message(tid, messages)
-                status = "pushed"
-            else:
-                status = "noop"
+        result = emit_response(event, messages)
+        status = result if result in {"replied", "pushed", "disabled"} else "noop"
     except LineBotApiError as e:
         global LAST_SEND_ERROR, SEND_ERROR_COUNT
         SEND_ERROR_COUNT += 1
@@ -11261,7 +11237,7 @@ def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
                 app.logger.info("skip dup push uid=%s", target_id)
                 continue
             try:
-                line_bot_api.push_message(target_id, TextSendMessage(text=ch))
+                emit_response(target_id, TextSendMessage(text=ch), force_push=True)
                 _was_sent_recent(target_id, ch, mark=True)
             except LineBotApiError as e:
                 app.logger.warning("push error: %s", e)
@@ -11290,7 +11266,11 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
     except Exception as e:
         app.logger.exception("compute/push failed: %s", e)
         try:
-            line_bot_api.push_message(target_id, TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"))
+            emit_response(
+                target_id,
+                TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"),
+                force_push=True,
+            )
         except Exception:
             pass
 

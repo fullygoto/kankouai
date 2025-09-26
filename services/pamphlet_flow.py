@@ -15,6 +15,7 @@ class PamphletResponse:
     message: str
     city: Optional[str] = None
     sources: List[str] = field(default_factory=list)
+    sources_md: str = ""
     quick_choices: List[Dict[str, str]] = field(default_factory=list)
     more_available: bool = False
 
@@ -100,12 +101,11 @@ def build_response(
             message=message,
             city=city_key,
             sources=[],
+            sources_md="",
             more_available=False,
         )
 
     footer = pamphlet_rag.format_sources_md(sources_info)
-    if footer:
-        message = f"{message}\n\n{footer}" if message else footer
 
     session.set_followup(user_id, query=stripped, city=city_key)
 
@@ -114,5 +114,6 @@ def build_response(
         message=message,
         city=city_key,
         sources=formatted_sources,
+        sources_md=footer,
         more_available=False,
     )
