@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import os
+import shutil
 
 from config import PAMPHLET_BASE_DIR, PAMPHLET_CITIES
 
@@ -94,3 +95,81 @@ def delete_file(city: str, name: str) -> None:
     if not path.exists() or not path.is_file():
         raise FileNotFoundError("ファイルが見つかりませんでした。")
     path.unlink()
+
+
+def read_text(city: str, name: str, max_bytes: int | None = None) -> tuple[str, int, float]:
+    """Read a UTF-8 text file, optionally truncated for previews."""
+
+    path = _safe(city, name)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError("ファイルが見つかりませんでした。")
+
+    stat = path.stat()
+    size = stat.st_size
+    with path.open("rb") as fh:
+        if max_bytes is not None and max_bytes >= 0:
+            data = fh.read(max_bytes)
+        else:
+            data = fh.read()
+
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode("utf-8", errors="replace")
+
+    return text, size, stat.st_mtime
+
+
+def write_text(
+    city: str,
+    name: str,
+    text: str,
+    *,
+    expected_mtime: float | None = None,
+    make_backup: bool = True,
+) -> float:
+    """Overwrite a pamphlet text file with optimistic locking and backup support."""
+
+    path = _safe(city, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    current_stat = None
+    try:
+        current_stat = path.stat()
+    except FileNotFoundError:
+        if expected_mtime is not None:
+            raise ValueError("他の変更で競合しました。") from None
+
+    if expected_mtime is not None and current_stat is not None:
+        # Allow for filesystem precision differences (~1 microsecond)
+        if abs(current_stat.st_mtime - expected_mtime) > 1e-6:
+            raise ValueError("他の変更で競合しました。")
+
+    if make_backup and path.exists():
+        backup_path = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, backup_path)
+
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+    return path.stat().st_mtime
+
+
+def stat_file(city: str, name: str) -> dict:
+    """Return size and mtime for a given pamphlet text file."""
+
+    path = _safe(city, name)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError("ファイルが見つかりませんでした。")
+
+    stat = path.stat()
+    return {"size": stat.st_size, "mtime": stat.st_mtime}
+
+
+def get_file_path(city: str, name: str) -> Path:
+    """Return the resolved path for a pamphlet text file."""
+
+    path = _safe(city, name)
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError("ファイルが見つかりませんでした。")
+    return path
