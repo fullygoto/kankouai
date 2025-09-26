@@ -474,7 +474,7 @@
         <a href="{{ safe_url_for('admin_unhit_report') }}">[未ヒット頻出レポート]</a>
         <a href="{{ url_for('admin_backup') }}">[全体バックアップ]</a>
         <a href="{{ url_for('admin_entries_edit') }}">[観光データ一括編集]</a>
-        <a href="{{ safe_url_for('admin_data_files') }}">[テキストデータ管理（.txt）]</a>
+        <a href="{{ safe_url_for('pamphlets_admin.pamphlets_index') or url_for('pamphlets_admin.pamphlets_index') }}">[パンフレット管理]</a>
         <a href="{{ safe_url_for('admin_notices') }}">[お知らせ管理]</a>
         <a href="{{ safe_url_for('notices') }}">[お知らせ一覧]</a>
         <a href="{{ safe_url_for('admin_watermark') or '/admin_watermark.html' }}">[透かし一括生成]</a>

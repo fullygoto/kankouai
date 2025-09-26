@@ -95,9 +95,9 @@
           <p class="t">未ヒット頻出レポート</p>
           <p class="s">改善が必要なテーマの分析</p>
         </a>
-        <a class="tile" href="{{ safe_url_for('admin_data_files') or url_for('admin_data_files') }}">
-          <p class="t">テキストデータ管理（.txt）</p>
-          <p class="s">補助データの閲覧・編集</p>
+        <a class="tile" href="{{ safe_url_for('pamphlets_admin.pamphlets_index') or url_for('pamphlets_admin.pamphlets_index') }}">
+          <p class="t">パンフレット管理</p>
+          <p class="s">パンフレットTXTの閲覧・編集</p>
         </a>
         <a class="tile" href="{{ safe_url_for('admin_manual') or url_for('admin_manual') }}">
           <p class="t">運用マニュアル</p>
