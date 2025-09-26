@@ -6,6 +6,7 @@
 !README.md
 !requirements.txt
 !app.py
+!antiflood.py
 !conversational_router.py
 !notices.json
 !shop_infos.json

@@ -31,6 +31,8 @@ import secrets          # ← これを追加
 from dotenv import load_dotenv
 load_dotenv()
 
+from antiflood import AntiFlood, make_event_key, make_key, make_push_key, make_text_key, normalize_text
+
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session,
     jsonify, send_file, abort, send_from_directory, render_template_string, Response,
@@ -115,6 +117,43 @@ app.config.from_object(get_config())
 
 # 以降のメッセージ等で使うため、上限MBを設定から参照
 MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
+
+ANTIFLOOD_TTL_SEC = int(os.getenv("ANTIFLOOD_TTL_SEC", "180"))
+REPLAY_GUARD_SEC = int(os.getenv("REPLAY_GUARD_SEC", "150"))
+ENABLE_PUSH = os.getenv("ENABLE_PUSH", "true").lower() in {"1", "true", "on", "yes"}
+RECENT_TEXT_TTL_SEC = int(
+    os.getenv("RECENT_TEXT_TTL_SEC", str(min(ANTIFLOOD_TTL_SEC, 60)))
+)
+
+ANTIFLOOD = AntiFlood.from_env()
+
+
+def _event_timestamp_seconds(event) -> float | None:
+    ts = getattr(event, "timestamp", None)
+    if ts is None:
+        return None
+    try:
+        val = int(ts)
+    except (TypeError, ValueError):
+        return None
+    if val > 1_000_000_000_000:
+        return val / 1000.0
+    if val > 1_000_000_000:
+        return float(val)
+    return None
+
+
+def _is_replay_event(event, guard_sec: int) -> bool:
+    if guard_sec <= 0:
+        return False
+    ts = _event_timestamp_seconds(event)
+    if ts is None:
+        return False
+    try:
+        now = time.time()
+    except Exception:
+        return False
+    return (now - ts) > guard_sec
 
 @app.template_filter("b64encode")
 def jinja_b64encode(s):
@@ -2856,17 +2895,11 @@ if _line_enabled():
         return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
     def _was_sent_recent(target_id: str, text: str, *, mark: bool) -> bool:
-        """直近10分に同一本文を送っていれば True。mark=True なら今回送った扱いに記録。"""
-        now = time.time()
-        dq = _SENT_HISTORY[target_id]
-        # 期限切れを掃除
-        while dq and now - dq[0][1] > _SENT_TTL_SEC:
-            dq.popleft()
-        key = _text_key(text)
-        hit = any(k == key for k, _ in dq)
-        if mark and not hit:
-            dq.append((key, now))
-        return hit
+        key = make_text_key(target_id, normalize_text(text))
+        ttl = max(RECENT_TEXT_TTL_SEC, 1)
+        if mark:
+            return not ANTIFLOOD.acquire(key, ttl)
+        return ANTIFLOOD.contains(key)
 
     # 待ちメッセージ
     WAIT_MESSAGES = (
@@ -3108,6 +3141,38 @@ def handle_message(event):
     except Exception:
         text = ""
 
+    try:
+        uid = _line_target_id(event)
+    except Exception:
+        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+    if _is_replay_event(event, REPLAY_GUARD_SEC):
+        app.logger.info(
+            "[LINE] replay guard drop user=%s ts=%s", uid, getattr(event, "timestamp", None)
+        )
+        return
+
+    msg_id = getattr(getattr(event, "message", None), "id", None) or ""
+    norm_text = normalize_text(text)
+    if not norm_text:
+        app.logger.info("[LINE] ignore empty text from %s", uid)
+        return
+    if len(norm_text) <= 1:
+        app.logger.info("[LINE] ignore very short text from %s: %r", uid, text)
+        return
+
+    if ANTIFLOOD_TTL_SEC > 0:
+        event_key = make_event_key(uid, msg_id, norm_text)
+        if not ANTIFLOOD.acquire(event_key, ANTIFLOOD_TTL_SEC):
+            app.logger.info("[LINE] duplicate event suppressed user=%s msg=%s", uid, msg_id)
+            return
+
+    if RECENT_TEXT_TTL_SEC > 0:
+        recent_key = make_key("incoming-text", uid, norm_text)
+        if not ANTIFLOOD.acquire(recent_key, RECENT_TEXT_TTL_SEC):
+            app.logger.info("[LINE] repeated text suppressed user=%s", uid)
+            return
+
     # --- ① ミュート/一時停止ゲート -------------------------
     try:
         if _line_mute_gate(event, text):
@@ -3208,9 +3273,10 @@ def handle_message(event):
                 )
             except Exception:
                 try:
-                    line_bot_api.push_message(
+                    safe_push_line(
                         uid2,
-                        TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。")
+                        TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。"),
+                        label="ask-location",
                     )
                 except Exception:
                     pass
@@ -3433,6 +3499,21 @@ def on_follow(event):
     ※公式の「あいさつメッセージ」をONにしている場合は二重送信になるので、
       基本は公式側OFF＋このWebhookで送る運用を推奨。
     """
+    try:
+        uid = _line_target_id(event)
+    except Exception:
+        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+    if _is_replay_event(event, REPLAY_GUARD_SEC):
+        app.logger.info("[LINE] follow replay drop user=%s", uid)
+        return
+
+    if ANTIFLOOD_TTL_SEC > 0:
+        follow_key = make_key("follow", uid, getattr(event, "reply_token", ""), getattr(event, "timestamp", ""))
+        if not ANTIFLOOD.acquire(follow_key, ANTIFLOOD_TTL_SEC):
+            app.logger.info("[LINE] duplicate follow suppressed user=%s", uid)
+            return
+
     # 表示名の取得（失敗しても続行）
     display_name = ""
     try:
@@ -3484,16 +3565,37 @@ def on_location(event):
 
     try:
         uid = _line_target_id(event)
+    except Exception:
+        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+    if _is_replay_event(event, REPLAY_GUARD_SEC):
+        app.logger.info("[LINE] location replay drop user=%s", uid)
+        return
+
+    try:
         lat = float(event.message.latitude)
         lng = float(event.message.longitude)
+    except Exception:
+        app.logger.exception("on_location failed to parse lat/lng")
+        return
 
-        # 1) 直近位置を覚える（後半の機能）
-        try:
-            if "_LAST" in globals() and isinstance(_LAST, dict):
-                _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
-        except Exception:
-            pass
+    if ANTIFLOOD_TTL_SEC > 0:
+        loc_key = make_event_key(
+            uid,
+            getattr(getattr(event, "message", None), "id", "") or "",
+            f"{lat:.6f}:{lng:.6f}",
+        )
+        if not ANTIFLOOD.acquire(loc_key, ANTIFLOOD_TTL_SEC):
+            app.logger.info("[LINE] duplicate location suppressed user=%s", uid)
+            return
 
+    try:
+        if "_LAST" in globals() and isinstance(_LAST, dict):
+            _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
+    except Exception:
+        pass
+
+    try:
         # 2) ユーザーモード→カテゴリ
         mode = (globals().get("_LAST", {}).get("mode", {}).get(uid)) or "all"
         cats = _mode_to_cats(mode)
@@ -3568,8 +3670,28 @@ def on_postback(event):
         app.logger.exception("_line_mute_gate failed in postback")
 
     try:
+        uid = _line_target_id(event)
+    except Exception:
+        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+    if _is_replay_event(event, REPLAY_GUARD_SEC):
+        app.logger.info("[LINE] postback replay drop user=%s", uid)
+        return
+
+    try:
         data = (getattr(getattr(event, "postback", None), "data", "") or "").strip()
         low  = data.lower()
+
+        if ANTIFLOOD_TTL_SEC > 0:
+            pb_key = make_key(
+                "postback",
+                uid,
+                normalize_text(data),
+                getattr(event, "reply_token", ""),
+            )
+            if not ANTIFLOOD.acquire(pb_key, ANTIFLOOD_TTL_SEC):
+                app.logger.info("[LINE] duplicate postback suppressed user=%s", uid)
+                return
 
         # 1) 代表的キーを正規化（ボタン側の実装差を吸収）
         canon = low
@@ -3626,6 +3748,72 @@ def on_postback(event):
         _reply_quick_no_dedupe(event, "うまく処理できませんでした。もう一度お試しください。")
 
 
+def safe_push_line(target_id: str, messages, *, label: str = "", ttl: int | None = None) -> bool:
+    if not target_id:
+        return False
+    if not ENABLE_PUSH:
+        app.logger.info("[LINE push disabled] would send to %s", target_id)
+        return False
+    if not _line_enabled() or not line_bot_api:
+        app.logger.info("[LINE disabled] would push to %s", target_id)
+        return False
+
+    if messages is None:
+        return False
+    if isinstance(messages, (list, tuple)):
+        items = list(messages)
+    else:
+        items = [messages]
+
+    prepared = []
+    payload_parts: list[str] = []
+    for item in items:
+        if item is None:
+            continue
+        if isinstance(item, TextSendMessage):
+            prepared.append(item)
+            payload_parts.append(normalize_text(item.text or ""))
+        elif isinstance(item, str):
+            prepared.append(TextSendMessage(text=item))
+            payload_parts.append(normalize_text(item))
+        else:
+            prepared.append(item)
+            try:
+                payload = json.dumps(item.as_json_dict(), sort_keys=True, ensure_ascii=False)
+            except Exception:
+                payload = repr(item)
+            payload_parts.append(payload)
+
+    if not prepared:
+        return False
+
+    payload_key = "||".join([p for p in payload_parts if p]) or "empty"
+    ttl_val = ANTIFLOOD_TTL_SEC if ttl is None else ttl
+    key_material = f"{label}:{payload_key}" if label else payload_key
+    if ttl_val > 0 and not ANTIFLOOD.acquire(make_push_key(target_id, key_material), ttl_val):
+        app.logger.info("[LINE] skip duplicate push target=%s label=%s", target_id, label or "")
+        return False
+
+    max_per = int(globals().get("LINE_MAX_PER_REQUEST", 5))
+    try:
+        for i in range(0, len(prepared), max_per):
+            line_bot_api.push_message(target_id, prepared[i : i + max_per])
+        return True
+    except LineBotApiError as e:
+        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
+        globals()["LAST_SEND_ERROR"] = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE push failed: %s", e)
+        if globals().get("LINE_RETHROW_ON_SEND_ERROR"):
+            raise
+    except Exception as e:  # pragma: no cover - unexpected path
+        globals()["SEND_FAIL_COUNT"] = globals().get("SEND_FAIL_COUNT", 0) + 1
+        globals()["LAST_SEND_ERROR"] = f"{type(e).__name__}: {e}"
+        app.logger.exception("LINE push failed (unexpected)")
+        if globals().get("LINE_RETHROW_ON_SEND_ERROR"):
+            raise
+    return False
+
+
 def _reply_quick_no_dedupe(event, text: str):
     """重複抑止に引っかけず、とにかく1通返す（reply優先・失敗時push）。"""
     if not text:
@@ -3636,13 +3824,13 @@ def _reply_quick_no_dedupe(event, text: str):
         else:
             tid = _line_target_id(event)
             if tid:
-                line_bot_api.push_message(tid, TextSendMessage(text=text))
+                safe_push_line(tid, TextSendMessage(text=text), label="quick")
     except Exception:
         # 片方で失敗した時の保険
         try:
             tid = _line_target_id(event)
             if tid:
-                line_bot_api.push_message(tid, TextSendMessage(text=text))
+                safe_push_line(tid, TextSendMessage(text=text), label="quick-fallback")
         except Exception:
             pass
 
@@ -3687,8 +3875,8 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
     def _do_reply(msgs):
         line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=m) for m in msgs])
 
-    def _do_push(tid, msgs):
-        line_bot_api.push_message(tid, [TextSendMessage(text=m) for m in msgs])
+    def _do_push(tid, msgs, *, label: str):
+        safe_push_line(tid, [TextSendMessage(text=m) for m in msgs], label=label)
 
     try:
         reply_token = getattr(event, "reply_token", None)
@@ -3698,7 +3886,7 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
             tid = _line_target_id(event)
             if tid:
                 for i in range(0, len(parts), MAX_PER_CALL):
-                    _do_push(tid, parts[i:i + MAX_PER_CALL])
+                    _do_push(tid, parts[i:i + MAX_PER_CALL], label="force-push")
             return
 
         # まず reply で5通まで
@@ -3711,13 +3899,7 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
             tid = _line_target_id(event)
             if tid:
                 for i in range(0, len(rest), MAX_PER_CALL):
-                    try:
-                        _do_push(tid, rest[i:i + MAX_PER_CALL])
-                    except LineBotApiError as e:
-                        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-                        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-                        app.logger.warning("LINE push failed on chunk %s: %s", i // MAX_PER_CALL, e)
-                        break
+                    _do_push(tid, rest[i:i + MAX_PER_CALL], label="reply-overflow")
 
     except LineBotApiError as e:
         globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
@@ -8521,8 +8703,10 @@ def admin_line_test_push():
     try:
         parts = _split_for_line(text, LINE_SAFE_CHARS)
         msgs = [TextSendMessage(text=p) for p in parts]
-        line_bot_api.push_message(to, msgs)
-        flash("push 送信を実行しました")
+        if safe_push_line(to, msgs, label="admin-test"):
+            flash("push 送信を実行しました")
+        else:
+            flash("push をスキップしました（重複または無効です）")
     except LineBotApiError as e:
         global LAST_SEND_ERROR, SEND_ERROR_COUNT
         SEND_ERROR_COUNT += 1
@@ -10831,8 +11015,10 @@ def _send_messages(event, messages):
         else:
             tid = _line_target_id(event)
             if tid:
-                line_bot_api.push_message(tid, messages)
-                status = "pushed"
+                if safe_push_line(tid, messages, label="send-messages"):
+                    status = "pushed"
+                else:
+                    status = "skipped"
             else:
                 status = "noop"
     except LineBotApiError as e:
@@ -10963,11 +11149,10 @@ def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
             if _was_sent_recent(target_id, ch, mark=False):
                 app.logger.info("skip dup push uid=%s", target_id)
                 continue
-            try:
-                line_bot_api.push_message(target_id, TextSendMessage(text=ch))
+            if safe_push_line(target_id, TextSendMessage(text=ch), label="async"):
                 _was_sent_recent(target_id, ch, mark=True)
-            except LineBotApiError as e:
-                app.logger.warning("push error: %s", e)
+            else:
+                app.logger.info("skip push via safe_push_line uid=%s", target_id)
                 return
             time.sleep(0.1)
 
@@ -10993,7 +11178,11 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
     except Exception as e:
         app.logger.exception("compute/push failed: %s", e)
         try:
-            line_bot_api.push_message(target_id, TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"))
+            safe_push_line(
+                target_id,
+                TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"),
+                label="async-error",
+            )
         except Exception:
             pass
 
