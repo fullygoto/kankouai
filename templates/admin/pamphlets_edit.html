@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>パンフレット編集 - {{ name }}</title>
+  <style>
+    :root{
+      --bg:#f6faf9; --panel:#fff; --muted:#64748b; --line:#e5e7eb; --brand:#2a8ed8; --danger:#dc2626;
+    }
+    *{box-sizing:border-box}
+    body{font-family:'Segoe UI','メイリオ',sans-serif;background:var(--bg);margin:0}
+    .container{background:#fff;padding:26px 28px;margin:38px auto;max-width:960px;border-radius:17px;box-shadow:0 4px 20px #b7d3e04d}
+    h1{margin:0 0 18px;font-size:22px}
+    .info{color:#0f172a;margin-bottom:16px;font-size:14px}
+    .info span{margin-right:12px}
+    .muted{color:var(--muted)}
+    textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:14px;resize:vertical;min-height:320px;background:#fdfdfd}
+    textarea:focus{outline:2px solid rgba(42,142,216,.25)}
+    .monospace{font-family:'SFMono-Regular','Consolas','Menlo','Courier New',monospace}
+    .actions{margin-top:18px;display:flex;gap:12px;flex-wrap:wrap}
+    .btn{display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer;font-size:14px;text-decoration:none;color:#0f172a}
+    .btn:hover{background:#f9fafb}
+    .btn.primary{background:var(--brand);color:#fff;border-color:var(--brand)}
+    .btn.secondary{background:#f3f4f6}
+    .btn.danger{background:var(--danger);color:#fff;border-color:var(--danger)}
+    .alert{padding:12px 14px;border-radius:8px;margin-bottom:18px;font-size:14px}
+    .alert.success{background:#dcfce7;color:#14532d}
+    .alert.danger{background:#fee2e2;color:#991b1b}
+    .alert.warning{background:#fef3c7;color:#92400e}
+    .alert.info{background:#e0f2fe;color:#075985}
+    form.inline{display:inline}
+    @media (max-width: 720px){
+      .container{margin:18px auto;padding:22px 16px}
+      textarea{min-height:260px}
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    {% include '_admin_nav.html' %}
+    <h1>{{ cities[city] }} / {{ name }}</h1>
+
+    {% with messages = get_flashed_messages(with_categories=True) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="info">
+      <span>サイズ: {{ (size / 1024)|round(1) }} KB</span>
+      <span>最終更新: {{ mtime.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+      <span class="muted">（{{ (max_edit_bytes / 1024 / 1024)|round(1) }}MB まで編集可能）</span>
+    </div>
+
+    {% if too_large %}
+      <div class="alert warning">ファイルサイズが大きいためこの画面から編集できません。ダウンロードしてオフラインで編集し、アップロードしてください。</div>
+      <div class="actions">
+        <a class="btn secondary" href="{{ url_for('pamphlets_admin.pamphlets_index', city=city) }}">一覧へ戻る</a>
+        <a class="btn" href="{{ url_for('pamphlets_admin.pamphlets_download', city=city, name=name) }}">ダウンロード</a>
+      </div>
+    {% else %}
+      <form method="post" action="{{ url_for('pamphlets_admin.pamphlets_save') }}">
+        <input type="hidden" name="city" value="{{ city }}">
+        <input type="hidden" name="name" value="{{ name }}">
+        <input type="hidden" name="expected_mtime" value="{{ expected_mtime }}">
+        <textarea name="content" rows="28" spellcheck="false" class="monospace">{{ text or '' }}</textarea>
+        <div class="actions">
+          <button type="submit" class="btn primary">保存</button>
+          <a class="btn secondary" href="{{ url_for('pamphlets_admin.pamphlets_index', city=city) }}">一覧へ戻る</a>
+          <a class="btn" href="{{ url_for('pamphlets_admin.pamphlets_download', city=city, name=name) }}">ダウンロード</a>
+        </div>
+      </form>
+    {% endif %}
+  </div>
+</body>
+</html>

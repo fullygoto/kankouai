@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from functools import wraps
 from typing import Callable
 
@@ -10,9 +11,11 @@ from flask import (
     abort,
     current_app,
     flash,
+    jsonify,
     redirect,
     render_template,
     request,
+    send_file,
     session,
     url_for,
 )
@@ -22,6 +25,9 @@ from services import pamphlet_store
 
 
 bp = Blueprint("pamphlets_admin", __name__, url_prefix="/admin")
+
+PREVIEW_MAX_BYTES = 200_000
+MAX_EDIT_BYTES = 2 * 1024 * 1024
 
 
 def _admin_required(func: Callable) -> Callable:
@@ -56,6 +62,131 @@ def pamphlets_index():
         city=city,
         files=files,
     )
+
+
+@bp.get("/pamphlets/view")
+@_admin_required
+def pamphlets_view():
+    city = request.args.get("city", "goto")
+    name = request.args.get("name", "")
+    try:
+        text, size, mtime = pamphlet_store.read_text(
+            city, name, max_bytes=PREVIEW_MAX_BYTES
+        )
+        truncated = PREVIEW_MAX_BYTES is not None and size > PREVIEW_MAX_BYTES
+        return jsonify(
+            {
+                "name": name,
+                "size": size,
+                "mtime": mtime,
+                "text": text,
+                "truncated": truncated,
+            }
+        )
+    except Exception as exc:
+        response = jsonify({"error": str(exc)})
+        response.status_code = 400
+        return response
+
+
+@bp.get("/pamphlets/edit")
+@_admin_required
+def pamphlets_edit():
+    city = request.args.get("city", "goto")
+    name = request.args.get("name", "")
+    try:
+        info = pamphlet_store.stat_file(city, name)
+        size = int(info["size"])
+        mtime = float(info["mtime"])
+        too_large = size > MAX_EDIT_BYTES
+        text = None
+        if not too_large:
+            text, _size, mtime = pamphlet_store.read_text(city, name)
+    except Exception as exc:
+        flash(f"読み込みに失敗しました: {exc}", "danger")
+        return redirect(url_for("pamphlets_admin.pamphlets_index", city=city))
+
+    return render_template(
+        "admin/pamphlets_edit.html",
+        cities=PAMPHLET_CITIES,
+        city=city,
+        name=name,
+        size=size,
+        mtime=datetime.fromtimestamp(mtime),
+        expected_mtime=mtime,
+        text=text,
+        too_large=too_large,
+        max_edit_bytes=MAX_EDIT_BYTES,
+    )
+
+
+@bp.post("/pamphlets/save")
+@_admin_required
+def pamphlets_save():
+    city = request.form.get("city", "goto")
+    name = request.form.get("name", "")
+    expected_mtime_str = request.form.get("expected_mtime")
+    content = request.form.get("content", "")
+
+    try:
+        expected_mtime = float(expected_mtime_str) if expected_mtime_str else None
+    except (TypeError, ValueError):
+        expected_mtime = None
+
+    if len(content.encode("utf-8")) > MAX_EDIT_BYTES:
+        flash("ファイルが大きすぎます。2MBまで編集できます。", "danger")
+        return redirect(url_for("pamphlets_admin.pamphlets_edit", city=city, name=name))
+
+    try:
+        pamphlet_store.write_text(
+            city,
+            name,
+            content,
+            expected_mtime=expected_mtime,
+        )
+        flash("保存しました。", "success")
+        return redirect(url_for("pamphlets_admin.pamphlets_edit", city=city, name=name))
+    except ValueError:
+        flash("他の変更で競合しました。最新の内容を確認してください。", "warning")
+        try:
+            info = pamphlet_store.stat_file(city, name)
+            size = int(info["size"])
+            mtime = float(info["mtime"])
+            too_large = size > MAX_EDIT_BYTES
+            text = None
+            if not too_large:
+                text, _size, mtime = pamphlet_store.read_text(city, name)
+        except Exception as exc:
+            flash(f"最新の内容取得に失敗しました: {exc}", "danger")
+            return redirect(url_for("pamphlets_admin.pamphlets_index", city=city))
+        return render_template(
+            "admin/pamphlets_edit.html",
+            cities=PAMPHLET_CITIES,
+            city=city,
+            name=name,
+            size=size,
+            mtime=datetime.fromtimestamp(mtime),
+            expected_mtime=mtime,
+            text=text,
+            too_large=too_large,
+            max_edit_bytes=MAX_EDIT_BYTES,
+        )
+    except Exception as exc:
+        flash(f"保存に失敗しました: {exc}", "danger")
+        return redirect(url_for("pamphlets_admin.pamphlets_edit", city=city, name=name))
+
+
+@bp.get("/pamphlets/download")
+@_admin_required
+def pamphlets_download():
+    city = request.args.get("city", "goto")
+    name = request.args.get("name", "")
+    try:
+        path = pamphlet_store.get_file_path(city, name)
+        return send_file(path, as_attachment=True, download_name=name)
+    except Exception as exc:
+        flash(f"ダウンロードに失敗しました: {exc}", "danger")
+        return redirect(url_for("pamphlets_admin.pamphlets_index", city=city))
 
 
 @bp.post("/pamphlets/upload")
