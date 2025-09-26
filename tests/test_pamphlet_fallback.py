@@ -54,7 +54,7 @@ def test_city_name_query_returns_summary(pamphlet_base):
     assert "要約" in res.message
     assert "詳細" in res.message
     assert any("五島市/history_guide_2025" in src for src in res.sources)
-    assert "### 出典" in res.message
+    assert res.sources_md.startswith("### 出典")
     assert res.more_available is False
 
 
@@ -100,7 +100,7 @@ def test_unknown_city_triggers_quick_reply_then_selection(pamphlet_base):
     assert answer.kind == "answer"
     assert answer.city == "goto"
     assert any("五島市/history_guide_2025" in src for src in answer.sources)
-    assert "### 出典" in answer.message
+    assert answer.sources_md.startswith("### 出典")
 
     more = pamphlet_flow.build_response(
         "もっと詳しく",

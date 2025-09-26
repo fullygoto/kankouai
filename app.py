@@ -14,6 +14,7 @@ import hmac, hashlib, base64
 import zipfile
 import io
 import tempfile
+import subprocess
 # 追加が必要な標準ライブラリ
 import shutil      # _has_free_space で disk_usage を使用
 import tarfile     # _stream_backup_targz で使用
@@ -9938,6 +9939,73 @@ def healthz():
         "Cache-Control": "no-store",
     })
 
+def _git_metadata_for_readyz() -> dict:
+    info: dict[str, object] = {}
+
+    commit_env = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT")
+    branch_env = os.getenv("RENDER_GIT_BRANCH") or os.getenv("GIT_BRANCH")
+    if commit_env:
+        info["commit"] = commit_env
+    if branch_env:
+        info["branch"] = branch_env
+
+    env_name = app.config.get("ENV_NAME")
+    if env_name:
+        info["env"] = env_name
+
+    try:
+        here = Path(__file__).resolve().parent
+        repo_root = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=here,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+
+        if "commit" not in info:
+            commit = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo_root,
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+            if commit:
+                info["commit"] = commit
+
+        if "branch" not in info:
+            branch = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=repo_root,
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+            if branch:
+                info["branch"] = branch
+
+        dirty = subprocess.check_output(
+            ["git", "status", "--short"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        info["dirty"] = bool(dirty)
+    except Exception:
+        pass
+
+    if "dirty" not in info:
+        info["dirty"] = None
+
+    return info
+
+
 @app.route("/readyz", methods=["GET"])
 def readyz():
     problems = []
@@ -9977,10 +10045,19 @@ def readyz():
         problems.append(f"media:{ex}")
 
     pamphlet_state = pamphlet_search.overall_state()
+    pamphlet_status = pamphlet_search.status()
     if pamphlet_state == "error":
         problems.append("pamphlet_index:error")
 
-    body = {"status": "ready", "pamphlet_index": pamphlet_state}
+    body = {
+        "status": "ready",
+        "pamphlet_index": pamphlet_state,
+        "pamphlet_index_status": pamphlet_status,
+    }
+
+    build_info = _git_metadata_for_readyz()
+    if build_info:
+        body["build"] = build_info
 
     if problems:
         body["status"] = "degraded"
