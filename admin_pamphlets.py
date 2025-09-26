@@ -21,7 +21,7 @@ from flask import (
 )
 
 from config import PAMPHLET_CITIES
-from services import pamphlet_store
+from services import pamphlet_rag, pamphlet_store
 
 
 bp = Blueprint("pamphlets_admin", __name__, url_prefix="/admin")
@@ -240,3 +240,37 @@ def pamphlets_reindex():
     except Exception as exc:
         flash(f"再インデックス呼出し失敗: {exc}", "danger")
     return redirect(url_for("pamphlets_admin.pamphlets_index", city=city))
+@bp.get("/pamphlets/debug")
+@_admin_required
+def pamphlets_debug():
+    city = request.args.get("city", "goto")
+    question = request.args.get("q", "").strip()
+    if city not in PAMPHLET_CITIES:
+        response = jsonify({"error": "unknown city"})
+        response.status_code = 400
+        return response
+    try:
+        result = pamphlet_rag.answer_from_pamphlets(question, city)
+    except Exception as exc:  # pragma: no cover - defensive
+        response = jsonify({"error": str(exc)})
+        response.status_code = 500
+        return response
+
+    debug = result.get("debug", {}) or {}
+    payload = {
+        "question": question,
+        "city": city,
+        "city_label": PAMPHLET_CITIES.get(city, city),
+        "queries": debug.get("queries"),
+        "bm25": debug.get("bm25"),
+        "embedding": debug.get("embedding"),
+        "combined": debug.get("combined"),
+        "selection": debug.get("selection"),
+        "confidence": result.get("confidence"),
+        "prompt": debug.get("prompt"),
+        "answer": result.get("answer"),
+        "sources": result.get("sources"),
+    }
+    return jsonify(payload)
+
+
