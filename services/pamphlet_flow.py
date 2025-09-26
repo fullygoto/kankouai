@@ -1,14 +1,17 @@
 """Session-aware pamphlet fallback flow logic."""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from . import pamphlet_rag, pamphlet_search, pamphlet_session
 from .message_builder import build_pamphlet_message, parse_pamphlet_answer
 from .sources_fmt import format_sources_md, normalize_sources
 from .pamphlet_search import SearchResult, detect_city_from_text
+
+_ENABLE_EVIDENCE_TOGGLE = os.getenv("ENABLE_EVIDENCE_TOGGLE", "true").lower() == "true"
 
 
 @dataclass
@@ -20,6 +23,9 @@ class PamphletResponse:
     sources_md: str = ""
     quick_choices: List[Dict[str, str]] = field(default_factory=list)
     more_available: bool = False
+    citations: List[Dict[str, Any]] = field(default_factory=list)
+    message_with_labels: str = ""
+    show_evidence_toggle: bool = _ENABLE_EVIDENCE_TOGGLE
 
 
 def build_response(
@@ -89,12 +95,14 @@ def build_response(
 
     answer = pamphlet_rag.answer_from_pamphlets(stripped, city_key)
     raw_message = answer.get("answer", "").strip()
-    sources_info = answer.get("sources", []) or []
-    normalized_sources = normalize_sources(sources_info)
+    labelled_message = answer.get("answer_with_labels", "").strip()
+    citations_info = answer.get("citations", []) or []
+    sources_payload = citations_info or (answer.get("sources", []) or [])
+    normalized_sources = normalize_sources(sources_payload)
     formatted_sources = [f"{city}/{file_}" for city, file_ in normalized_sources]
 
     parsed_answer = parse_pamphlet_answer(raw_message)
-    built = build_pamphlet_message(parsed_answer, sources_info)
+    built = build_pamphlet_message(parsed_answer, sources_payload)
     message = built.text
     sources_md = built.sources_md
 
@@ -110,9 +118,11 @@ def build_response(
             sources=[],
             sources_md="",
             more_available=False,
+            citations=[],
+            message_with_labels=labelled_message,
         )
 
-    footer = sources_md if sources_md else format_sources_md(sources_info)
+    footer = sources_md if sources_md else format_sources_md(sources_payload)
 
     session.set_followup(user_id, query=stripped, city=city_key)
 
@@ -123,4 +133,6 @@ def build_response(
         sources=formatted_sources,
         sources_md=footer,
         more_available=False,
+        citations=citations_info,
+        message_with_labels=labelled_message,
     )
