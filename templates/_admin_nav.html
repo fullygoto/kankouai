@@ -1,5 +1,6 @@
 {% set here = request.endpoint %}
-{% set is_pamphlets = here and here.startswith('pamphlets_admin.') %}
+{% set path = request.path or '' %}
+{% set is_pamphlets = (path.startswith('/admin/pamphlets') if path else False) or (here and here.startswith('pamphlets_admin.')) %}
 <div class="nav" style="float:right;">
   <a href="{{ url_for('admin_logs') }}"             style="{{ 'font-weight:bold' if here=='admin_logs' else '' }}">[質問・回答ログ]</a>
   <a href="{{ url_for('admin_unhit_questions') }}"  style="{{ 'font-weight:bold' if here=='admin_unhit_questions' else '' }}">[未ヒット質問一覧]</a>
