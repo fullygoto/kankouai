@@ -77,6 +77,8 @@ from services import (
     pamphlet_summarize,
     input_normalizer,
     dupe_guard,
+    line_handlers,
+    state as user_state,
 )
 from admin_pamphlets import bp as admin_pamphlets_bp
 
@@ -515,6 +517,11 @@ def _pause_set_user(on: bool):
                         os.remove(p)
                 except Exception:
                     pass
+            if line_handlers.CONTROL_CMD_ENABLED:
+                try:
+                    user_state.resume_all()
+                except Exception:
+                    app.logger.exception("resume_all failed")
     except Exception:
         app.logger.exception("pause_set_user failed")
 
@@ -3233,6 +3240,44 @@ def handle_message(event):
     except Exception:
         line_user_id = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
+    uid = line_user_id or "anon"
+    now_epoch = int(time.time())
+
+    try:
+        global_pause = _pause_state()
+    except Exception:
+        try:
+            paused = bool(_is_global_paused())
+        except Exception:
+            paused = False
+        global_pause = (paused, "admin" if paused else None)
+
+    try:
+        cmd_result = line_handlers.process_control_command(
+            raw_text,
+            user_id=uid,
+            event=event,
+            reply_func=_safe_reply_or_push,
+            logger=app.logger,
+            global_pause=global_pause,
+            now=now_epoch,
+        )
+    except Exception:
+        cmd_result = None
+        app.logger.exception("control command handling failed")
+
+    if cmd_result:
+        if cmd_result.get("action") == "resume":
+            try:
+                _clear_pause_notice_cache(uid)
+            except Exception:
+                pass
+        return
+
+    if line_handlers.control_is_paused(uid, now_epoch):
+        app.logger.debug("skip message for paused user: %s", uid)
+        return
+
     reason = dupe_guard.evaluate_utterance(line_user_id or "anon", text)
     if reason:
         app.logger.debug("[dupe_guard] suppress input %s: %s", line_user_id, reason)
@@ -5288,6 +5333,39 @@ def _line_mute_gate(event, text: str) -> bool:
         tid = _line_target_id(event)
     except Exception:
         tid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+    if line_handlers.CONTROL_CMD_ENABLED:
+        now_epoch = int(time.time())
+
+        if paused and by == "admin":
+            if t:
+                try:
+                    _reply_quick_no_dedupe(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
+                except Exception:
+                    pass
+            return True
+
+        if tid and line_handlers.control_is_paused(tid, now_epoch):
+            return True
+
+        if paused and by == "user":
+            try:
+                _reply_quick_no_dedupe(event, "（現在、応答を一時停止しています。「解除」と送ると再開します）")
+            except Exception:
+                pass
+            return True
+
+        try:
+            if "_is_muted_target" in globals() and _is_muted_target(tid):
+                try:
+                    _reply_quick_no_dedupe(event, "（この会話はミュート中です。「解除」と送ると再開します）")
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+
+        return False
 
     # 1) 管理者停止中は常にミュート（ユーザーの再開も無効・案内のみ）
     if paused and by == "admin":
