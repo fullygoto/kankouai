@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional
 
-from . import pamphlet_search
+from . import pamphlet_rag, pamphlet_search
 from .pamphlet_search import SearchResult, city_label, detect_city_from_text
 
 
@@ -101,41 +101,37 @@ def build_response(
 
     city_cache[user_id] = (city_key, now)
 
-    results = list(searcher(city_key, stripped, topk))
-    if not results:
-        return PamphletResponse(
-            kind="error",
-            message=f"該当資料が見つかりませんでした。{city_label(city_key)}とキーワードを変えて再度お試しください。",
-            city=city_key,
-        )
-
-    summary = summarizer(stripped, results, detailed=detailed)
-    if not summary:
-        return PamphletResponse(
-            kind="error",
-            message=f"該当資料が見つかりませんでした。{city_label(city_key)}とキーワードを変えて再度お試しください。",
-            city=city_key,
-        )
-
+    answer = pamphlet_rag.answer_from_pamphlets(stripped, city_key)
+    message = answer.get("answer", "").strip()
+    sources_info = answer.get("sources", []) or []
     sources = []
-    seen = set()
-    for item in results:
-        name = item.chunk.source_file
-        if name not in seen:
-            seen.add(name)
-            sources.append(name)
-    followup[user_id] = {"query": stripped, "city": city_key, "ts": now}
+    for src in sources_info:
+        file_name = src.get("file", "")
+        line_from = src.get("line_from")
+        line_to = src.get("line_to")
+        if file_name and line_from is not None and line_to is not None:
+            sources.append(f"{file_name} (L{line_from}-L{line_to})")
+        elif file_name:
+            sources.append(file_name)
 
-    body = summary.strip()
-    source_note = "、".join(sources[:3])
-    message = body
-    if source_note:
-        message = f"{body}\n\n出典（{source_note}）"
+    if not message:
+        message = "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。"
+
+    if not sources_info:
+        return PamphletResponse(
+            kind="error",
+            message=message,
+            city=city_key,
+            sources=[],
+            more_available=False,
+        )
+
+    followup[user_id] = {"query": stripped, "city": city_key, "ts": now}
 
     return PamphletResponse(
         kind="answer",
         message=message,
         city=city_key,
         sources=sources,
-        more_available=not detailed,
+        more_available=False,
     )

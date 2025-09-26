@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
 import math
 import os
@@ -44,12 +45,24 @@ class PamphletChunk:
     source_file: str
     chunk_index: int
     text: str
+    char_start: int
+    char_end: int
+    line_start: int
+    line_end: int
 
 
 @dataclass
 class SearchResult:
     chunk: PamphletChunk
     score: float
+
+
+@dataclass
+class CityIndexSnapshot:
+    city: str
+    chunks: List[PamphletChunk]
+    last_mtime: Optional[float]
+    last_files: List[str]
 
 
 class _PamphletIndex:
@@ -85,13 +98,18 @@ class _PamphletIndex:
                     logger.warning("[pamphlet] failed to read %s: %s", file_path, exc)
                     continue
                 chunks = _split_text(raw, self.chunk_size, self.overlap)
-                for idx, chunk_text in enumerate(chunks):
+                for idx, segment in enumerate(chunks):
+                    chunk_text, start_pos, end_pos, line_start, line_end = segment
                     chunk_meta.append(
                         PamphletChunk(
                             city=self.city,
                             source_file=file_path.name,
                             chunk_index=idx,
                             text=chunk_text,
+                            char_start=start_pos,
+                            char_end=end_pos,
+                            line_start=line_start,
+                            line_end=line_end,
                         )
                     )
                     texts.append(chunk_text)
@@ -183,12 +201,21 @@ class _PamphletIndex:
             scored.sort(key=lambda r: r.score, reverse=True)
             return scored[:topk]
 
+    def snapshot(self) -> CityIndexSnapshot:
+        with self._lock:
+            return CityIndexSnapshot(
+                city=self.city,
+                chunks=list(self.chunks),
+                last_mtime=self.last_mtime,
+                last_files=list(self.last_files),
+            )
+
 
 class PamphletIndexManager:
     def __init__(self) -> None:
         self.base_dir = Path(os.getenv("PAMPHLET_BASE_DIR", "/var/data/pamphlets"))
-        self.chunk_size = int(os.getenv("PAMPHLET_CHUNK_SIZE", "1500"))
-        self.chunk_overlap = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "200"))
+        self.chunk_size = int(os.getenv("PAMPHLET_CHUNK_SIZE", "700"))
+        self.chunk_overlap = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "150"))
         self._indexes: Dict[str, _PamphletIndex] = {}
         self._lock = threading.RLock()
         self._status: Dict[str, Dict[str, Optional[str]]] = {}
@@ -270,6 +297,15 @@ class PamphletIndexManager:
             return []
         return index.search(query, topk)
 
+    def snapshot(self, city: str) -> CityIndexSnapshot:
+        if city not in CITY_KEYS:
+            raise KeyError(city)
+        self.load_index(city)
+        index = self._indexes.get(city)
+        if not index:
+            return CityIndexSnapshot(city=city, chunks=[], last_mtime=None, last_files=[])
+        return index.snapshot()
+
     def reindex_all(self) -> Dict[str, Dict[str, Optional[str]]]:
         results: Dict[str, Dict[str, Optional[str]]] = {}
         for city in CITY_KEYS:
@@ -325,6 +361,10 @@ def search(city: str, query: str, topk: int) -> List[SearchResult]:
     return _manager.search(city, query, topk)
 
 
+def snapshot(city: str) -> CityIndexSnapshot:
+    return _manager.snapshot(city)
+
+
 def reindex_all() -> Dict[str, Dict[str, Optional[str]]]:
     return _manager.reindex_all()
 
@@ -355,23 +395,68 @@ def city_choices() -> List[Dict[str, str]]:
     return [{"label": CITY_LABELS[c], "text": CITY_LABELS[c]} for c in CITY_KEYS]
 
 
-def _split_text(text: str, chunk_size: int, overlap: int) -> List[str]:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+def _split_text(text: str, chunk_size: int, overlap: int) -> List[tuple[str, int, int, int, int]]:
+    """Split text into trimmed segments with positional metadata."""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    line_starts = _build_line_starts(normalized)
+
     if chunk_size <= 0:
-        return [text]
+        stripped = normalized.strip()
+        if not stripped:
+            return []
+        start_offset = normalized.find(stripped)
+        end_offset = start_offset + len(stripped)
+        return [
+            (
+                stripped,
+                start_offset,
+                end_offset,
+                _line_number(line_starts, start_offset),
+                _line_number(line_starts, end_offset),
+            )
+        ]
+
     step = max(1, chunk_size - max(0, overlap))
-    chunks: List[str] = []
+    segments: List[tuple[str, int, int, int, int]] = []
     start = 0
-    length = len(text)
+    length = len(normalized)
     while start < length:
         end = min(length, start + chunk_size)
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
+        window = normalized[start:end]
+        stripped = window.strip()
+        if stripped:
+            local_offset = window.find(stripped)
+            abs_start = start + max(0, local_offset)
+            abs_end = abs_start + len(stripped)
+            segments.append(
+                (
+                    stripped,
+                    abs_start,
+                    abs_end,
+                    _line_number(line_starts, abs_start),
+                    _line_number(line_starts, abs_end),
+                )
+            )
         if end >= length:
             break
         start += step
-    return chunks if chunks else [text]
+    return segments
+
+
+def _build_line_starts(text: str) -> List[int]:
+    starts = [0]
+    for idx, char in enumerate(text):
+        if char == "\n":
+            starts.append(idx + 1)
+    starts.append(len(text) + 1)
+    return starts
+
+
+def _line_number(line_starts: List[int], offset: int) -> int:
+    """Return 1-indexed line number for a character offset."""
+
+    return bisect.bisect_right(line_starts, offset)
 
 
 def _tokenize(text: str) -> List[str]:

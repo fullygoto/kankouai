@@ -67,7 +67,7 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
 from watermark_ext import media_path_for
-from services import pamphlet_flow, pamphlet_search, pamphlet_summarize
+from services import pamphlet_flow, pamphlet_rag, pamphlet_search, pamphlet_summarize
 from admin_pamphlets import bp as admin_pamphlets_bp
 
 # Pillowのバージョン差を吸収したリサンプリング定数
@@ -2791,6 +2791,7 @@ ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1"
 # OpenAI v1 クライアント
 client = OpenAI(timeout=15)
 pamphlet_summarize.configure(client)
+pamphlet_rag.configure(client)
 
 
 # --- OpenAIラッパ（モデル切替を一元管理：正規版） ---

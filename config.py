@@ -26,10 +26,14 @@ class BaseConfig:
     ENV_NAME = os.getenv("APP_ENV", "development")
     # Pamphlet search
     PAMPHLET_BASE_DIR = PAMPHLET_BASE_DIR
-    PAMPHLET_TOPK = int(os.getenv("PAMPHLET_TOPK", "3"))
-    PAMPHLET_CHUNK_SIZE = int(os.getenv("PAMPHLET_CHUNK_SIZE", "1500"))
-    PAMPHLET_CHUNK_OVERLAP = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "200"))
+    PAMPHLET_TOPK = int(os.getenv("PAMPHLET_TOPK", "12"))
+    PAMPHLET_CHUNK_SIZE = int(os.getenv("PAMPHLET_CHUNK_SIZE", "700"))
+    PAMPHLET_CHUNK_OVERLAP = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "150"))
     PAMPHLET_SESSION_TTL = int(os.getenv("PAMPHLET_SESSION_TTL", str(30 * 60)))
+    PAMPHLET_MMR_LAMBDA = float(os.getenv("PAMPHLET_MMR_LAMBDA", "0.4"))
+    PAMPHLET_MIN_CONFIDENCE = float(os.getenv("PAMPHLET_MIN_CONFIDENCE", "0.42"))
+    GEN_MODEL = os.getenv("GEN_MODEL", "gpt-4o-mini")
+    REWRITE_MODEL = os.getenv("REWRITE_MODEL", "gpt-4o-mini")
 
 class DevelopmentConfig(BaseConfig):
     DEBUG = True

@@ -1,6 +1,3 @@
-import os
-from typing import Iterable
-
 import pytest
 
 from services import pamphlet_flow, pamphlet_search
@@ -41,15 +38,6 @@ def _search_wrapper(city: str, query: str, topk: int):
 
 
 def test_city_name_query_returns_summary(pamphlet_base):
-    calls = {}
-
-    def fake_summarizer(query: str, docs: Iterable, detailed: bool = False) -> str:
-        docs = list(docs)
-        calls["docs"] = docs
-        calls["detailed"] = detailed
-        names = ", ".join(d.chunk.source_file for d in docs)
-        return f"{query}のポイント: {names}"
-
     session = {}
     res = pamphlet_flow.build_response(
         "五島市の歴史を教えて",
@@ -58,23 +46,19 @@ def test_city_name_query_returns_summary(pamphlet_base):
         topk=3,
         ttl=1800,
         searcher=_search_wrapper,
-        summarizer=fake_summarizer,
+        summarizer=lambda *args, **kwargs: "",
     )
 
     assert res.kind == "answer"
     assert res.city == "goto"
-    assert "出典（" in res.message
-    assert "history_guide_2025.txt" in res.message
-    assert res.more_available is True
-    assert len(calls["docs"]) <= 3
-    assert calls["detailed"] is False
+    assert "要約" in res.message
+    assert "詳細" in res.message
+    assert any("history_guide_2025.txt" in src for src in res.sources)
+    assert res.more_available is False
 
 
 def test_unknown_city_triggers_quick_reply_then_selection(pamphlet_base):
     session = {}
-
-    def fake_summary(query: str, docs: Iterable, detailed: bool = False) -> str:
-        return "サマリー"
 
     first = pamphlet_flow.build_response(
         "おすすめの観光情報は？",
@@ -83,7 +67,7 @@ def test_unknown_city_triggers_quick_reply_then_selection(pamphlet_base):
         topk=3,
         ttl=1800,
         searcher=_search_wrapper,
-        summarizer=fake_summary,
+        summarizer=lambda *args, **kwargs: "",
     )
 
     assert first.kind == "ask_city"
@@ -97,18 +81,12 @@ def test_unknown_city_triggers_quick_reply_then_selection(pamphlet_base):
         topk=3,
         ttl=1800,
         searcher=_search_wrapper,
-        summarizer=fake_summary,
+        summarizer=lambda *args, **kwargs: "",
     )
     assert second.kind == "ask_city"
     assert second.quick_choices == []
 
     # 市町が選択されたら pending クエリで検索される
-    outputs = []
-
-    def detailed_summary(query: str, docs: Iterable, detailed: bool = False) -> str:
-        outputs.append(detailed)
-        return "詳細サマリー" if detailed else "通常サマリー"
-
     answer = pamphlet_flow.build_response(
         "五島市",
         user_id="u2",
@@ -116,12 +94,11 @@ def test_unknown_city_triggers_quick_reply_then_selection(pamphlet_base):
         topk=2,
         ttl=1800,
         searcher=_search_wrapper,
-        summarizer=detailed_summary,
+        summarizer=lambda *args, **kwargs: "",
     )
     assert answer.kind == "answer"
     assert answer.city == "goto"
-    assert "出典（" in answer.message
-    assert outputs[-1] is False
+    assert any("history_guide_2025.txt" in src for src in answer.sources)
 
     more = pamphlet_flow.build_response(
         "もっと詳しく",
@@ -130,18 +107,14 @@ def test_unknown_city_triggers_quick_reply_then_selection(pamphlet_base):
         topk=2,
         ttl=1800,
         searcher=_search_wrapper,
-        summarizer=detailed_summary,
+        summarizer=lambda *args, **kwargs: "",
     )
     assert more.kind == "answer"
     assert more.more_available is False
-    assert outputs[-1] is True
 
 
 def test_error_when_no_documents_returns_message(pamphlet_base):
     session = {}
-
-    def fail_summary(*args, **kwargs):  # pragma: no cover - should not be called
-        raise AssertionError("summary should not be called when no documents")
 
     res = pamphlet_flow.build_response(
         "宇久町の見どころは？",
@@ -150,7 +123,7 @@ def test_error_when_no_documents_returns_message(pamphlet_base):
         topk=3,
         ttl=1800,
         searcher=_search_wrapper,
-        summarizer=fail_summary,
+        summarizer=lambda *args, **kwargs: "",
     )
     assert res.kind == "error"
-    assert "宇久町" in res.message
+    assert "資料に該当する記述が見当たりません" in res.message
