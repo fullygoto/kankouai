@@ -36,6 +36,7 @@ from flask import (
     jsonify, send_file, abort, send_from_directory, render_template_string, Response,
     current_app as _flask_current_app,  # ← これを追加
 )
+from flask import current_app
 
 
 # --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
@@ -451,8 +452,8 @@ def send_viewpoints_map(event):
         app.logger.info("[viewpoints] url=%s thumb=%s", viewpoints_map_url(), VIEWPOINTS_THUMB)
         flex = _flex_viewpoints_map()
         if flex:
-            line_bot_api.reply_message(
-                event.reply_token,
+            _safe_reply_or_push(
+                event,
                 FlexSendMessage(alt_text="展望所マップ", contents=flex)
             )
             return
@@ -2949,7 +2950,7 @@ if _line_enabled():
                     for choice in result.quick_choices
                 ]
                 msg.quick_reply = QuickReply(items=items)
-            line_bot_api.reply_message(event.reply_token, [msg])
+            _safe_reply_or_push(event, [msg])
             return True
 
         if result.kind == "answer":
@@ -2965,7 +2966,7 @@ if _line_enabled():
                 if quick_reply and idx == len(parts) - 1:
                     tm.quick_reply = quick_reply
                 messages.append(tm)
-            line_bot_api.reply_message(event.reply_token, messages)
+            _safe_reply_or_push(event, messages)
             try:
                 extra = {"kind": "pamphlet"}
                 if result.city:
@@ -3145,7 +3146,7 @@ if _line_enabled() and handler:
 
             flex = _nearby_flex(items)
             if flex:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+                _safe_reply_or_push(event, FlexSendMessage(alt_text="近くの候補", contents=flex))
             else:
                 _reply_or_push(event, "\n".join(
                     [f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i, d in enumerate(items)]
@@ -3172,7 +3173,7 @@ if _line_enabled() and handler:
             if not last:
                 # まずは位置情報をもらう
                 try:
-                    line_bot_api.reply_message(event.reply_token, _ask_location())
+                    _safe_reply_or_push(event, _ask_location())
                 except Exception:
                     _reply_or_push(event, "現在地を取得できませんでした。位置情報を送ってください。")
                 return True
@@ -3186,7 +3187,7 @@ if _line_enabled() and handler:
 
             flex = _nearby_flex(items)
             if flex:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+                _safe_reply_or_push(event, FlexSendMessage(alt_text="近くの候補", contents=flex))
             else:
                 _reply_or_push(event, "\n".join(
                     [f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i, d in enumerate(items)]
@@ -3240,8 +3241,8 @@ def handle_message(event):
                 _reply_or_push(event, f"透かしモードを「{label}」に切り替えました。")
             except Exception:
                 # 念のため直接replyもフォールバック
-                line_bot_api.reply_message(
-                    event.reply_token,
+                _safe_reply_or_push(
+                    event,
                     TextSendMessage(text=f"透かしモードを「{label}」に切り替えました。")
                 )
             try:
@@ -3286,7 +3287,7 @@ def handle_message(event):
             msgs.append(TextSendMessage(text=series_text))
 
             # 1回の reply でまとめて送信 → 終了
-            line_bot_api.reply_message(event.reply_token, msgs[:5])
+            _safe_reply_or_push(event, msgs[:5])
             return
     except Exception:
         app.logger.exception("[map series] handler failed")
@@ -3310,16 +3311,17 @@ def handle_message(event):
                 _LAST["mode"][uid2] = mode
             # 位置情報のお願いを reply、失敗時は push でフォールバック（※ force_push は使わない）
             try:
-                line_bot_api.reply_message(
-                    event.reply_token,
+                _safe_reply_or_push(
+                    event,
                     _ask_location("現在地から近い順で探します。位置情報を送ってください。")
                 )
             except Exception:
                 try:
-                    line_bot_api.push_message(
-                        uid2,
-                        TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。")
-                    )
+                    if line_bot_api and uid2:
+                        line_bot_api.push_message(
+                            uid2,
+                            TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。")
+                        )
                 except Exception:
                     pass
             return
@@ -3523,7 +3525,7 @@ def handle_message(event):
         for p in _split_for_line(ans):
             msgs.append(TextSendMessage(text=p))
 
-        line_bot_api.reply_message(event.reply_token, msgs)
+        _safe_reply_or_push(event, msgs)
 
         joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
         save_qa_log(text, joined, source="line", hit_db=hit)
@@ -3583,7 +3585,7 @@ def on_follow(event):
     except Exception:
         # フォールバック（直接SDKで返信）
         try:
-            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=greet)])
+            _safe_reply_or_push(event, [TextSendMessage(text=greet)])
         except Exception as e:
             app.logger.error(f"[follow] reply failed: {e}")
 
@@ -3627,8 +3629,8 @@ def on_location(event):
         if not rows:
             # 5) 結果なし：reply → 失敗時は push
             try:
-                line_bot_api.reply_message(
-                    event.reply_token,
+                _safe_reply_or_push(
+                    event,
                     TextSendMessage(text="近くの候補が見つかりませんでした（半径を広げる/別のキーワードをお試しください）。")
                 )
             except Exception:
@@ -3642,8 +3644,8 @@ def on_location(event):
         # 6) Flex返信（失敗時はテキストにフォールバック）
         flex = _nearby_flex(rows)
         try:
-            line_bot_api.reply_message(
-                event.reply_token,
+            _safe_reply_or_push(
+                event,
                 FlexSendMessage(alt_text="近くのスポット", contents=flex)
             )
         except Exception:
@@ -3745,21 +3747,155 @@ def _reply_quick_no_dedupe(event, text: str):
     """重複抑止に引っかけず、とにかく1通返す（reply優先・失敗時push）。"""
     if not text:
         return
+    message = TextSendMessage(text=text)
     try:
-        if getattr(event, "reply_token", None):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
-        else:
-            tid = _line_target_id(event)
-            if tid:
-                line_bot_api.push_message(tid, TextSendMessage(text=text))
-    except Exception:
-        # 片方で失敗した時の保険
+        _safe_reply_or_push(event, message)
+    except LineBotApiError as e:
+        logger = _line_logger()
+        logger.warning("LINE quick reply failed (%s); fallback push", e)
         try:
-            tid = _line_target_id(event)
-            if tid:
-                line_bot_api.push_message(tid, TextSendMessage(text=text))
+            to_id = _to_id_from_source(getattr(event, "source", None)) or _line_target_id(event)
+            if to_id and line_bot_api:
+                line_bot_api.push_message(to_id, [message])
         except Exception:
-            pass
+            logger.exception("LINE quick reply fallback push failed")
+    except Exception:
+        _line_logger().exception("LINE quick reply unexpected error")
+
+
+def _line_logger():
+    try:
+        return current_app.logger
+    except Exception:
+        try:
+            return app.logger
+        except Exception:
+            return logging.getLogger(__name__)
+
+
+def _to_id_from_source(source):
+    if not source:
+        return None
+    return getattr(source, "user_id", None) or \
+           getattr(source, "group_id", None) or \
+           getattr(source, "room_id", None)
+
+
+def _is_dummy_reply_token(token: str | None) -> bool:
+    return bool(token) and str(token).startswith("000000000000000000000000")
+
+
+_reply_token_cache: dict[str, float] = {}
+
+
+def _mark_and_check_token(token: str) -> bool:
+    now = time.time()
+    for k, ts in list(_reply_token_cache.items()):
+        if now - ts > 120:
+            _reply_token_cache.pop(k, None)
+    if token in _reply_token_cache:
+        return False
+    _reply_token_cache[token] = now
+    return True
+
+
+def _event_elapsed_seconds(event) -> float | None:
+    ts = getattr(event, "timestamp", None)
+    if ts is None:
+        return None
+    try:
+        ts_val = float(ts)
+    except (TypeError, ValueError):
+        return None
+    if ts_val > 1_000_000_000_000:  # ms
+        ts_val /= 1000.0
+    try:
+        elapsed = time.time() - ts_val
+    except Exception:
+        return None
+    return elapsed if elapsed >= 0 else 0.0
+
+
+def _normalize_line_messages(messages):
+    if messages is None:
+        return []
+    if isinstance(messages, str):
+        return [TextSendMessage(text=messages)]
+    if isinstance(messages, TextSendMessage) or hasattr(messages, "as_json_dict"):
+        return [messages]
+    try:
+        seq = list(messages)
+    except TypeError:
+        if isinstance(messages, str):
+            return [TextSendMessage(text=messages)]
+        if hasattr(messages, "as_json_dict"):
+            return [messages]
+        return [messages]
+    normalized = []
+    for m in seq:
+        if m is None:
+            continue
+        if isinstance(m, str):
+            normalized.append(TextSendMessage(text=m))
+        else:
+            normalized.append(m)
+    return normalized
+
+
+def _safe_reply_or_push(event, messages):
+    logger = _line_logger()
+    norm_messages = _normalize_line_messages(messages)
+    if not norm_messages:
+        return "skipped"
+
+    if not globals().get("line_bot_api"):
+        logger.info("[LINE disabled] would send: %s", [getattr(m, "text", "(non-text)") for m in norm_messages])
+        return "disabled"
+
+    token = getattr(event, "reply_token", None)
+    event_type = getattr(event, "type", "unknown")
+
+    if not token:
+        to_id = _to_id_from_source(getattr(event, "source", None))
+        if to_id:
+            line_bot_api.push_message(to_id, norm_messages)
+            return "pushed"
+        else:
+            logger.error("Reply token missing & no destination (event=%s)", event_type)
+        return "skipped"
+
+    if _is_dummy_reply_token(token):
+        logger.info("Skip reply: dummy token (event=%s)", event_type)
+        return "skipped"
+
+    if not _mark_and_check_token(token):
+        logger.info("Skip: duplicate reply for token=%s (event=%s)", token, event_type)
+        return "skipped"
+
+    try:
+        line_bot_api.reply_message(token, norm_messages)
+        return "replied"
+    except LineBotApiError as e:
+        msg = str(e)
+        if getattr(e, "status_code", None) == 400 and "Invalid reply token" in msg:
+            to_id = _to_id_from_source(getattr(event, "source", None))
+            elapsed = _event_elapsed_seconds(event)
+            if to_id:
+                try:
+                    line_bot_api.push_message(to_id, norm_messages)
+                except Exception:
+                    logger.exception("Reply token invalid but push failed (event=%s to=%s)", event_type, to_id)
+                    return "error"
+                if elapsed is not None:
+                    logger.warning("Reply token invalid → pushed to %s (event=%s elapsed=%.1fs)", to_id, event_type, elapsed)
+                else:
+                    logger.warning("Reply token invalid → pushed to %s (event=%s)", to_id, event_type)
+                return "pushed"
+            else:
+                logger.error("Reply token invalid & no to_id; drop. (event=%s)", event_type)
+            return "skipped"
+        else:
+            raise
 
 # === LINE 返信ユーティリティ（未定義だったので追加） ===
 # === LINE 返信ユーティリティ（安全送信 + エラー計測 + force_push互換） ===
@@ -3800,7 +3936,7 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
     MAX_PER_CALL = 5  # reply/push とも5通/呼び出し
 
     def _do_reply(msgs):
-        line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=m) for m in msgs])
+        _safe_reply_or_push(event, [TextSendMessage(text=m) for m in msgs])
 
     def _do_push(tid, msgs):
         line_bot_api.push_message(tid, [TextSendMessage(text=m) for m in msgs])
@@ -10962,8 +11098,11 @@ def _send_messages(event, messages):
     try:
         rt = getattr(event, "reply_token", None)
         if rt:
-            line_bot_api.reply_message(rt, messages)
-            status = "replied"
+            result = _safe_reply_or_push(event, messages)
+            if result in ("replied", "pushed", "error"):
+                status = result
+            else:
+                status = "noop" if result == "skipped" else "replied"
         else:
             tid = _line_target_id(event)
             if tid:
