@@ -3267,11 +3267,22 @@ def handle_message(event):
         app.logger.exception("control command handling failed")
 
     if cmd_result:
-        if cmd_result.get("action") == "resume":
+        action = cmd_result.get("action")
+        if action == "resume":
             try:
                 _clear_pause_notice_cache(uid)
             except Exception:
                 pass
+            try:
+                _set_muted_target(uid, False, who="control")
+            except Exception:
+                app.logger.exception("failed to clear legacy mute flag for %s", uid)
+        elif action == "pause":
+            try:
+                ttl_hint = cmd_result.get("ttl_sec")
+                _set_muted_target(uid, True, who=f"control:{ttl_hint}" if ttl_hint else "control")
+            except Exception:
+                app.logger.exception("failed to persist legacy mute flag for %s", uid)
         return
 
     if line_handlers.control_is_paused(uid, now_epoch):

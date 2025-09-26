@@ -113,17 +113,25 @@ def process_control_command(
         return {"action": "pause", "paused_until": paused_until, "ttl_sec": ttl_sec}
 
     # resume command
-    current_paused = user_state.is_paused(user_id, now_epoch)
-    user_state.resume(user_id, now=now_epoch)
-    if current_paused:
-        message = "応答を再開しました。"
-    else:
-        message = "現在、応答は稼働中です。"
+    resume_state = user_state.resume(user_id, now=now_epoch)
+    current_paused = bool(resume_state.get("was_paused"))
+    paused_until = resume_state.get("paused_until")
+    if paused_until:
+        logger.warning(
+            "resume command detected non-null paused_until for user %s (value=%s)",
+            user_id,
+            paused_until,
+        )
+    message = "応答を再開しました。" if current_paused else "現在、応答は稼働中です。"
     try:
         reply_func(event, message)
     except Exception:
         logger.exception("control command reply failed (resume)")
-    return {"action": "resume", "changed": current_paused}
+    return {
+        "action": "resume",
+        "changed": current_paused,
+        "state": resume_state,
+    }
 
 
 def control_is_paused(user_id: str, now_epoch: Optional[int] = None) -> bool:
