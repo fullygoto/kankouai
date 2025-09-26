@@ -1,6 +1,14 @@
 # config.py
 import os
 
+PAMPHLET_BASE_DIR = os.getenv("PAMPHLET_BASE_DIR", "/var/data/pamphlets")
+PAMPHLET_CITIES = {
+    "goto": "五島市",
+    "shinkamigoto": "新上五島町",
+    "ojika": "小値賀町",
+    "uku": "宇久町",
+}
+
 class BaseConfig:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
@@ -17,7 +25,7 @@ class BaseConfig:
     # 表示用
     ENV_NAME = os.getenv("APP_ENV", "development")
     # Pamphlet search
-    PAMPHLET_BASE_DIR = os.getenv("PAMPHLET_BASE_DIR", "/var/data/pamphlets")
+    PAMPHLET_BASE_DIR = PAMPHLET_BASE_DIR
     PAMPHLET_TOPK = int(os.getenv("PAMPHLET_TOPK", "3"))
     PAMPHLET_CHUNK_SIZE = int(os.getenv("PAMPHLET_CHUNK_SIZE", "1500"))
     PAMPHLET_CHUNK_OVERLAP = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "200"))

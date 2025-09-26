@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>パンフレットテキスト管理</title>
+  <style>
+    :root{
+      --bg:#f6faf9; --panel:#fff; --muted:#64748b; --line:#e5e7eb; --brand:#2a8ed8;
+      --danger:#dc2626;
+    }
+    *{box-sizing:border-box}
+    body{font-family:'Segoe UI','メイリオ',sans-serif;background:var(--bg);margin:0}
+    .container{background:#fff;padding:26px 28px;margin:38px auto;max-width:1100px;border-radius:17px;box-shadow:0 4px 20px #b7d3e04d}
+    h1{margin:0 0 18px;font-size:22px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;border-bottom:1px solid var(--line);font-size:14px}
+    th{text-align:left;background:#f2f5fb}
+    td.actions{text-align:center}
+    .nav{margin-bottom:18px}
+    .nav a{margin-right:16px;font-size:1em;color:var(--brand);text-decoration:none;font-weight:500}
+    .nav a:hover{text-decoration:underline}
+    form.inline{display:inline}
+    .grid{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+    .panel{flex:1 1 320px}
+    .panel h2{font-size:18px;margin:16px 0 12px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 12px;border-radius:6px;border:1px solid var(--line);background:#fff;cursor:pointer}
+    .btn:hover{background:#f9fafb}
+    .btn.danger{color:#fff;background:var(--danger);border-color:var(--danger)}
+    .form-grid{display:grid;gap:8px}
+    label{font-weight:600;margin-right:8px}
+    select{height:32px;border-radius:6px;border:1px solid var(--line);padding:0 8px}
+    input[type="file"]{font-size:14px}
+    @media (max-width: 720px){
+      .container{margin:18px auto;padding:20px 16px}
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    {% include '_admin_nav.html' %}
+    <h1>パンフレットテキスト管理</h1>
+
+    <form method="get" action="{{ url_for('pamphlets_admin.pamphlets_index') }}" style="margin-bottom:16px;">
+      <label for="pamphlet-city">市町</label>
+      <select id="pamphlet-city" name="city" onchange="this.form.submit()">
+        {% for slug, label in cities.items() %}
+          <option value="{{ slug }}" {% if slug == city %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </form>
+
+    <div class="grid">
+      <section class="panel">
+        <h2>ファイル一覧（{{ cities[city] }}）</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>名前</th>
+              <th style="text-align:right;">サイズ</th>
+              <th>更新日時</th>
+              <th style="text-align:center;">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for f in files %}
+            <tr>
+              <td>{{ f.name }}</td>
+              <td style="text-align:right;">{{ (f.size / 1024)|round(1) }} KB</td>
+              <td>{{ f.mtime.strftime('%Y-%m-%d %H:%M') }}</td>
+              <td class="actions">
+                <form method="post" action="{{ url_for('pamphlets_admin.pamphlets_delete') }}" class="inline">
+                  <input type="hidden" name="city" value="{{ city }}">
+                  <input type="hidden" name="name" value="{{ f.name }}">
+                  <button type="submit" class="btn danger">削除</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="4" style="text-align:center;">ファイルがありません</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel" style="max-width:360px;">
+        <h2>アップロード</h2>
+        <form method="post" enctype="multipart/form-data" action="{{ url_for('pamphlets_admin.pamphlets_upload') }}" class="form-grid">
+          <input type="hidden" name="city" value="{{ city }}">
+          <input type="file" name="file" accept=".txt" required>
+          <button type="submit" class="btn">アップロード</button>
+        </form>
+
+        <h2>再インデックス</h2>
+        <form method="post" action="{{ url_for('pamphlets_admin.pamphlets_reindex') }}">
+          <input type="hidden" name="city" value="{{ city }}">
+          <button type="submit" class="btn">実行</button>
+        </form>
+      </section>
+    </div>
+  </div>
+</body>
+</html>
