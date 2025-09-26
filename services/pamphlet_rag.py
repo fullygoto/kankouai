@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import logging
 import os
 import re
 import time
@@ -16,7 +17,6 @@ except Exception:  # pragma: no cover - allow running without OpenAI
     OpenAI = None  # type: ignore
 
 from . import pamphlet_search
-from .sources_fmt import format_sources_md, normalize_sources
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,10 @@ _MIN_CONFIDENCE = float(os.getenv("PAMPHLET_MIN_CONFIDENCE", "0.42"))
 _GEN_MODEL = os.getenv("GEN_MODEL", "gpt-4o-mini")
 _REWRITE_MODEL = os.getenv("REWRITE_MODEL", "gpt-4o-mini")
 _EMBED_MODEL = os.getenv("PAMPHLET_EMBED_MODEL", "text-embedding-3-small")
+_CITATION_MIN_CHARS = int(os.getenv("CITATION_MIN_CHARS", "80"))
+_CITATION_MIN_SCORE = float(os.getenv("CITATION_MIN_SCORE", "0.15"))
+
+_LABEL_PATTERN = re.compile(r"\[\[(\d+)\]\]")
 
 _CLIENT: Optional[Any] = None
 
@@ -179,33 +183,50 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             "debug": debug_info,
         }
 
-    prompt = _build_prompt(question, city, used_queries, selected)
+    context_text, id_map = build_context_with_labels(selected)
+    prompt = _build_prompt(question, city, used_queries, context_text)
     answer_text = _generate_answer(prompt)
 
-    if not answer_text:
-        answer_text = _fallback_answer(question, city, selected)
+    postprocessed = postprocess_answer(
+        answer_text,
+        id_map,
+        min_chars=_CITATION_MIN_CHARS,
+        min_score=_CITATION_MIN_SCORE,
+    )
 
-    sources = []
-    for candidate in selected[:4]:
-        chunk = candidate.chunk
-        sources.append(
-            {
-                "city": city,
-                "file": chunk.source_file,
-                "line_from": chunk.line_start,
-                "line_to": chunk.line_end,
-                "snippet": chunk.text[:40],
-            }
+    if not postprocessed.answer_with_labels:
+        fallback = _fallback_answer(question, city, selected)
+        postprocessed = postprocess_answer(
+            fallback,
+            id_map,
+            min_chars=_CITATION_MIN_CHARS,
+            min_score=_CITATION_MIN_SCORE,
         )
+
+    sources = [
+        {
+            "city": ref.city,
+            "file": ref.title,
+            "doc_id": ref.doc_id,
+            "chunk_id": ref.chunk_id,
+            "score": ref.score,
+        }
+        for ref in (id_map.get(label) for label in postprocessed.used_labels)
+        if ref
+    ]
 
     debug_payload = dict(debug_info or {})
     debug_payload["queries"] = used_queries
     debug_payload["prompt"] = prompt
+    if postprocessed.invalid_labels:
+        debug_payload["invalid_labels"] = sorted(postprocessed.invalid_labels)
 
     _store_last_success(city, question, selected, used_queries)
 
     return {
-        "answer": answer_text,
+        "answer": postprocessed.answer_without_labels,
+        "answer_with_labels": postprocessed.answer_with_labels,
+        "citations": postprocessed.citations,
         "sources": sources,
         "confidence": confidence,
         "debug": debug_payload,
@@ -219,6 +240,166 @@ class _Candidate:
     bm25_details: List[Dict[str, Any]]
     embed_details: List[Dict[str, Any]]
     vector_index: Optional[int]
+
+
+@dataclass
+class CitationRef:
+    doc_id: str
+    chunk_id: str
+    title: str
+    city: str
+    start_offset: int
+    end_offset: int
+    score: float
+    text: str
+
+
+@dataclass
+class _PostProcessResult:
+    answer_with_labels: str
+    answer_without_labels: str
+    used_labels: List[int]
+    citations: List[Dict[str, Any]]
+    invalid_labels: List[int]
+
+
+def build_context_with_labels(selected: Sequence[_Candidate]) -> Tuple[str, Dict[int, CitationRef]]:
+    parts: List[str] = []
+    id_map: Dict[int, CitationRef] = {}
+
+    for idx, candidate in enumerate(selected, start=1):
+        chunk = candidate.chunk
+        city_label = pamphlet_search.city_label(chunk.city)
+        title = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
+        doc_id = f"{chunk.city}/{chunk.source_file}"
+        chunk_id = f"{chunk.chunk_index}"
+        ref = CitationRef(
+            doc_id=doc_id,
+            chunk_id=chunk_id,
+            title=title,
+            city=city_label,
+            start_offset=chunk.char_start,
+            end_offset=chunk.char_end,
+            score=candidate.combined_score,
+            text=chunk.text,
+        )
+        id_map[idx] = ref
+        snippet = chunk.text.strip()
+        header = f"[[{idx}]] {city_label}/{title} L{chunk.line_start}-{chunk.line_end}"
+        parts.append(f"{header}\n{snippet}")
+
+    return "\n\n".join(parts), id_map
+
+
+def _extract_label_segments(answer_text: str, id_map: Dict[int, CitationRef]) -> Tuple[List[Tuple[int, str]], List[int], str, str]:
+    used: List[Tuple[int, str]] = []
+    invalid: List[int] = []
+    labelled_parts: List[str] = []
+    plain_parts: List[str] = []
+
+    cursor = 0
+    for match in _LABEL_PATTERN.finditer(answer_text or ""):
+        start, end = match.span()
+        text_before = (answer_text or "")[cursor:start]
+        label = int(match.group(1))
+        ref = id_map.get(label)
+        if ref:
+            used.append((label, text_before))
+            labelled_parts.append(text_before + match.group(0))
+            plain_parts.append(text_before)
+        else:
+            invalid.append(label)
+            logger.warning("[pamphlet] drop sentence with undefined label: %s", label)
+        cursor = end
+
+    trailing = (answer_text or "")[cursor:]
+    if trailing:
+        labelled_parts.append(trailing)
+        plain_parts.append(trailing)
+
+    labelled = "".join(labelled_parts).strip()
+    plain = "".join(plain_parts).strip()
+    return used, invalid, labelled, plain
+
+
+def _aggregate_citations(
+    segments: List[Tuple[int, str]],
+    id_map: Dict[int, CitationRef],
+    *,
+    min_chars: int,
+    min_score: float,
+) -> Tuple[List[Dict[str, Any]], List[int]]:
+    usage: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    valid_labels: List[int] = []
+
+    for label, text in segments:
+        ref = id_map.get(label)
+        if not ref:
+            continue
+        doc_key = ref.doc_id
+        if doc_key not in usage:
+            usage[doc_key] = {
+                "doc_id": ref.doc_id,
+                "title": ref.title,
+                "city": ref.city,
+                "labels": set(),
+                "chunk_ids": set(),
+                "char_count": 0,
+                "score": 0.0,
+            }
+            order.append(doc_key)
+        payload = usage[doc_key]
+        payload["labels"].add(label)
+        payload["chunk_ids"].add(ref.chunk_id)
+        payload["char_count"] += len(text.strip())
+        payload["score"] += float(ref.score)
+        valid_labels.append(label)
+
+    citations: List[Dict[str, Any]] = []
+    filtered_labels: List[int] = []
+    for doc_key in order:
+        payload = usage[doc_key]
+        if payload["char_count"] < min_chars and payload["score"] < min_score:
+            continue
+        payload["labels"] = sorted(payload["labels"])
+        payload["chunk_ids"] = sorted(payload["chunk_ids"], key=lambda x: int(x))
+        payload["file"] = payload["title"]
+        citations.append(payload)
+        filtered_labels.extend(payload["labels"])
+
+    return citations, filtered_labels
+
+
+def postprocess_answer(
+    answer_text: str,
+    id_map: Dict[int, CitationRef],
+    *,
+    min_chars: int,
+    min_score: float,
+) -> _PostProcessResult:
+    segments, invalid, labelled, plain = _extract_label_segments(answer_text or "", id_map)
+    citations, allowed_labels = _aggregate_citations(segments, id_map, min_chars=min_chars, min_score=min_score)
+
+    used_labels = allowed_labels
+    if not labelled or not citations:
+        note = "（注：根拠ラベルが見つかりませんでした）"
+        if plain:
+            if not plain.endswith(note):
+                plain = plain + note
+        else:
+            plain = note
+        labelled = ""
+        citations = []
+        used_labels = []
+
+    return _PostProcessResult(
+        answer_with_labels=labelled,
+        answer_without_labels=plain,
+        used_labels=used_labels,
+        citations=citations,
+        invalid_labels=invalid,
+    )
 
 
 def _rewrite_queries(question: str, city: str) -> List[str]:
@@ -517,40 +698,36 @@ def _build_prompt(
     question: str,
     city: str,
     queries: Sequence[str],
-    selected: Sequence[_Candidate],
+    context_text: str,
 ) -> str:
+    city_label = pamphlet_search.city_label(city)
     lines = [
-        "役割: あなたは長崎県五島列島の旅行案内専門スタッフです。",\
-        "利用者の質問に対し、資料の該当箇所だけを根拠に整理します。",
-        "以下の条件を必ず守ってください:",
-        "1. 回答は質問に直接答える200〜350字・2〜4文の要約から始め、年号や数量、固有名詞は可能な限り含めます。",
-        "2. 重要な追加情報は最大2行の箇条書きにまとめ、要約で十分なら詳細は空欄にします。",
-        "3. 補足・備考のセクションは作成しません。",
-        "4. 不明点は「資料に明記なし」とは書かず、判明している情報だけを述べます。",
-        "5. 最後に出典として「市町/ファイル名」の形式で最大4件列挙します。行番号や拡張子は付けません。",
-        "6. 出力は日本語・ですます調で、原文を適度に言い換えます。",
+        "あなたのタスクは、以下のコンテキストだけを根拠に日本語で要約を書くことです。",
+        "ルール:",
+        "- 各文末に必ず [[番号]] を付けてください（例：「〜であった。[[1]]」）。",
+        "- [[番号]] は与えられた参照IDのみ使用し、推測や新規情報は禁止。",
+        "- 出典数を増やすための不要な分割は禁止。簡潔に。",
+        "- 指示されたセクション構成を守り、根拠は与えられた内容のみに限定する。",
+        "",
+        f"質問: {question}",
+        f"対象市町: {city_label}",
+        f"検索クエリ候補: {', '.join(queries)}",
+        "",
+        "【コンテキスト（番号付き）】",
+        context_text,
+        "",
+        "出力フォーマット:",
+        "### 要約",
+        "質問に直接答える2〜4文。各文末に [[番号]] を付ける。",
+        "",
+        "### 詳細",
+        "- 重要な追加事項を箇条書き（最大2行・各行末に [[番号]]）。必要なければ省略。",
+        "",
+        "### 出典",
+        "- 市町/ファイル名（本文で使用した参照のみ）",
     ]
 
-    city_label = pamphlet_search.city_label(city)
-    lines.append("")
-    lines.append(f"質問: {question}")
-    lines.append(f"対象市町: {city_label}")
-    lines.append(f"検索クエリ候補: {', '.join(queries)}")
-    lines.append("利用可能な資料抜粋:")
-
-    for idx, cand in enumerate(selected, start=1):
-        chunk = cand.chunk
-        lines.append(
-            f"[{idx}] {city_label}/{chunk.source_file} L{chunk.line_start}-{chunk.line_end}\n{chunk.text}"
-        )
-
-    lines.append("")
-    lines.append("出力フォーマット:")
-    lines.append("要約\n(質問に答える200〜350字・2〜4文)")
-    lines.append("詳細\n- 箇条書き (必要な場合のみ・最大2行)")
-    lines.append("出典\n- 市町/ファイル名")
-
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line is not None)
 
 
 def _generate_answer(prompt: str) -> str:
@@ -577,16 +754,27 @@ def _generate_answer(prompt: str) -> str:
 
 def _fallback_answer(question: str, city: str, selected: Sequence[_Candidate]) -> str:
     city_label = pamphlet_search.city_label(city)
-    lines = ["要約", "資料に基づく回答を作成できませんでした。以下は関連する抜粋です。", "", "詳細"]
-    for cand in selected:
+    if not selected:
+        return "### 要約\n資料に該当する記述が見当たりませんでした。"
+
+    primary = selected[0].chunk
+    primary_title = re.sub(r"\.(txt|md)$", "", primary.source_file, flags=re.I)
+    summary = f"{city_label}の資料「{primary_title}」に関連情報があります。[[1]]"
+
+    lines = ["### 要約", summary, "", "### 詳細"]
+
+    for idx, cand in enumerate(selected[:2], start=1):
         chunk = cand.chunk
-        snippet = chunk.text.replace("\n", " ")
-        file_name = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
-        lines.append(f"- {city_label}/{file_name}: {snippet[:80]}…")
+        title = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
+        snippet = re.sub(r"\s+", " ", chunk.text).strip()
+        if snippet:
+            lines.append(f"- {title} の抜粋: {snippet[:80]}[[{idx}]]")
+
     lines.append("")
-    lines.append("出典")
-    for cand in selected[:4]:
+    lines.append("### 出典")
+    for idx, cand in enumerate(selected[:4], start=1):
         chunk = cand.chunk
-        file_name = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
-        lines.append(f"- {city_label}/{file_name}")
+        title = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
+        lines.append(f"- {city_label}/{title}[[{idx}]]")
+
     return "\n".join(lines)

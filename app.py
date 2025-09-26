@@ -2985,6 +2985,10 @@ if _line_enabled():
                     extra["city"] = result.city
                 if result.sources:
                     extra["sources"] = result.sources
+                if result.citations:
+                    extra["citations"] = result.citations
+                if result.message_with_labels:
+                    extra["answer_with_labels"] = result.message_with_labels
                 save_qa_log(text, result.message, source="line", hit_db=False, extra=extra)
             except Exception:
                 pass
@@ -3228,6 +3232,11 @@ def handle_message(event):
         line_user_id = _line_target_id(event)
     except Exception:
         line_user_id = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+    reason = dupe_guard.evaluate_utterance(line_user_id or "anon", text)
+    if reason:
+        app.logger.debug("[dupe_guard] suppress input %s: %s", line_user_id, reason)
+        return
 
     if text:
         dedupe_key = f"line:{line_user_id}:{text}"
@@ -3887,10 +3896,16 @@ def emit_response(event, messages, *, force_push: bool = False):
         )
         return "disabled"
 
+    payload = "\n".join(str(getattr(m, "text", "")).strip() for m in norm_messages if getattr(m, "text", ""))
     if isinstance(event, str):
         event = _make_push_event(event)
 
     key = _event_key(event)
+    request_id = getattr(event, "reply_token", None) or key
+    if dupe_guard.should_suppress_response(request_id, payload):
+        logger.info("Skip send (antiflood response): %s", request_id)
+        return "skipped"
+
     if key and not _mark_sent(key):
         logger.info("Skip send (dup): %s", key)
         return "skipped"
@@ -11103,6 +11118,11 @@ def ask():
     question = input_normalizer.normalize_user_query(raw_question)
     user_lat = data.get("lat")   # 追加（任意）
     user_lng = data.get("lng")   # 追加（任意）
+
+    guard_user = session.get("user_id") or request.remote_addr or "anon"
+    guard_reason = dupe_guard.evaluate_utterance(str(guard_user), question)
+    if guard_reason:
+        return jsonify({"answer": "", "hit_db": False, "meta": {"skipped": guard_reason}}), 202
 
     if question:
         dedupe_user = session.get("user_id") or request.remote_addr or "anon"
