@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -39,6 +40,62 @@ class _EmbeddingStore:
 
 
 _EMBED_CACHE: Dict[str, _EmbeddingStore] = {}
+
+
+_SRC_RE = re.compile(
+    r"""
+    ^(?P<city>[^/]+)/              # 五島市
+    (?P<file>[^/]+?)               # 長崎五島観光ガイド.txt
+    (?:\.(txt|md))?                # 拡張子は任意・あれば除去
+    (?:/\d+(?:-\d+)?)?$            # /9-11 等の行範囲は捨てる
+    """,
+    re.X,
+)
+
+
+def normalize_sources(sources: Iterable[Any]) -> List[Tuple[str, str]]:
+    """Normalize a sequence of source payloads to ``(city, stem)`` tuples."""
+
+    seen = set()
+    out: List[Tuple[str, str]] = []
+
+    for raw in sources or []:
+        city: Optional[str] = None
+        file_: Optional[str] = None
+
+        if isinstance(raw, str):
+            match = _SRC_RE.match(raw.strip())
+            if match:
+                city = match.group("city")
+                file_ = match.group("file")
+        elif isinstance(raw, dict):
+            city_val = raw.get("city") or raw.get("City")
+            if city_val:
+                city = pamphlet_search.city_label(str(city_val))
+
+            file_val = raw.get("file") or raw.get("filename") or raw.get("path")
+            if file_val:
+                file_name = os.path.basename(str(file_val))
+                file_ = re.sub(r"\.(txt|md)$", "", file_name, flags=re.I)
+
+        if not city or not file_:
+            continue
+
+        key = (city, file_)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+
+    return out
+
+
+def format_sources_md(sources: Iterable[Any], heading: str = "### 出典") -> str:
+    items = normalize_sources(sources)
+    if not items:
+        return ""
+    body = "\n".join(f"- {city}/{file_}" for city, file_ in items)
+    return f"{heading}\n{body}"
 
 
 def configure(openai_client: Optional[Any]) -> None:

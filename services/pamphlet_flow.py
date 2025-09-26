@@ -104,20 +104,13 @@ def build_response(
     answer = pamphlet_rag.answer_from_pamphlets(stripped, city_key)
     message = answer.get("answer", "").strip()
     sources_info = answer.get("sources", []) or []
-    sources = []
-    for src in sources_info:
-        file_name = src.get("file", "")
-        line_from = src.get("line_from")
-        line_to = src.get("line_to")
-        if file_name and line_from is not None and line_to is not None:
-            sources.append(f"{file_name} (L{line_from}-L{line_to})")
-        elif file_name:
-            sources.append(file_name)
+    normalized_sources = pamphlet_rag.normalize_sources(sources_info)
+    formatted_sources = [f"{city}/{file_}" for city, file_ in normalized_sources]
 
     if not message:
         message = "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。"
 
-    if not sources_info:
+    if not normalized_sources:
         return PamphletResponse(
             kind="error",
             message=message,
@@ -126,12 +119,16 @@ def build_response(
             more_available=False,
         )
 
+    footer = pamphlet_rag.format_sources_md(sources_info)
+    if footer:
+        message = f"{message}\n\n{footer}" if message else footer
+
     followup[user_id] = {"query": stripped, "city": city_key, "ts": now}
 
     return PamphletResponse(
         kind="answer",
         message=message,
         city=city_key,
-        sources=sources,
+        sources=formatted_sources,
         more_available=False,
     )
