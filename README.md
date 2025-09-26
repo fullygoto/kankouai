@@ -57,7 +57,13 @@ pip install -r requirements.txt
 
 パンフレットを追加・更新した際は、管理画面から `GET /admin/pamphlet-reindex` を呼び出すと全市町分のインデックスを再構築します。レスポンスには各市町のビルド結果が含まれます。 `/readyz` でも `pamphlet_index` の状態（`ready`/`empty`/`error` など）を確認できます。
 
-### 5. LINE 応答での挙動
+### 5. 管理画面でのパンフレット運用
+
+- `/admin/pamphlets` から市町ごとのテキストファイルを一覧・削除・アップロードできます（`.txt` のみ）。
+- 「再インデックス」ボタンを押すと `/admin/pamphlet-reindex` が呼び出され、結果がトースト表示されます。
+- Render 運用では Persistent Disk を `/var/data` にマウントし、環境変数 `PAMPHLET_BASE_DIR=/var/data/pamphlets` を指定してください。該当ディレクトリ配下にファイルが作成されます。
+
+### 6. LINE 応答での挙動
 
 - 市町が特定できない質問には一度だけ次のクイックリプライを提示します。
   - 「五島市」「新上五島町」「小値賀町」「宇久町」

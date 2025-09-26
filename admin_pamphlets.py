@@ -8,6 +8,7 @@ from typing import Callable
 from flask import (
     Blueprint,
     abort,
+    current_app,
     flash,
     redirect,
     render_template,
@@ -17,12 +18,10 @@ from flask import (
 )
 
 from config import PAMPHLET_CITIES
-from services import pamphlet_search, pamphlet_store
+from services import pamphlet_store
 
 
 bp = Blueprint("pamphlets_admin", __name__, url_prefix="/admin")
-
-_initialized = False
 
 
 def _admin_required(func: Callable) -> Callable:
@@ -35,12 +34,9 @@ def _admin_required(func: Callable) -> Callable:
     return wrapper
 
 
-@bp.before_app_request
-def _init_dirs() -> None:
-    global _initialized
-    if not _initialized:
-        pamphlet_store.ensure_dirs()
-        _initialized = True
+@bp.record_once
+def _init_dirs(state) -> None:  # type: ignore[override]
+    pamphlet_store.ensure_dirs()
 
 
 @bp.get("/pamphlets")
@@ -93,13 +89,20 @@ def pamphlets_delete():
 def pamphlets_reindex():
     city = request.form.get("city", "goto")
     try:
-        result = pamphlet_search.reindex_all()
-        state = pamphlet_search.overall_state()
+        view = current_app.view_functions.get("admin_pamphlet_reindex")
+        if view is None:
+            raise RuntimeError("再インデックスAPIが見つかりません。")
+        response = view()
+        data = getattr(response, "get_json", lambda **_: None)(silent=True) or {}
+        state = data.get("pamphlet_index")
+        result = data.get("result") or {}
         details = ", ".join(
             f"{PAMPHLET_CITIES.get(key, key)}: {info.get('state', 'unknown')}"
             for key, info in result.items()
         )
-        msg = f"再インデックスを実行しました。（状態: {state}）"
+        msg = "再インデックスを実行しました。"
+        if state:
+            msg += f"（全体状態: {state}）"
         if details:
             msg += f" 詳細: {details}"
         flash(msg, "info")

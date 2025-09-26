@@ -1,4 +1,4 @@
-"""File storage helpers for pamphlet text management."""
+"""Utility helpers for managing pamphlet text files on disk."""
 
 from __future__ import annotations
 
@@ -24,21 +24,32 @@ def ensure_dirs() -> None:
 
 def _city_root(city: str) -> Path:
     if city not in PAMPHLET_CITIES:
-        raise ValueError("unknown city")
+        raise ValueError("対応していない市町です。")
     ensure_dirs()
     return (BASE / city).resolve()
 
 
+def _validate_name(filename: str) -> str:
+    if not filename:
+        raise ValueError("ファイル名が空です。")
+    lowered = filename.lower()
+    if not lowered.endswith(".txt"):
+        raise ValueError("テキスト(.txt)ファイルのみアップロードできます。")
+    for token in ("..", "/", "\\"):
+        if token in filename:
+            raise ValueError("ファイル名に使用できない文字が含まれています。")
+    safe = secure_filename(filename)
+    if not safe:
+        raise ValueError("不正なファイル名です。")
+    return safe
+
+
 def _safe(city: str, name: str) -> Path:
     root = _city_root(city)
-    safe = secure_filename(name or "")
-    if not safe:
-        raise ValueError("invalid filename")
+    safe = _validate_name(name or "")
     path = (root / safe).resolve()
     if not str(path).startswith(str(root)):
-        raise ValueError("bad path")
-    if path.suffix.lower() != ".txt":
-        raise ValueError("txt only")
+        raise ValueError("保存先を特定できません。")
     return path
 
 
@@ -66,11 +77,8 @@ def save_file(city: str, filestorage) -> str:
     """Save a FileStorage object into the city folder."""
 
     if filestorage is None or not getattr(filestorage, "filename", ""):
-        raise ValueError("file required")
-    filename = filestorage.filename or ""
-    if not filename.lower().endswith(".txt"):
-        raise ValueError("txt only")
-    dest = _safe(city, filename)
+        raise ValueError("ファイルが選択されていません。")
+    dest = _safe(city, filestorage.filename or "")
     filestorage.save(dest)
     return str(dest)
 
@@ -79,5 +87,6 @@ def delete_file(city: str, name: str) -> None:
     """Delete a named text file from the city folder."""
 
     path = _safe(city, name)
-    if path.exists() and path.is_file():
-        path.unlink()
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError("ファイルが見つかりませんでした。")
+    path.unlink()
