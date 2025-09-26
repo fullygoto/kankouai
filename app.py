@@ -68,6 +68,7 @@ from PIL import ImageFile, UnidentifiedImageError
 
 from watermark_ext import media_path_for
 from services import pamphlet_flow, pamphlet_search, pamphlet_summarize
+from admin_pamphlets import bp as admin_pamphlets_bp
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
@@ -113,6 +114,8 @@ def safe_url_for(endpoint, **values):
         
 from config import get_config
 app.config.from_object(get_config())
+
+app.register_blueprint(admin_pamphlets_bp)
 
 # Pamphlet search configuration
 pamphlet_search.configure(app.config)
