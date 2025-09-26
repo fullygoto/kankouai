@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
-from werkzeug.utils import secure_filename
+import os
 
 from config import PAMPHLET_BASE_DIR, PAMPHLET_CITIES
 
@@ -29,24 +29,28 @@ def _city_root(city: str) -> Path:
     return (BASE / city).resolve()
 
 
-def _validate_name(filename: str) -> str:
-    if not filename:
+def _sanitize_name(name: str) -> str:
+    """Sanitize a filename while keeping non-ASCII characters."""
+
+    base = os.path.basename(name or "")
+    base = base.replace("/", "_").replace("\\", "_").replace("\x00", "")
+
+    if not base:
         raise ValueError("ファイル名が空です。")
-    lowered = filename.lower()
-    if not lowered.endswith(".txt"):
+
+    if not base.lower().endswith(".txt"):
         raise ValueError("テキスト(.txt)ファイルのみアップロードできます。")
-    for token in ("..", "/", "\\"):
-        if token in filename:
-            raise ValueError("ファイル名に使用できない文字が含まれています。")
-    safe = secure_filename(filename)
-    if not safe:
-        raise ValueError("不正なファイル名です。")
-    return safe
+
+    stem, _ext = os.path.splitext(base)
+    if not stem.strip():
+        base = f"upload_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
+
+    return base
 
 
 def _safe(city: str, name: str) -> Path:
     root = _city_root(city)
-    safe = _validate_name(name or "")
+    safe = _sanitize_name(name or "")
     path = (root / safe).resolve()
     if not str(path).startswith(str(root)):
         raise ValueError("保存先を特定できません。")
