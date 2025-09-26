@@ -2964,7 +2964,7 @@ if _line_enabled():
 
         if result.kind == "answer":
             body = result.message or ""
-            if result.sources_md:
+            if result.sources_md and "### 出典" not in body:
                 body = f"{body}\n\n{result.sources_md}" if body else result.sources_md
             parts = _split_for_line(body) or [body]
             messages = []

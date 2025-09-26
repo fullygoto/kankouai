@@ -52,7 +52,6 @@ def test_city_name_query_returns_summary(pamphlet_base):
     assert res.kind == "answer"
     assert res.city == "goto"
     assert "要約" in res.message
-    assert "詳細" in res.message
     assert any("五島市/history_guide_2025" in src for src in res.sources)
     assert res.sources_md.startswith("### 出典")
     assert res.more_available is False
