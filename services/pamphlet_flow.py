@@ -6,7 +6,9 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional
 
 from . import pamphlet_rag, pamphlet_search, pamphlet_session
-from .pamphlet_search import SearchResult, city_label, detect_city_from_text
+from .message_builder import build_pamphlet_message, parse_pamphlet_answer
+from .sources_fmt import format_sources_md, normalize_sources
+from .pamphlet_search import SearchResult, detect_city_from_text
 
 
 @dataclass
@@ -86,10 +88,15 @@ def build_response(
     session.clear_pending(user_id)
 
     answer = pamphlet_rag.answer_from_pamphlets(stripped, city_key)
-    message = answer.get("answer", "").strip()
+    raw_message = answer.get("answer", "").strip()
     sources_info = answer.get("sources", []) or []
-    normalized_sources = pamphlet_rag.normalize_sources(sources_info)
+    normalized_sources = normalize_sources(sources_info)
     formatted_sources = [f"{city}/{file_}" for city, file_ in normalized_sources]
+
+    parsed_answer = parse_pamphlet_answer(raw_message)
+    built = build_pamphlet_message(parsed_answer, sources_info)
+    message = built.text
+    sources_md = built.sources_md
 
     if not message:
         message = "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。"
@@ -105,7 +112,7 @@ def build_response(
             more_available=False,
         )
 
-    footer = pamphlet_rag.format_sources_md(sources_info)
+    footer = sources_md if sources_md else format_sources_md(sources_info)
 
     session.set_followup(user_id, query=stripped, city=city_key)
 

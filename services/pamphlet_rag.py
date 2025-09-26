@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover - allow running without OpenAI
     OpenAI = None  # type: ignore
 
 from . import pamphlet_search
+from .sources_fmt import format_sources_md, normalize_sources
 
 
 logger = logging.getLogger(__name__)
@@ -44,62 +45,6 @@ class _EmbeddingStore:
 
 
 _EMBED_CACHE: Dict[str, _EmbeddingStore] = {}
-
-
-_SRC_RE = re.compile(
-    r"""
-    ^(?P<city>[^/]+)/              # 五島市
-    (?P<file>[^/]+?)               # 長崎五島観光ガイド.txt
-    (?:\.(txt|md))?                # 拡張子は任意・あれば除去
-    (?:/\d+(?:-\d+)?)?$            # /9-11 等の行範囲は捨てる
-    """,
-    re.X,
-)
-
-
-def normalize_sources(sources: Iterable[Any]) -> List[Tuple[str, str]]:
-    """Normalize a sequence of source payloads to ``(city, stem)`` tuples."""
-
-    seen = set()
-    out: List[Tuple[str, str]] = []
-
-    for raw in sources or []:
-        city: Optional[str] = None
-        file_: Optional[str] = None
-
-        if isinstance(raw, str):
-            match = _SRC_RE.match(raw.strip())
-            if match:
-                city = match.group("city")
-                file_ = match.group("file")
-        elif isinstance(raw, dict):
-            city_val = raw.get("city") or raw.get("City")
-            if city_val:
-                city = pamphlet_search.city_label(str(city_val))
-
-            file_val = raw.get("file") or raw.get("filename") or raw.get("path")
-            if file_val:
-                file_name = os.path.basename(str(file_val))
-                file_ = re.sub(r"\.(txt|md)$", "", file_name, flags=re.I)
-
-        if not city or not file_:
-            continue
-
-        key = (city, file_)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(key)
-
-    return out
-
-
-def format_sources_md(sources: Iterable[Any], heading: str = "### 出典") -> str:
-    items = normalize_sources(sources)
-    if not items:
-        return ""
-    body = "\n".join(f"- {city}/{file_}" for city, file_ in items)
-    return f"{heading}\n{body}"
 
 
 def _question_key(question: str) -> str:
@@ -576,14 +521,14 @@ def _build_prompt(
 ) -> str:
     lines = [
         "役割: あなたは長崎県五島列島の旅行案内専門スタッフです。",\
-        "利用者の質問の意図を汲み、資料の該当箇所だけを根拠に整理します。",
+        "利用者の質問に対し、資料の該当箇所だけを根拠に整理します。",
         "以下の条件を必ず守ってください:",
-        "1. まず質問の意図を一文で言い換えます。",
-        "2. 資料から確認できた事実だけで2〜5行の要約を作成します。",
-        "3. 数値・営業時間・アクセスなどは箇条書きで明確にします。",
-        "4. 不明点は「資料に明記なし」と記載します。",
-        "5. 最後に出典として「市町/ファイル名/行番号」の形式で最大4件列挙します。",
-        "6. 出力は日本語・ですます調。原文の丸写しは避け、抜粋は10〜30字に留めます。",
+        "1. 回答は質問に直接答える200〜350字・2〜4文の要約から始め、年号や数量、固有名詞は可能な限り含めます。",
+        "2. 重要な追加情報は最大2行の箇条書きにまとめ、要約で十分なら詳細は空欄にします。",
+        "3. 補足・備考のセクションは作成しません。",
+        "4. 不明点は「資料に明記なし」とは書かず、判明している情報だけを述べます。",
+        "5. 最後に出典として「市町/ファイル名」の形式で最大4件列挙します。行番号や拡張子は付けません。",
+        "6. 出力は日本語・ですます調で、原文を適度に言い換えます。",
     ]
 
     city_label = pamphlet_search.city_label(city)
@@ -601,10 +546,9 @@ def _build_prompt(
 
     lines.append("")
     lines.append("出力フォーマット:")
-    lines.append("要約\n(2〜5行の文章)")
-    lines.append("詳細\n- 箇条書き")
-    lines.append("補足\n- 任意 (必要な場合のみ)")
-    lines.append("出典\n- 市町/ファイル名/L開始-L終了")
+    lines.append("要約\n(質問に答える200〜350字・2〜4文)")
+    lines.append("詳細\n- 箇条書き (必要な場合のみ・最大2行)")
+    lines.append("出典\n- 市町/ファイル名")
 
     return "\n".join(lines)
 
@@ -637,10 +581,12 @@ def _fallback_answer(question: str, city: str, selected: Sequence[_Candidate]) -
     for cand in selected:
         chunk = cand.chunk
         snippet = chunk.text.replace("\n", " ")
-        lines.append(f"- {city_label}/{chunk.source_file} (L{chunk.line_start}-{chunk.line_end}): {snippet[:80]}…")
+        file_name = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
+        lines.append(f"- {city_label}/{file_name}: {snippet[:80]}…")
     lines.append("")
     lines.append("出典")
     for cand in selected[:4]:
         chunk = cand.chunk
-        lines.append(f"- {city_label}/{chunk.source_file}/L{chunk.line_start}-L{chunk.line_end}")
+        file_name = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
+        lines.append(f"- {city_label}/{file_name}")
     return "\n".join(lines)
