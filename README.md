@@ -115,4 +115,5 @@ pip install -r requirements.txt
   - コントロールの既定 TTL は `PAUSE_DEFAULT_TTL_SEC=86400`（24時間）で、メッセージ内の `60分`、`2h`、`1日` といった表記で上書きできます。
   - 環境変数 `CONTROL_CMD_ENABLED=true` のときに有効化されます。無効化すると旧挙動（ファイルフラグ）のみで動作します。
   - 管理者が `/admin/line/resume` を実行すると、保存済みの停止状態が全ユーザー分クリアされます。
-- テストで制御コマンドの挙動を確認する場合は `pytest tests/test_control_commands.py -q` を実行してください。
+- テストで制御コマンドの挙動を確認する場合は `pytest tests/test_control_commands.py tests/test_control_flow.py -q` を実行してください。
+- ログには制御コマンドの状態遷移が `CTRL action=...`、状態確認が `STATE uid=...` 形式で出力されます。`解除` 直後に `STATE ... is_paused=False` が記録されているかで即時復帰を確認できます。

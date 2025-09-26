@@ -74,6 +74,22 @@ def _exclusive_connection() -> sqlite3.Connection:
         conn.close()
 
 
+def _row_to_state(row: sqlite3.Row | None, *, user_id: str) -> Dict[str, Optional[int]]:
+    if not row:
+        return {
+            "user_id": user_id,
+            "paused_until": None,
+            "paused_reason": None,
+            "updated_at": None,
+        }
+    return {
+        "user_id": user_id,
+        "paused_until": row["paused_until"],
+        "paused_reason": row["paused_reason"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def get_state(user_id: str) -> Dict[str, Optional[int]]:
     if not user_id:
         raise ValueError("user_id is required")
@@ -85,17 +101,16 @@ def get_state(user_id: str) -> Dict[str, Optional[int]]:
         ).fetchone()
     finally:
         conn.close()
-    if not row:
-        return {"user_id": user_id, "paused_until": None, "paused_reason": None, "updated_at": None}
-    return {
-        "user_id": row["user_id"],
-        "paused_until": row["paused_until"],
-        "paused_reason": row["paused_reason"],
-        "updated_at": row["updated_at"],
-    }
+    return _row_to_state(row, user_id=user_id)
 
 
-def pause(user_id: str, ttl_sec: Optional[int], reason: str = "manual", *, now: Optional[int] = None) -> Dict[str, Optional[int]]:
+def pause(
+    user_id: str,
+    ttl_sec: Optional[int],
+    reason: str = "manual",
+    *,
+    now: Optional[int] = None,
+) -> Dict[str, Optional[int]]:
     if not user_id:
         raise ValueError("user_id is required")
     ttl = int(ttl_sec or 0)
@@ -104,6 +119,10 @@ def pause(user_id: str, ttl_sec: Optional[int], reason: str = "manual", *, now: 
     now_epoch = int(now if now is not None else time.time())
     paused_until = now_epoch + ttl
     with _exclusive_connection() as conn:
+        previous = conn.execute(
+            "SELECT paused_until, paused_reason, updated_at FROM user_state WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
         conn.execute(
             """
             INSERT INTO user_state(user_id, paused_until, paused_reason, updated_at)
@@ -115,26 +134,37 @@ def pause(user_id: str, ttl_sec: Optional[int], reason: str = "manual", *, now: 
             """,
             (user_id, paused_until, reason, now_epoch),
         )
+    state = get_state(user_id)
+    old_paused_until = previous["paused_until"] if previous else None
+    state["old_paused_until"] = old_paused_until
+    state["old_paused_reason"] = previous["paused_reason"] if previous else None
     LOGGER.info(
-        "[user_state] action=pause user_id=%s ttl_sec=%s paused_until=%s reason=%s",  # noqa: G004
+        "CTRL action=pause uid=%s ts=%s ttl=%s old_paused_until=%s new_paused_until=%s reason=%s",
         user_id,
+        now_epoch,
         ttl,
-        paused_until,
+        old_paused_until,
+        state["paused_until"],
         reason,
     )
-    return {
-        "user_id": user_id,
-        "paused_until": paused_until,
-        "paused_reason": reason,
-        "updated_at": now_epoch,
-    }
+    return state
 
 
-def resume(user_id: str, reason: str = "manual", *, now: Optional[int] = None, log: bool = True) -> Dict[str, Optional[int]]:
+def resume(
+    user_id: str,
+    reason: str = "manual",
+    *,
+    now: Optional[int] = None,
+    log: bool = True,
+) -> Dict[str, Optional[int]]:
     if not user_id:
         raise ValueError("user_id is required")
     now_epoch = int(now if now is not None else time.time())
     with _exclusive_connection() as conn:
+        previous = conn.execute(
+            "SELECT paused_until, paused_reason, updated_at FROM user_state WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
         conn.execute(
             """
             INSERT INTO user_state(user_id, paused_until, paused_reason, updated_at)
@@ -146,18 +176,22 @@ def resume(user_id: str, reason: str = "manual", *, now: Optional[int] = None, l
             """,
             (user_id, now_epoch),
         )
+    state = get_state(user_id)
+    old_paused_until = previous["paused_until"] if previous else None
+    state["old_paused_until"] = old_paused_until
+    state["old_paused_reason"] = previous["paused_reason"] if previous else None
+    was_paused = bool(old_paused_until and old_paused_until > now_epoch)
+    state["was_paused"] = was_paused
     if log:
         LOGGER.info(
-            "[user_state] action=resume user_id=%s paused_until=None reason=%s",  # noqa: G004
+            "CTRL action=resume uid=%s ts=%s old_paused_until=%s new_paused_until=%s reason=%s",
             user_id,
+            now_epoch,
+            old_paused_until,
+            state["paused_until"],
             reason,
         )
-    return {
-        "user_id": user_id,
-        "paused_until": None,
-        "paused_reason": None,
-        "updated_at": now_epoch,
-    }
+    return state
 
 
 def resume_all(*, now: Optional[int] = None) -> None:
@@ -167,7 +201,7 @@ def resume_all(*, now: Optional[int] = None) -> None:
             "UPDATE user_state SET paused_until=NULL, paused_reason=NULL, updated_at=?",
             (now_epoch,),
         )
-    LOGGER.info("[user_state] action=resume_all updated_at=%s", now_epoch)  # noqa: G004
+    LOGGER.info("CTRL action=resume_all ts=%s", now_epoch)
 
 
 def is_paused(user_id: str, now_epoch: Optional[int] = None) -> bool:
@@ -177,10 +211,27 @@ def is_paused(user_id: str, now_epoch: Optional[int] = None) -> bool:
     state = get_state(user_id)
     paused_until = state.get("paused_until")
     if paused_until is None:
+        LOGGER.info(
+            "STATE uid=%s is_paused=False check_ts=%s src=db paused_until=None",
+            user_id,
+            now_val,
+        )
         return False
     if paused_until <= now_val:
         resume(user_id, reason="expired", now=now_val, log=False)
+        LOGGER.info(
+            "STATE uid=%s is_paused=False check_ts=%s src=db paused_until=%s (expired)",
+            user_id,
+            now_val,
+            paused_until,
+        )
         return False
+    LOGGER.info(
+        "STATE uid=%s is_paused=True check_ts=%s src=db paused_until=%s",
+        user_id,
+        now_val,
+        paused_until,
+    )
     return True
 
 
