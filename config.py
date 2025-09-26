@@ -15,6 +15,8 @@ class BaseConfig:
     SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "sqlite:///local.db")
     MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "16"))
     MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
+    PAMPHLET_EDIT_MAX_MB = int(os.getenv("PAMPHLET_EDIT_MAX_MB", "2"))
+    PAMPHLET_EDIT_MAX_BYTES = PAMPHLET_EDIT_MAX_MB * 1024 * 1024
     MEDIA_DIR = os.getenv("MEDIA_DIR", os.path.join(os.getcwd(), "media"))
     # LINE
     LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")

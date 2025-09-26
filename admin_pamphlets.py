@@ -27,7 +27,11 @@ from services import pamphlet_rag, pamphlet_store
 bp = Blueprint("pamphlets_admin", __name__, url_prefix="/admin")
 
 PREVIEW_MAX_BYTES = 200_000
-MAX_EDIT_BYTES = 2 * 1024 * 1024
+DEFAULT_EDIT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _get_edit_limit() -> int:
+    return current_app.config.get("PAMPHLET_EDIT_MAX_BYTES", DEFAULT_EDIT_MAX_BYTES)
 
 
 def _admin_required(func: Callable) -> Callable:
@@ -98,7 +102,8 @@ def pamphlets_edit():
         info = pamphlet_store.stat_file(city, name)
         size = int(info["size"])
         mtime = float(info["mtime"])
-        too_large = size > MAX_EDIT_BYTES
+        edit_limit = _get_edit_limit()
+        too_large = size > edit_limit
         text = None
         if not too_large:
             text, _size, mtime = pamphlet_store.read_text(city, name)
@@ -116,7 +121,6 @@ def pamphlets_edit():
         expected_mtime=mtime,
         text=text,
         too_large=too_large,
-        max_edit_bytes=MAX_EDIT_BYTES,
     )
 
 
@@ -133,8 +137,22 @@ def pamphlets_save():
     except (TypeError, ValueError):
         expected_mtime = None
 
-    if len(content.encode("utf-8")) > MAX_EDIT_BYTES:
-        flash("ファイルが大きすぎます。2MBまで編集できます。", "danger")
+    edit_limit = _get_edit_limit()
+    byte_len = len(content.encode("utf-8"))
+    current_app.logger.debug(
+        "Pamphlet edit size check city=%s name=%s bytes=%s limit=%s",
+        city,
+        name,
+        byte_len,
+        edit_limit,
+    )
+    if byte_len > edit_limit:
+        flash(
+            "編集内容が大きすぎます（{:.1f}KB > 上限 {:.0f}KB）".format(
+                byte_len / 1024, edit_limit / 1024
+            ),
+            "error",
+        )
         return redirect(url_for("pamphlets_admin.pamphlets_edit", city=city, name=name))
 
     try:
@@ -152,7 +170,8 @@ def pamphlets_save():
             info = pamphlet_store.stat_file(city, name)
             size = int(info["size"])
             mtime = float(info["mtime"])
-            too_large = size > MAX_EDIT_BYTES
+            edit_limit = _get_edit_limit()
+            too_large = size > edit_limit
             text = None
             if not too_large:
                 text, _size, mtime = pamphlet_store.read_text(city, name)
@@ -169,7 +188,6 @@ def pamphlets_save():
             expected_mtime=mtime,
             text=text,
             too_large=too_large,
-            max_edit_bytes=MAX_EDIT_BYTES,
         )
     except Exception as exc:
         flash(f"保存に失敗しました: {exc}", "danger")
