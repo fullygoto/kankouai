@@ -28,6 +28,7 @@
     .alert.danger{background:#fee2e2;color:#991b1b}
     .alert.warning{background:#fef3c7;color:#92400e}
     .alert.info{background:#e0f2fe;color:#075985}
+    .alert.error{background:#fee2e2;color:#991b1b}
     form.inline{display:inline}
     @media (max-width: 720px){
       .container{margin:18px auto;padding:22px 16px}
@@ -51,7 +52,7 @@
     <div class="info">
       <span>サイズ: {{ (size / 1024)|round(1) }} KB</span>
       <span>最終更新: {{ mtime.strftime('%Y-%m-%d %H:%M:%S') }}</span>
-      <span class="muted">（{{ (max_edit_bytes / 1024 / 1024)|round(1) }}MB まで編集可能）</span>
+      <span class="muted">（{{ (config.PAMPHLET_EDIT_MAX_BYTES // 1024 // 1024) }}MB まで編集可能）</span>
     </div>
 
     {% if too_large %}
