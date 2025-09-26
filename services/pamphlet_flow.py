@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional
 
-from . import pamphlet_rag, pamphlet_search
+from . import pamphlet_rag, pamphlet_search, pamphlet_session
 from .pamphlet_search import SearchResult, city_label, detect_city_from_text
 
 
@@ -31,64 +31,46 @@ def build_response(
     detailed: bool = False,
 ) -> PamphletResponse:
     now = time.time()
-    pam = session_store.setdefault(
-        "pamphlet",
-        {"city": {}, "pending": {}, "followup": {}},
-    )
-    city_cache: Dict[str, tuple[str, float]] = pam.setdefault("city", {})
-    pending: Dict[str, dict] = pam.setdefault("pending", {})
-    followup: Dict[str, dict] = pam.setdefault("followup", {})
-
-    # cleanup stale entries
-    for store in (city_cache, pending, followup):
-        for key in list(store.keys()):
-            ts = store[key][1] if isinstance(store[key], tuple) else store[key].get("ts", 0.0)
-            if now - ts > ttl:
-                store.pop(key, None)
+    session = pamphlet_session.PamphletSession(session_store, ttl, now=now)
 
     stripped = (text or "").strip()
     if not stripped:
         return PamphletResponse(kind="noop", message="")
 
     # follow-up request for more details
+    city_key: Optional[str] = None
+
     if stripped.startswith("もっと詳しく"):
-        info = followup.get(user_id)
-        if info:
-            query = info.get("query", "")
-            city = info.get("city")
-            if city:
-                detailed = True
-                stripped = query
-            else:
-                return PamphletResponse(kind="error", message="詳細を取得できませんでした。")
+        info = session.get_followup(user_id)
+        if info and info.get("city"):
+            detailed = True
+            city_key = info.get("city")
+            stripped = info.get("query", stripped) or stripped
         else:
             return PamphletResponse(kind="error", message="詳細の対象が見つかりませんでした。")
 
-    pending_query = pending.get(user_id)
+    pending_query = session.get_pending(user_id)
     detected_city = detect_city_from_text(stripped)
 
-    # treat a pure city label as selection if pending exists
-    if stripped in {c["text"] for c in pamphlet_search.city_choices()} and pending_query:
-        detected_city = pamphlet_search.CITY_ALIASES.get(stripped, detected_city)
+    choice_texts = {c["text"] for c in pamphlet_search.city_choices()}
+    if stripped in choice_texts and pending_query:
+        detected = pamphlet_search.CITY_ALIASES.get(stripped, detected_city)
+        if detected:
+            city_key = detected
         stripped = pending_query.get("query", stripped)
-        pending.pop(user_id, None)
-
-    # resolved city from cache if none detected
-    city_key = detected_city
-    if not city_key:
-        cached = city_cache.get(user_id)
-        if cached and now - cached[1] <= ttl:
-            city_key = cached[0]
+        session.clear_pending(user_id)
+    elif detected_city:
+        city_key = detected_city
 
     if not city_key:
-        record = pending.get(user_id)
-        if record:
-            record.update({"query": stripped, "ts": now})
-        else:
-            record = {"query": stripped, "ts": now, "asked": False}
-            pending[user_id] = record
+        cached = session.get_city(user_id)
+        if cached:
+            city_key = cached
+
+    if not city_key:
+        record = session.set_pending(user_id, stripped)
         show_quick = not record.get("asked", False)
-        record["asked"] = True
+        session.set_pending(user_id, stripped, asked=True)
         choices = pamphlet_search.city_choices() if show_quick else []
         message = "どの市町の資料からお探ししますか？"
         if not show_quick:
@@ -99,7 +81,8 @@ def build_response(
             quick_choices=choices,
         )
 
-    city_cache[user_id] = (city_key, now)
+    session.set_city(user_id, city_key)
+    session.clear_pending(user_id)
 
     answer = pamphlet_rag.answer_from_pamphlets(stripped, city_key)
     message = answer.get("answer", "").strip()
@@ -111,6 +94,7 @@ def build_response(
         message = "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。"
 
     if not normalized_sources:
+        session.clear_followup(user_id)
         return PamphletResponse(
             kind="error",
             message=message,
@@ -123,7 +107,7 @@ def build_response(
     if footer:
         message = f"{message}\n\n{footer}" if message else footer
 
-    followup[user_id] = {"query": stripped, "city": city_key, "ts": now}
+    session.set_followup(user_id, query=stripped, city=city_key)
 
     return PamphletResponse(
         kind="answer",

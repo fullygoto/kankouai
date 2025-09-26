@@ -68,7 +68,14 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
 from watermark_ext import media_path_for
-from services import pamphlet_flow, pamphlet_rag, pamphlet_search, pamphlet_summarize
+from services import (
+    pamphlet_flow,
+    pamphlet_rag,
+    pamphlet_search,
+    pamphlet_summarize,
+    input_normalizer,
+    dupe_guard,
+)
 from admin_pamphlets import bp as admin_pamphlets_bp
 
 # Pillowのバージョン差を吸収したリサンプリング定数
@@ -3206,9 +3213,22 @@ if _line_enabled() and handler:
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     try:
-        text = getattr(event.message, "text", "") or ""
+        raw_text = getattr(event.message, "text", "") or ""
     except Exception:
-        text = ""
+        raw_text = ""
+
+    text = input_normalizer.normalize_user_query(raw_text)
+
+    try:
+        line_user_id = _line_target_id(event)
+    except Exception:
+        line_user_id = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+    if text:
+        dedupe_key = f"line:{line_user_id}:{text}"
+        if dupe_guard.seen_recent(dedupe_key):
+            app.logger.debug("[dupe_guard] suppressed duplicate message for %s", line_user_id)
+            return
 
     # --- ① ミュート/一時停止ゲート -------------------------
     try:
@@ -3227,11 +3247,7 @@ def handle_message(event):
     # --- ①.5 透かしコマンド（@Goto City / @fullyGOTO / なし） ----
     # ※ ここで検出したらユーザー設定に保存し、即時に切替メッセージを返して終了
     try:
-        uid = None
-        try:
-            uid = _line_target_id(event)  # 個チャ/グループ両対応
-        except Exception:
-            uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+        uid = line_user_id
 
         choice = parse_wm_command(text)  # 'gotocity' | 'fullygoto' | 'none' | None
         if choice is not None:
@@ -3306,7 +3322,7 @@ def handle_message(event):
         t = (text or "").lower()
         if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
             mode = _classify_mode(text)
-            uid2 = _line_target_id(event)
+            uid2 = line_user_id
             if "_LAST" in globals():
                 _LAST["mode"][uid2] = mode
             # 位置情報のお願いを reply、失敗時は push でフォールバック（※ force_push は使わない）
@@ -3377,11 +3393,7 @@ def handle_message(event):
     # --- ⑥ DB回答（画像→テキストを1回の reply にまとめる） ---
     try:
         # ★ ユーザーの透かし設定を取得して回答生成に渡す（新旧両対応）
-        uid3 = None
-        try:
-            uid3 = _line_target_id(event)
-        except Exception:
-            uid3 = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+        uid3 = line_user_id
         wm_mode = _get_user_wm(uid3)  # 'none' | 'fullygoto' | 'gotocity'
 
         try:
@@ -11022,9 +11034,19 @@ def smart_search_answer_with_hitflag(question):
 @limit_deco(ASK_LIMITS)
 def ask():
     data = request.get_json(silent=True) or {}
-    question = data.get("question", "")
+    raw_question = data.get("question", "")
+    question = input_normalizer.normalize_user_query(raw_question)
     user_lat = data.get("lat")   # 追加（任意）
     user_lng = data.get("lng")   # 追加（任意）
+
+    if question:
+        dedupe_user = session.get("user_id") or request.remote_addr or "anon"
+        dedupe_key = f"web:{dedupe_user}:{question}"
+        if dupe_guard.seen_recent(dedupe_key):
+            return (
+                jsonify({"answer": "", "hit_db": False, "meta": {"duplicate": True}}),
+                202,
+            )
 
     # ① 天気
     weather_reply, weather_hit = get_weather_reply(question)

@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -28,6 +29,9 @@ _REWRITE_MODEL = os.getenv("REWRITE_MODEL", "gpt-4o-mini")
 _EMBED_MODEL = os.getenv("PAMPHLET_EMBED_MODEL", "text-embedding-3-small")
 
 _CLIENT: Optional[Any] = None
+
+_LAST_SUCCESS: Dict[Tuple[str, str], Dict[str, Any]] = {}
+_SUCCESS_TTL = 1800.0
 
 
 @dataclass
@@ -98,6 +102,68 @@ def format_sources_md(sources: Iterable[Any], heading: str = "### 出典") -> st
     return f"{heading}\n{body}"
 
 
+def _question_key(question: str) -> str:
+    return re.sub(r"\s+", " ", (question or "")).strip().lower()
+
+
+def _prune_last_success(now: float) -> None:
+    for key, info in list(_LAST_SUCCESS.items()):
+        ts = float(info.get("ts", 0.0))
+        if now - ts > _SUCCESS_TTL:
+            _LAST_SUCCESS.pop(key, None)
+
+
+def _store_last_success(city: str, question: str, candidates: Sequence["_Candidate"], queries: Sequence[str]) -> None:
+    if not city or not question or not candidates:
+        return
+    now = time.time()
+    _prune_last_success(now)
+    key = (city, _question_key(question))
+    payload = {
+        "ts": now,
+        "chunks": [(cand.chunk.source_file, cand.chunk.chunk_index) for cand in candidates[:4]],
+        "queries": list(queries),
+    }
+    _LAST_SUCCESS[key] = payload
+
+
+def _reuse_last_success(city: str, question: str) -> Optional[Dict[str, Any]]:
+    if not city or not question:
+        return None
+    now = time.time()
+    _prune_last_success(now)
+    key = (city, _question_key(question))
+    data = _LAST_SUCCESS.get(key)
+    if not data:
+        return None
+    snapshot = None
+    try:
+        snapshot = pamphlet_search.snapshot(city)
+    except Exception:
+        return None
+    index: Dict[Tuple[str, int], pamphlet_search.PamphletChunk] = {
+        (chunk.source_file, chunk.chunk_index): chunk for chunk in snapshot.chunks
+    }
+    selected: List[_Candidate] = []
+    for file_name, chunk_idx in data.get("chunks", []) or []:
+        chunk = index.get((file_name, chunk_idx))
+        if not chunk:
+            continue
+        selected.append(
+            _Candidate(
+                chunk=chunk,
+                combined_score=1.0,
+                bm25_details=[],
+                embed_details=[],
+                vector_index=None,
+            )
+        )
+    if not selected:
+        _LAST_SUCCESS.pop(key, None)
+        return None
+    return {"selected": selected, "queries": data.get("queries", [])}
+
+
 def configure(openai_client: Optional[Any]) -> None:
     global _CLIENT
     _CLIENT = openai_client
@@ -126,17 +192,41 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             "debug": {"reason": "empty question"},
         }
 
-    queries = _rewrite_queries(question, city)
-    # Always include original question first
-    if question not in queries:
-        queries = [question] + [q for q in queries if q != question]
-
-    retrieval = _retrieve_chunks(city, queries)
+    base_queries = [question]
+    retrieval = _retrieve_chunks(city, base_queries)
     selected: List[_Candidate] = retrieval["selected"]
     confidence = retrieval["confidence"]
-    debug_info = retrieval.get("debug", {})
+    debug_info = dict(retrieval.get("debug", {}) or {})
+    used_queries = list(base_queries)
 
-    if confidence < _MIN_CONFIDENCE or not selected:
+    if len(selected) < 2 and confidence < _MIN_CONFIDENCE:
+        first_pass = dict(debug_info)
+        rewritten = _rewrite_queries(question, city)
+        expanded = [question] + [q for q in rewritten if q and q != question]
+        if len(expanded) > 1:
+            retry = _retrieve_chunks(city, expanded)
+            selected = retry["selected"]
+            confidence = retry["confidence"]
+            debug_info = dict(retry.get("debug", {}) or {})
+            if first_pass:
+                debug_info["first_pass"] = first_pass
+                debug_info["retry_reason"] = "low_confidence"
+            used_queries = list(expanded)
+        else:
+            debug_info = first_pass
+
+    reused_seed = False
+    if (not selected or confidence < _MIN_CONFIDENCE) and question:
+        reused = _reuse_last_success(city, question)
+        if reused and reused.get("selected"):
+            selected = reused["selected"]
+            used_queries = reused.get("queries", used_queries)
+            confidence = max(confidence, 0.5)
+            reused_seed = True
+            debug_info = dict(debug_info or {})
+            debug_info["reuse_seed"] = True
+
+    if not selected:
         return {
             "answer": "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。",
             "sources": [],
@@ -144,7 +234,7 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             "debug": debug_info,
         }
 
-    prompt = _build_prompt(question, city, queries, selected)
+    prompt = _build_prompt(question, city, used_queries, selected)
     answer_text = _generate_answer(prompt)
 
     if not answer_text:
@@ -163,8 +253,11 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             }
         )
 
-    debug_payload = dict(debug_info)
+    debug_payload = dict(debug_info or {})
+    debug_payload["queries"] = used_queries
     debug_payload["prompt"] = prompt
+
+    _store_last_success(city, question, selected, used_queries)
 
     return {
         "answer": answer_text,

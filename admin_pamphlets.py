@@ -21,7 +21,7 @@ from flask import (
 )
 
 from config import PAMPHLET_CITIES
-from services import pamphlet_rag, pamphlet_store
+from services import input_normalizer, pamphlet_rag, pamphlet_store
 
 
 bp = Blueprint("pamphlets_admin", __name__, url_prefix="/admin")
@@ -262,7 +262,7 @@ def pamphlets_reindex():
 @_admin_required
 def pamphlets_debug():
     city = request.args.get("city", "goto")
-    question = request.args.get("q", "").strip()
+    question = input_normalizer.normalize_user_query(request.args.get("q", ""))
     if city not in PAMPHLET_CITIES:
         response = jsonify({"error": "unknown city"})
         response.status_code = 400
