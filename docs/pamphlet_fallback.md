@@ -40,7 +40,7 @@
      "pamphlet_index": "ready"
    }
    ```
-3. `/readyz` でも `pamphlet_index` の状態を確認できます。`error` の場合はログを確認し再度 `/admin/pamphlet-reindex` を実行してください。
+3. `/readyz` でも `pamphlet_index` の状態を確認できます。各市町ごとの詳細は `pamphlet_index_status` フィールドに格納されており、`status` が `degraded` の場合は `errors` に原因が並びます。
 
 ## LINE 応答フロー
 
