@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 
 _DEFAULT_STYLE = "polite_long"
+_DEFAULT_MODE = "adaptive"
 _DEFAULT_MIN = 550
 _DEFAULT_MAX = 800
 _DEFAULT_FALLBACK = 300
@@ -17,11 +18,28 @@ class SummaryBounds:
     is_short_context: bool
 
 
+def get_summary_mode() -> str:
+    """Return the current summary mode."""
+    value = os.getenv("SUMMARY_MODE", _DEFAULT_MODE)
+    value = (value or "").strip().lower()
+    if value in {"adaptive", "terse", "long"}:
+        return value
+    return _DEFAULT_MODE
+
+
 def get_summary_style() -> str:
     """Return the configured summary style."""
-    value = os.getenv("SUMMARY_STYLE", _DEFAULT_STYLE)
-    value = (value or "").strip().lower()
-    return value or _DEFAULT_STYLE
+    override = os.getenv("SUMMARY_STYLE")
+    if override:
+        value = override.strip().lower()
+        if value:
+            return value
+    mode = get_summary_mode()
+    if mode == "terse":
+        return "terse"
+    if mode == "long":
+        return "polite_long"
+    return "adaptive"
 
 
 def _read_int(name: str, default: int) -> int:

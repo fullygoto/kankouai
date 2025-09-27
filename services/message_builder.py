@@ -118,7 +118,7 @@ def parse_pamphlet_answer(raw: str) -> PamphletAnswer:
 
 
 def _expand_summary(base: str, details: Sequence[str]) -> tuple[str, int]:
-    if get_summary_style() == "polite_long":
+    if get_summary_style() in {"polite_long", "adaptive"}:
         return (base or "").strip(), 0
 
     sentences = _split_sentences(base)
@@ -166,7 +166,7 @@ def build_pamphlet_message(
 
     style = get_summary_style()
 
-    if style == "polite_long":
+    if style in {"polite_long", "adaptive"}:
         summary_candidate = summary_text.strip()
         if not summary_candidate:
             fallback = _ensure_sentence(answer.summary)

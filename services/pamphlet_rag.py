@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
 import re
 import time
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - optional dependency
@@ -16,6 +19,7 @@ except Exception:  # pragma: no cover - allow running without OpenAI
     OpenAI = None  # type: ignore
 
 from . import pamphlet_search
+from .pamphlet_planner import Plan, plan_answer
 from .summary_config import SummaryBounds, get_summary_bounds, get_summary_style
 
 
@@ -26,7 +30,6 @@ _MMR_LAMBDA = float(os.getenv("PAMPHLET_MMR_LAMBDA", "0.4"))
 _MMR_K = 8
 _MIN_CONFIDENCE = float(os.getenv("PAMPHLET_MIN_CONFIDENCE", "0.42"))
 _GEN_MODEL = os.getenv("GEN_MODEL", "gpt-4o-mini")
-_REWRITE_MODEL = os.getenv("REWRITE_MODEL", "gpt-4o-mini")
 _EMBED_MODEL = os.getenv("PAMPHLET_EMBED_MODEL", "text-embedding-3-small")
 _CITATION_MIN_CHARS = int(os.getenv("CITATION_MIN_CHARS", "80"))
 _CITATION_MIN_SCORE = float(os.getenv("CITATION_MIN_SCORE", "0.15"))
@@ -38,6 +41,7 @@ _LABEL_PATTERN = re.compile(r"\[\[(\d+)\]\]")
 class _PromptConfig:
     prompt: str
     bounds: SummaryBounds
+    style: str
 
 
 PROMPT_SUMMARY_POLITE_LONG = (
@@ -80,6 +84,22 @@ PROMPT_SUMMARY_TERSE_SHORT = (
     "- 市町/ファイル名（本文で使用した参照のみ）\n"
 )
 
+PROMPT_ADAPTIVE_TEMPLATE = (
+    "あなたは観光案内の編集者です。以下の【パンフ本文抜粋（番号付き）】だけを根拠に日本語で回答します。\n"
+    "制約:\n"
+    "- 外部知識・推測は禁止。根拠のない固有名や年数は書かない。\n"
+    "- 文末に [[番号]] を必ず付けて根拠を示す（与えた番号のみ）。\n"
+    "- 回答の長さは Plan.style に従う：\n"
+    "  - short_direct: 2〜4文。必要なら最後に短い補足を一行。\n"
+    "  - medium_structured: 1段落＋必要なら箇条書き（最大1ブロック）。\n"
+    "  - long_explanatory: 1〜2段落、最大800字。冗長な言い換えは避ける。\n"
+    "- 読み手の意図を第一に、結論→要点→補足の順で簡潔に。\n"
+    "【Plan（要約）】\n"
+    "{plan_block}\n"
+    "【パンフ本文抜粋（番号付き）】\n"
+    "{context}\n"
+)
+
 _CLIENT: Optional[Any] = None
 
 _LAST_SUCCESS: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -96,6 +116,147 @@ class _EmbeddingStore:
 
 
 _EMBED_CACHE: Dict[str, _EmbeddingStore] = {}
+
+
+@lru_cache(maxsize=1)
+def _load_synonym_map() -> Dict[str, List[str]]:
+    path = Path(__file__).resolve().parent.parent / "synonyms.json"
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception:
+        return {}
+
+    cleaned: Dict[str, List[str]] = {}
+    for key, value in (raw or {}).items():
+        if not isinstance(key, str) or not isinstance(value, list):
+            continue
+        variants = [str(item) for item in value if isinstance(item, str)]
+        cleaned[key] = variants
+    return cleaned
+
+
+def _expand_with_synonyms(question: str, plan: Plan) -> List[str]:
+    base = (question or "").strip()
+    if not base:
+        return []
+
+    synonym_map = _load_synonym_map()
+    seen: List[str] = []
+    keywords = plan.scope.get("keywords", [])
+    clusters: List[Tuple[str, List[str]]] = []
+    for key, variants in synonym_map.items():
+        cluster = [key] + variants
+        if any(item in base for item in cluster) or any(item in keywords for item in cluster):
+            clusters.append((key, cluster))
+
+    for token in keywords:
+        if token not in base:
+            continue
+        for key, cluster in clusters:
+            if token in cluster:
+                for alt in cluster:
+                    if alt == token:
+                        continue
+                    replaced = base.replace(token, alt)
+                    if replaced != base and replaced not in seen:
+                        seen.append(replaced)
+
+    for key, cluster in clusters:
+        matches = [variant for variant in cluster if variant in base]
+        if not matches:
+            continue
+        remainder = base
+        for match in matches:
+            remainder = remainder.replace(match, key)
+        if remainder != base and remainder not in seen:
+            seen.append(remainder)
+
+    if not seen and keywords:
+        for token in keywords:
+            for key, cluster in clusters:
+                if token in cluster:
+                    others = [kw for kw in keywords if kw != token]
+                    for alt in cluster:
+                        if alt == token:
+                            continue
+                        candidate = " ".join([alt] + others)
+                        candidate = candidate.strip()
+                        if candidate and candidate not in seen:
+                            seen.append(candidate)
+
+    return seen[:4]
+
+
+def _apply_scope(plan: Plan, candidates: Sequence[_Candidate]) -> List[_Candidate]:
+    if not candidates:
+        return []
+    keywords = plan.scope.get("keywords", [])
+    time_scope = plan.scope.get("time", [])
+    tokens = [tok for tok in keywords if tok]
+    tokens.extend(time_scope)
+    unique_tokens = [tok for idx, tok in enumerate(tokens) if tok and tok not in tokens[:idx]]
+    if not unique_tokens:
+        return list(candidates)
+
+    filtered: List[_Candidate] = []
+    for cand in candidates:
+        text = cand.chunk.text
+        if any(token in text for token in unique_tokens):
+            filtered.append(cand)
+
+    if not filtered:
+        return list(candidates)
+
+    style = plan.style or "medium_structured"
+    limit = {
+        "short_direct": 4,
+        "medium_structured": 6,
+        "long_explanatory": 8,
+    }.get(style, 6)
+    return filtered[:limit]
+
+
+def _format_plan_block(plan: Plan, city_label: str) -> str:
+    intent = plan.intent or "overview"
+    style = plan.style or "medium_structured"
+    sections = " / ".join(plan.sections) if plan.sections else "結論"
+    scope_parts: List[str] = []
+    keywords = plan.scope.get("keywords", [])
+    if keywords:
+        scope_parts.append("キーワード=" + "、".join(keywords[:6]))
+    time_scope = plan.scope.get("time", [])
+    if time_scope:
+        scope_parts.append("時期=" + "、".join(time_scope[:4]))
+    if city_label:
+        scope_parts.append(f"市町={city_label}")
+    scope_line = " / ".join(scope_parts) if scope_parts else "指定なし"
+    return (
+        f"意図: {intent}\n"
+        f"範囲: {scope_line}\n"
+        f"スタイル: {style}\n"
+        f"セクション: {sections}"
+    )
+
+
+def _resolve_bounds(plan: Plan, context_text: str) -> SummaryBounds:
+    base = get_summary_bounds(context_text)
+    if get_summary_style() != "adaptive":
+        return base
+
+    style = plan.style or "medium_structured"
+    max_cap = min(800, base.max_chars)
+    if style == "short_direct":
+        max_len = max(120, min(220, max_cap))
+        return SummaryBounds(min_chars=0, max_chars=max_len, is_short_context=True)
+    if style == "medium_structured":
+        max_len = max(220, min(420, max_cap))
+        return SummaryBounds(min_chars=0, max_chars=max_len, is_short_context=base.is_short_context)
+    if style == "long_explanatory":
+        max_len = min(800, max_cap)
+        min_len = 260 if max_len >= 260 else 0
+        return SummaryBounds(min_chars=min_len, max_chars=max_len, is_short_context=base.is_short_context)
+    return base
 
 
 def _question_key(question: str) -> str:
@@ -179,8 +340,8 @@ def _get_client() -> Optional[Any]:
 
 
 def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
-    question = (question or "").strip()
-    if not question:
+    raw_question = (question or "").strip()
+    if not raw_question:
         return {
             "answer": "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。",
             "sources": [],
@@ -188,17 +349,28 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             "debug": {"reason": "empty question"},
         }
 
-    base_queries = [question]
+    plan = plan_answer(raw_question, {"city": city})
+    planned_question = plan.query or raw_question
+
+    base_queries = [planned_question]
+    synonym_queries = _expand_with_synonyms(planned_question, plan)
+    for q in synonym_queries:
+        if q and q not in base_queries:
+            base_queries.append(q)
+
     retrieval = _retrieve_chunks(city, base_queries)
     selected: List[_Candidate] = retrieval["selected"]
     confidence = retrieval["confidence"]
     debug_info = dict(retrieval.get("debug", {}) or {})
+    debug_info["plan"] = plan.to_dict()
     used_queries = list(base_queries)
+
+    selected = _apply_scope(plan, selected)
 
     if len(selected) < 2 and confidence < _MIN_CONFIDENCE:
         first_pass = dict(debug_info)
-        rewritten = _rewrite_queries(question, city)
-        expanded = [question] + [q for q in rewritten if q and q != question]
+        rewritten = _expand_with_synonyms(planned_question, plan)
+        expanded = [planned_question] + [q for q in rewritten if q and q != planned_question]
         if len(expanded) > 1:
             retry = _retrieve_chunks(city, expanded)
             selected = retry["selected"]
@@ -211,9 +383,11 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
         else:
             debug_info = first_pass
 
+    selected = _apply_scope(plan, selected)
+
     reused_seed = False
-    if (not selected or confidence < _MIN_CONFIDENCE) and question:
-        reused = _reuse_last_success(city, question)
+    if (not selected or confidence < _MIN_CONFIDENCE) and planned_question:
+        reused = _reuse_last_success(city, planned_question)
         if reused and reused.get("selected"):
             selected = reused["selected"]
             used_queries = reused.get("queries", used_queries)
@@ -231,7 +405,7 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
         }
 
     context_text, id_map = build_context_with_labels(selected)
-    prompt_cfg = _build_prompt(question, city, used_queries, context_text)
+    prompt_cfg = _build_prompt(plan, planned_question, city, used_queries, context_text)
     answer_text = _generate_with_constraints(prompt_cfg)
 
     postprocessed = postprocess_answer(
@@ -242,7 +416,7 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
     )
 
     if not postprocessed.answer_with_labels:
-        fallback = _fallback_answer(question, city, selected)
+        fallback = _fallback_answer(plan, planned_question, city, selected)
         postprocessed = postprocess_answer(
             fallback,
             id_map,
@@ -253,10 +427,11 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
     postprocessed = _enforce_summary_bounds(
         postprocessed,
         bounds=prompt_cfg.bounds,
-        question=question,
+        question=planned_question,
         city=city,
         selected=selected,
         id_map=id_map,
+        plan=plan,
     )
 
     sources = [
@@ -274,10 +449,11 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
     debug_payload = dict(debug_info or {})
     debug_payload["queries"] = used_queries
     debug_payload["prompt"] = prompt_cfg.prompt
+    debug_payload["plan"] = plan.to_dict()
     if postprocessed.invalid_labels:
         debug_payload["invalid_labels"] = sorted(postprocessed.invalid_labels)
 
-    _store_last_success(city, question, selected, used_queries)
+    _store_last_success(city, planned_question, selected, used_queries)
 
     return {
         "answer": postprocessed.answer_without_labels,
@@ -470,53 +646,6 @@ def postprocess_answer(
         citations=citations,
         invalid_labels=invalid,
     )
-
-
-def _rewrite_queries(question: str, city: str) -> List[str]:
-    base = [question]
-    client = _get_client()
-    if not client or not os.getenv("OPENAI_API_KEY"):
-        return base
-
-    system = """あなたは長崎県五島列島の旅行案内スタッフです。利用者の質問意図を理解し、検索に適した日本語クエリを複数案出力します。"""
-    user = (
-        "質問を2〜4個の短い検索クエリに言い換えてください。\n"
-        "- 同義語や正式名称、祭りなどの別名を含めます。\n"
-        "- 質問の意図を補う補助キーワード（時期、エリア、交通手段など）があれば追加します。\n"
-        "- 出力は箇条書きで、日本語のみ。英語表記が役立つ場合は括弧で併記してください。\n"
-        f"市町: {pamphlet_search.city_label(city)}\n質問: {question}"
-    )
-
-    try:
-        response = client.responses.create(
-            model=_REWRITE_MODEL,
-            input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.2,
-        )
-        text = getattr(response, "output_text", "")
-    except Exception as exc:
-        logger.warning("[pamphlet] query rewrite failed: %s", exc)
-        return base
-
-    if not text:
-        return base
-
-    lines = []
-    for raw in text.splitlines():
-        cleaned = raw.strip().lstrip("-・*●\t ")
-        if cleaned:
-            lines.append(cleaned)
-    if not lines:
-        return base
-
-    uniq: List[str] = []
-    for item in lines:
-        if item not in uniq:
-            uniq.append(item)
-        if len(uniq) >= 4:
-            break
-
-    return uniq
 
 
 def _retrieve_chunks(city: str, queries: Sequence[str]) -> Dict[str, Any]:
@@ -765,14 +894,15 @@ def _dot(vec_a: Iterable[float], vec_b: Iterable[float]) -> float:
 
 
 def _build_prompt(
+    plan: Plan,
     question: str,
     city: str,
     queries: Sequence[str],
     context_text: str,
 ) -> _PromptConfig:
     city_label = pamphlet_search.city_label(city)
-    style = get_summary_style()
-    bounds = get_summary_bounds(context_text)
+    style_mode = get_summary_style()
+    bounds = _resolve_bounds(plan, context_text)
 
     question_line = f"質問: {question}\n" if question else ""
     city_line = f"対象市町: {city_label}\n" if city_label else ""
@@ -782,7 +912,7 @@ def _build_prompt(
         if joined:
             query_line = f"検索クエリ候補: {joined}\n"
 
-    if style == "polite_long":
+    if style_mode == "polite_long":
         length_note = f"{bounds.min_chars}〜{bounds.max_chars}"
         extra_note = "- コンテキストが短いため、無理に長文化せず自然な分量でまとめてください。" if bounds.is_short_context else ""
         extra_note_text = f"{extra_note}\n\n" if extra_note else "\n"
@@ -795,7 +925,21 @@ def _build_prompt(
             query_line=query_line,
             context=context_text,
         )
-        return _PromptConfig(prompt=prompt, bounds=bounds)
+        return _PromptConfig(prompt=prompt, bounds=bounds, style="polite_long")
+
+    if style_mode == "adaptive":
+        plan_block = _format_plan_block(plan, city_label)
+        plan_header = []
+        if question_line:
+            plan_header.append(question_line.strip())
+        if city_line:
+            plan_header.append(city_line.strip())
+        if query_line:
+            plan_header.append(query_line.strip())
+        header_text = "\n".join([line for line in plan_header if line])
+        context = context_text
+        plan_prompt = PROMPT_ADAPTIVE_TEMPLATE.format(plan_block=f"{header_text}\n{plan_block}".strip(), context=context)
+        return _PromptConfig(prompt=plan_prompt, bounds=bounds, style=plan.style)
 
     prompt = PROMPT_SUMMARY_TERSE_SHORT.format(
         question_line=question_line,
@@ -803,7 +947,7 @@ def _build_prompt(
         query_line=query_line,
         context=context_text,
     )
-    return _PromptConfig(prompt=prompt, bounds=bounds)
+    return _PromptConfig(prompt=prompt, bounds=bounds, style=style_mode)
 
 
 def _generate_answer(
@@ -912,14 +1056,20 @@ def _enforce_summary_bounds(
     city: str,
     selected: Sequence["_Candidate"],
     id_map: Dict[int, "CitationRef"],
+    plan: Plan,
 ) -> "_PostProcessResult":
     labelled = postprocessed.answer_with_labels or ""
     if not labelled:
         return postprocessed
 
     char_len = _count_characters(labelled)
-    if bounds.min_chars > 0 and char_len < bounds.min_chars:
-        fallback = _fallback_answer(question, city, selected)
+    style_mode = get_summary_style()
+    effective_min = bounds.min_chars
+    if style_mode == "adaptive" and plan.style != "long_explanatory":
+        effective_min = 0
+
+    if effective_min > 0 and char_len < effective_min:
+        fallback = _fallback_answer(plan, question, city, selected)
         replacement = postprocess_answer(
             fallback,
             id_map,
@@ -931,7 +1081,7 @@ def _enforce_summary_bounds(
             labelled = postprocessed.answer_with_labels or ""
             char_len = _count_characters(labelled)
 
-    if bounds.min_chars > 0 and postprocessed.used_labels:
+    if effective_min > 0 and postprocessed.used_labels and style_mode != "adaptive":
         label = postprocessed.used_labels[0]
         ref = id_map.get(label)
         while ref and char_len < bounds.min_chars:
@@ -966,14 +1116,36 @@ def _enforce_summary_bounds(
 
 
 def _generate_with_constraints(prompt_cfg: _PromptConfig) -> str:
-    style = get_summary_style()
-    if style == "polite_long":
+    style_mode = get_summary_style()
+    if style_mode == "polite_long":
         gen_params = {
             "temperature": 0.5,
             "max_output_tokens": 1100,
             "frequency_penalty": 0.3,
             "presence_penalty": 0.0,
         }
+    elif style_mode == "adaptive":
+        if prompt_cfg.style == "short_direct":
+            gen_params = {
+                "temperature": 0.32,
+                "max_output_tokens": 320,
+                "frequency_penalty": 0.3,
+                "presence_penalty": 0.0,
+            }
+        elif prompt_cfg.style == "long_explanatory":
+            gen_params = {
+                "temperature": 0.45,
+                "max_output_tokens": 1100,
+                "frequency_penalty": 0.4,
+                "presence_penalty": 0.0,
+            }
+        else:
+            gen_params = {
+                "temperature": 0.35,
+                "max_output_tokens": 700,
+                "frequency_penalty": 0.35,
+                "presence_penalty": 0.0,
+            }
     else:
         gen_params = {
             "temperature": 0.1,
@@ -987,7 +1159,7 @@ def _generate_with_constraints(prompt_cfg: _PromptConfig) -> str:
     while attempts < 2:
         raw = _generate_answer(prompt_cfg.prompt, **gen_params)
         cleaned = _normalize_generated_text(raw)
-        trimmed = _truncate_sentences(cleaned, prompt_cfg.bounds.max_chars)
+        trimmed = _truncate_sentences(cleaned, min(prompt_cfg.bounds.max_chars, 800))
         char_count = _count_characters(trimmed)
         if not trimmed:
             attempts += 1
@@ -1004,9 +1176,14 @@ def _generate_with_constraints(prompt_cfg: _PromptConfig) -> str:
     return last_text
 
 
-def _fallback_answer(question: str, city: str, selected: Sequence[_Candidate]) -> str:
+def _fallback_answer(plan: Plan, question: str, city: str, selected: Sequence[_Candidate]) -> str:
     city_label = pamphlet_search.city_label(city)
-    if get_summary_style() == "polite_long":
+    style_mode = get_summary_style()
+
+    if style_mode == "adaptive":
+        return _fallback_adaptive(plan, selected, city_label)
+
+    if style_mode == "polite_long":
         if not selected:
             return "資料に該当する記述が見当たりませんでした。"
 
@@ -1058,3 +1235,48 @@ def _fallback_answer(question: str, city: str, selected: Sequence[_Candidate]) -
         lines.append(f"- {city_label}/{title}[[{idx}]]")
 
     return "\n".join(lines)
+
+
+def _fallback_adaptive(plan: Plan, selected: Sequence[_Candidate], city_label: str) -> str:
+    if not selected:
+        return "資料に該当する記述が見当たりませんでした。"
+
+    def _sentence_from_candidate(cand: _Candidate, label: int) -> str:
+        text = re.sub(r"\s+", " ", cand.chunk.text or "").strip()
+        if not text:
+            title = re.sub(r"\.(txt|md)$", "", cand.chunk.source_file, flags=re.I)
+            prefix = city_label + "の資料" if city_label else "資料"
+            text = f"{prefix}「{title}」に関連情報があります。"
+        snippet = text[:140].rstrip("。")
+        if not snippet:
+            snippet = text[:80]
+        snippet = snippet.strip()
+        if not snippet:
+            snippet = "関連情報が掲載されています"
+        if not snippet.endswith("。"):
+            snippet += "。"
+        return f"{snippet}[[{label}]]"
+
+    style = plan.style or "medium_structured"
+    primary = _sentence_from_candidate(selected[0], 1)
+
+    if style == "short_direct":
+        extras = []
+        if len(selected) > 1:
+            extras.append(_sentence_from_candidate(selected[1], 2))
+        return " ".join([primary] + extras).strip()
+
+    if style == "medium_structured":
+        bullets: List[str] = []
+        for idx, cand in enumerate(selected[1:3], start=2):
+            bullets.append(f"- {_sentence_from_candidate(cand, idx)}")
+        if bullets:
+            return "\n".join([primary] + bullets)
+        return primary
+
+    extras = []
+    for idx, cand in enumerate(selected[1:4], start=2):
+        extras.append(_sentence_from_candidate(cand, idx))
+    if extras:
+        return "\n".join([primary, " ".join(extras)])
+    return primary
