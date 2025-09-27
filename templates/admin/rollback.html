@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}ロールバック管理{% endblock %}
+{% block content %}
+<div class="container">
+  <h1>ロールバック管理</h1>
+  {% if error %}
+    <div class="alert alert-danger">{{ error }}</div>
+  {% endif %}
+  {% if snapshots %}
+    <table class="table table-striped">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>作成日時 (UTC)</th>
+          <th>アプリリビジョン</th>
+          <th>Alembic</th>
+          <th>備考</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for snap in snapshots %}
+        <tr>
+          <td>{{ snap.snapshot_id }}</td>
+          <td>{{ snap.created_at }}</td>
+          <td><code>{{ snap.app_revision[:10] }}</code></td>
+          <td>{{ snap.alembic_revision }}</td>
+          <td>{{ snap.notes }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <form method="post" class="mt-4">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="snapshot_id" value="{{ confirm_snapshot or snapshots[0].snapshot_id }}">
+      {% if confirm_snapshot %}
+        <input type="hidden" name="step" value="execute">
+        <div class="alert alert-warning">
+          <p>直前バージョン <strong>{{ confirm_snapshot }}</strong> へ即時復元します。よろしいですか？</p>
+          <p>DB・/var/data・アプリコードをすべて巻き戻します。</p>
+        </div>
+        <button type="submit" class="btn btn-danger">復元を実行する</button>
+        <a href="{{ url_for('admin_rollback.index') }}" class="btn btn-secondary">キャンセル</a>
+      {% else %}
+        <input type="hidden" name="step" value="start">
+        <button type="submit" class="btn btn-warning">直前スナップショットへ復元...</button>
+      {% endif %}
+    </form>
+  {% else %}
+    <p>利用可能なスナップショットがありません。デプロイ前に backup コマンドを実行してください。</p>
+  {% endif %}
+</div>
+{% endblock %}
