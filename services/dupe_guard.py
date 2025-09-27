@@ -11,8 +11,11 @@ _CACHE: Dict[str, float] = {}
 _RECENT_INPUTS: Dict[str, tuple[str, float]] = {}
 _RECENT_REQUESTS: Dict[str, float] = {}
 _RECENT_HASHES: Dict[str, float] = {}
+_EVENT_KEYS: Dict[str, float] = {}
+_EVENT_TEXT_KEYS: Dict[str, float] = {}
 
 WINDOW = float(os.getenv("ANTIFLOOD_TTL_SEC", "120"))
+_REPLAY_WINDOW = float(os.getenv("REPLAY_GUARD_SEC", "150"))
 _TOKEN_RE = re.compile(r"[\w]+|[\u3040-\u30FF]+|[\u4E00-\u9FFF]+")
 
 
@@ -30,6 +33,53 @@ def seen_recent(key: str) -> bool:
         return True
     _CACHE[key] = now
     return False
+
+
+def _event_key(message_id: Optional[str]) -> Optional[str]:
+    if not message_id:
+        return None
+    return f"event:{message_id}"
+
+
+def _event_text_key(user_id: str, text: str) -> str:
+    cleaned = (text or "").strip()
+    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()
+    return f"evt:{user_id}:{digest}"
+
+
+def should_process_incoming(
+    *,
+    user_id: str,
+    message_id: Optional[str],
+    text: str,
+    event_ts: Optional[float],
+    now: Optional[float] = None,
+) -> bool:
+    """Return ``True`` when the inbound message should be processed."""
+
+    now_ts = time() if now is None else now
+
+    if event_ts is not None and _REPLAY_WINDOW > 0:
+        if now_ts - event_ts > _REPLAY_WINDOW:
+            return False
+
+    msg_key = _event_key(message_id)
+    if msg_key:
+        _purge(_EVENT_KEYS, now=now_ts)
+        ts = _EVENT_KEYS.get(msg_key)
+        if ts and now_ts - ts <= WINDOW:
+            return False
+        _EVENT_KEYS[msg_key] = now_ts
+
+    if text:
+        _purge(_EVENT_TEXT_KEYS, now=now_ts)
+        text_key = _event_text_key(user_id or "anon", text)
+        ts = _EVENT_TEXT_KEYS.get(text_key)
+        if ts and now_ts - ts <= WINDOW:
+            return False
+        _EVENT_TEXT_KEYS[text_key] = now_ts
+
+    return True
 
 
 def evaluate_utterance(user_id: str, text: str, *, min_tokens: int = 2) -> Optional[str]:
@@ -88,3 +138,5 @@ def reset() -> None:
     _RECENT_INPUTS.clear()
     _RECENT_REQUESTS.clear()
     _RECENT_HASHES.clear()
+    _EVENT_KEYS.clear()
+    _EVENT_TEXT_KEYS.clear()

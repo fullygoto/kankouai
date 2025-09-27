@@ -56,7 +56,13 @@ pip install -r requirements.txt
 | `PAMPHLET_EDIT_MAX_MB` | `2` | 管理画面でのテキスト編集時の保存上限（MB） |
 | `CITATION_MIN_CHARS` | `80` | 1ドキュメントに紐づく引用テキストの最小合計文字数。未満なら出典から除外 |
 | `CITATION_MIN_SCORE` | `0.15` | 検索スコア合算の下限。`CITATION_MIN_CHARS` を満たさなくてもスコアが基準を超えれば出典採用 |
-| `ANTIFLOOD_TTL_SEC` | `120` | 同一ユーザーの重複入力や送信済み応答を抑止するTTL（秒） |
+| `ANTIFLOOD_TTL_SEC` | `120` | 入力・出力の短時間重複を抑止するTTL（秒） |
+| `REPLAY_GUARD_SEC` | `150` | LINE webhook の遅延イベントを無視するしきい値（秒） |
+| `SUMMARY_STYLE` | `polite_long` | パンフレット要約の文体。`polite_long` は丁寧長文モード |
+| `SUMMARY_MIN_CHARS` | `550` | 通常コンテキスト時の要約下限文字数 |
+| `SUMMARY_MAX_CHARS` | `800` | 要約の上限文字数（句点で丸める） |
+| `SUMMARY_MIN_FALLBACK` | `300` | コンテキストが少ない場合の最低文字数 |
+| `CONTROL_CMD_ENABLED` | `true` | 「停止」「解除」コマンドの有効/無効 |
 | `ENABLE_EVIDENCE_TOGGLE` | `true` | Web UI で根拠付き本文のトグルを表示するかどうか |
 
 アップロードは 64MB まで受け付けますが、ブラウザからの編集保存は軽量テキスト運用を想定して 2MB で上限判定します。
@@ -117,3 +123,43 @@ pip install -r requirements.txt
   - 管理者が `/admin/line/resume` を実行すると、保存済みの停止状態が全ユーザー分クリアされます。
 - テストで制御コマンドの挙動を確認する場合は `pytest tests/test_control_commands.py tests/test_control_flow.py -q` を実行してください。
 - ログには制御コマンドの状態遷移が `CTRL action=...`、状態確認が `STATE uid=...` 形式で出力されます。`解除` 直後に `STATE ... is_paused=False` が記録されているかで即時復帰を確認できます。
+
+### 8. ルーティングとロギング
+
+- ルーティングは `special → tourism → pamphlet → no_answer` の優先順で判定され、決定後のフォールバック実行は行いません。
+- 特殊ハンドラ（天気・運行状況など）がヒットした場合は `ROUTE=special` がログに出力されます。観光DBヒット時は `ROUTE=tourism`、パンフレット回答時は `ROUTE=pamphlet`、いずれも未ヒットの場合は `ROUTE=no_answer` で記録されます。
+- パンフレット回答では `CITATIONS=[{doc_id,title}]` が INFO ログに出力され、利用した出典のみが列挙されます。
+- AntiFlood の判定結果は `ANTIFLOOD key=<...> hit=<true|false>` としてログに残るため、意図しない抑止が発生していないか確認できます。
+
+## テスト
+
+開発中は最低限下記の Pytest を通してください。パンフレットまわりは OpenAI API キーなしでもフォールバックで動作します。
+
+```bash
+pytest tests/test_routing_priority.py \
+       tests/test_citations_guard.py \
+       tests/test_summary_length.py \
+       tests/test_controls_antiflood.py \
+       tests/test_admin_smoke.py
+```
+
+管理画面や既存の制御コマンドの回帰を一括で確認したい場合は `pytest` を無引数で実行してください。
+
+## デプロイ手順（ステージング→本番）
+
+1. ステージング環境で `pytest` を全件実行し緑化する。
+2. ステージングの Render サービスをデプロイし、以下の手動スモークを実施する。
+   - `/healthz` と `/readyz` が 200/`ready` を返すこと。
+   - LINE 実機で「停止 2分 → 解除 → 通常発話」が即時復帰すること。
+   - 「今日の天気」「〇〇（観光地名）」で special/tourism が優先されること。
+   - 「もっと詳しく」でパンフレット要約が 300〜800 字で返り、出典が利用分のみ表示されること。
+   - 管理画面で観光データ CRUD、パンフレット登録/更新/検索、バックアップ ZIP/URL 復元、設定画面、ログ/未ヒット一覧が正常に動作すること。
+3. `develop` を `main` にマージし、本番 Render をカナリア（ワーカー1）でデプロイする。
+4. カナリアで上記スモークを再実施し、15分程度ログの `ROUTE`/`CTRL`/`CITATIONS`/`ANTIFLOOD` を監視する。
+5. 問題なければワーカー数を通常値に戻し本番リリース完了。
+
+### ロールバック
+
+- Render の直前リリース（前バージョン）へ即時ロールバックできるよう、デプロイ履歴と Git コミットを事前確認しておきます。
+- DB スキーマ変更を行う場合は後方互換を維持するか、ダウングレード手順を本 README に追記してください。
+- LINE 公式アカウントの応答設定（あいさつ／自動返信 OFF）や `.env` のキー差異も、本番反映前に確認します。
