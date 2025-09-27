@@ -22,11 +22,8 @@ def run_demo() -> dict:
         vector_index=None,
     )
     context, id_map = pamphlet_rag.build_context_with_labels([candidate])
-    prompt = pamphlet_rag._build_prompt("観光スポットは？", "goto", ["観光"], context)
-    mocked_answer = (
-        "### 要約\n五島市のパンフレットでは主要な観光地が紹介されています。[[1]]\n\n"
-        "### 出典\n- 五島市/demo[[1]]"
-    )
+    prompt_cfg = pamphlet_rag._build_prompt("観光スポットは？", "goto", ["観光"], context)
+    mocked_answer = "五島市のパンフレットでは主要な観光地が紹介されています。[[1]]"
     result = pamphlet_rag.postprocess_answer(
         mocked_answer,
         id_map,
@@ -34,7 +31,7 @@ def run_demo() -> dict:
         min_score=0.0,
     )
     return {
-        "prompt": prompt,
+        "prompt": prompt_cfg.prompt,
         "context": context,
         "answer_without_labels": result.answer_without_labels,
         "answer_with_labels": result.answer_with_labels,

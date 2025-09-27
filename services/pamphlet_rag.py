@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import logging
 import os
 import re
 import time
@@ -17,6 +16,7 @@ except Exception:  # pragma: no cover - allow running without OpenAI
     OpenAI = None  # type: ignore
 
 from . import pamphlet_search
+from .summary_config import SummaryBounds, get_summary_bounds, get_summary_style
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,53 @@ _CITATION_MIN_CHARS = int(os.getenv("CITATION_MIN_CHARS", "80"))
 _CITATION_MIN_SCORE = float(os.getenv("CITATION_MIN_SCORE", "0.15"))
 
 _LABEL_PATTERN = re.compile(r"\[\[(\d+)\]\]")
+
+
+@dataclass
+class _PromptConfig:
+    prompt: str
+    bounds: SummaryBounds
+
+
+PROMPT_SUMMARY_POLITE_LONG = (
+    "あなたは観光案内の編集者です。以下のコンテキスト【番号付き】だけを根拠に、\n"
+    "日本語でやさしく丁寧に説明してください。\n\n"
+    "制約:\n"
+    "- 文章量は {length_note} 文字を目安（上限 {max_chars} 文字厳守）。\n"
+    "- 各文の末尾に必ず [[番号]] を付与（与えたIDのみ使用）。\n"
+    "- 外部知識や推測は厳禁。日時・数値・名称はコンテキストからのみ。\n"
+    "- 箇条書きは避け、自然な段落1〜2個でまとめる。\n"
+    "- 初めて読む人にも前提を補い、場所・見どころ・体験・注意点・アクセスなどを簡潔に補足する。\n"
+    "- 同語反復を避け、言い換えで読みやすく。\n"
+    "{extra_note}"
+    "{question_line}"
+    "{city_line}"
+    "{query_line}\n\n"
+    "【コンテキスト（番号付き）】\n"
+    "{context}\n"
+)
+
+
+PROMPT_SUMMARY_TERSE_SHORT = (
+    "あなたのタスクは、以下のコンテキストだけを根拠に日本語で要約を書くことです。\n"
+    "ルール:\n"
+    "- 各文末に必ず [[番号]] を付けてください（例：「〜であった。[[1]]」）。\n"
+    "- [[番号]] は与えられた参照IDのみ使用し、推測や新規情報は禁止。\n"
+    "- 出典数を増やすための不要な分割は禁止。簡潔に。\n"
+    "- 指示されたセクション構成を守り、根拠は与えられた内容のみに限定する。\n\n"
+    "{question_line}"
+    "{city_line}"
+    "{query_line}\n\n"
+    "【コンテキスト（番号付き）】\n"
+    "{context}\n\n"
+    "出力フォーマット:\n"
+    "### 要約\n"
+    "質問に直接答える2〜4文。各文末に [[番号]] を付ける。\n\n"
+    "### 詳細\n"
+    "- 重要な追加事項を箇条書き（最大2行・各行末に [[番号]]）。必要なければ省略。\n\n"
+    "### 出典\n"
+    "- 市町/ファイル名（本文で使用した参照のみ）\n"
+)
 
 _CLIENT: Optional[Any] = None
 
@@ -184,8 +231,8 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
         }
 
     context_text, id_map = build_context_with_labels(selected)
-    prompt = _build_prompt(question, city, used_queries, context_text)
-    answer_text = _generate_answer(prompt)
+    prompt_cfg = _build_prompt(question, city, used_queries, context_text)
+    answer_text = _generate_with_constraints(prompt_cfg)
 
     postprocessed = postprocess_answer(
         answer_text,
@@ -217,7 +264,7 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
 
     debug_payload = dict(debug_info or {})
     debug_payload["queries"] = used_queries
-    debug_payload["prompt"] = prompt
+    debug_payload["prompt"] = prompt_cfg.prompt
     if postprocessed.invalid_labels:
         debug_payload["invalid_labels"] = sorted(postprocessed.invalid_labels)
 
@@ -699,38 +746,51 @@ def _build_prompt(
     city: str,
     queries: Sequence[str],
     context_text: str,
-) -> str:
+) -> _PromptConfig:
     city_label = pamphlet_search.city_label(city)
-    lines = [
-        "あなたのタスクは、以下のコンテキストだけを根拠に日本語で要約を書くことです。",
-        "ルール:",
-        "- 各文末に必ず [[番号]] を付けてください（例：「〜であった。[[1]]」）。",
-        "- [[番号]] は与えられた参照IDのみ使用し、推測や新規情報は禁止。",
-        "- 出典数を増やすための不要な分割は禁止。簡潔に。",
-        "- 指示されたセクション構成を守り、根拠は与えられた内容のみに限定する。",
-        "",
-        f"質問: {question}",
-        f"対象市町: {city_label}",
-        f"検索クエリ候補: {', '.join(queries)}",
-        "",
-        "【コンテキスト（番号付き）】",
-        context_text,
-        "",
-        "出力フォーマット:",
-        "### 要約",
-        "質問に直接答える2〜4文。各文末に [[番号]] を付ける。",
-        "",
-        "### 詳細",
-        "- 重要な追加事項を箇条書き（最大2行・各行末に [[番号]]）。必要なければ省略。",
-        "",
-        "### 出典",
-        "- 市町/ファイル名（本文で使用した参照のみ）",
-    ]
+    style = get_summary_style()
+    bounds = get_summary_bounds(context_text)
 
-    return "\n".join(line for line in lines if line is not None)
+    question_line = f"質問: {question}\n" if question else ""
+    city_line = f"対象市町: {city_label}\n" if city_label else ""
+    query_line = ""
+    if queries:
+        joined = ", ".join(q for q in queries if q)
+        if joined:
+            query_line = f"検索クエリ候補: {joined}\n"
+
+    if style == "polite_long":
+        length_note = f"{bounds.min_chars}〜{bounds.max_chars}"
+        extra_note = "- コンテキストが短いため、無理に長文化せず自然な分量でまとめてください。" if bounds.is_short_context else ""
+        extra_note_text = f"{extra_note}\n\n" if extra_note else "\n"
+        prompt = PROMPT_SUMMARY_POLITE_LONG.format(
+            length_note=length_note,
+            max_chars=bounds.max_chars,
+            extra_note=extra_note_text,
+            question_line=question_line,
+            city_line=city_line,
+            query_line=query_line,
+            context=context_text,
+        )
+        return _PromptConfig(prompt=prompt, bounds=bounds)
+
+    prompt = PROMPT_SUMMARY_TERSE_SHORT.format(
+        question_line=question_line,
+        city_line=city_line,
+        query_line=query_line,
+        context=context_text,
+    )
+    return _PromptConfig(prompt=prompt, bounds=bounds)
 
 
-def _generate_answer(prompt: str) -> str:
+def _generate_answer(
+    prompt: str,
+    *,
+    temperature: float,
+    max_output_tokens: int,
+    frequency_penalty: float = 0.0,
+    presence_penalty: float = 0.0,
+) -> str:
     client = _get_client()
     if not client or not os.getenv("OPENAI_API_KEY"):
         return ""
@@ -744,7 +804,10 @@ def _generate_answer(prompt: str) -> str:
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.1,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
         )
         return getattr(response, "output_text", "").strip()
     except Exception as exc:
@@ -752,8 +815,110 @@ def _generate_answer(prompt: str) -> str:
         return ""
 
 
+def _normalize_generated_text(text: str) -> str:
+    if not text:
+        return ""
+    lines = [(line or "").rstrip() for line in str(text).splitlines()]
+    cleaned = "\n".join(lines).strip()
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    return cleaned
+
+
+def _truncate_sentences(text: str, limit: int) -> str:
+    if not text:
+        return ""
+    if limit <= 0:
+        return text.strip()
+    trimmed = text.strip()
+    if len(trimmed) <= limit:
+        return trimmed
+    matches = list(_LABEL_PATTERN.finditer(trimmed))
+    if not matches:
+        return trimmed[:limit].rstrip()
+    for match in reversed(matches):
+        end = match.end()
+        candidate = trimmed[:end].rstrip()
+        if len(candidate) <= limit:
+            return candidate
+    return trimmed[:limit].rstrip()
+
+
+def _count_characters(text: str) -> int:
+    if not text:
+        return 0
+    return len(text)
+
+
+def _generate_with_constraints(prompt_cfg: _PromptConfig) -> str:
+    style = get_summary_style()
+    if style == "polite_long":
+        gen_params = {
+            "temperature": 0.5,
+            "max_output_tokens": 1100,
+            "frequency_penalty": 0.3,
+            "presence_penalty": 0.0,
+        }
+    else:
+        gen_params = {
+            "temperature": 0.1,
+            "max_output_tokens": 700,
+            "frequency_penalty": 0.0,
+            "presence_penalty": 0.0,
+        }
+
+    attempts = 0
+    last_text = ""
+    while attempts < 2:
+        raw = _generate_answer(prompt_cfg.prompt, **gen_params)
+        cleaned = _normalize_generated_text(raw)
+        trimmed = _truncate_sentences(cleaned, prompt_cfg.bounds.max_chars)
+        char_count = _count_characters(trimmed)
+        if not trimmed:
+            attempts += 1
+            last_text = trimmed
+            continue
+        if char_count < prompt_cfg.bounds.min_chars and attempts == 0:
+            attempts += 1
+            last_text = trimmed
+            continue
+        if char_count > prompt_cfg.bounds.max_chars:
+            trimmed = _truncate_sentences(trimmed, prompt_cfg.bounds.max_chars)
+        return trimmed
+
+    return last_text
+
+
 def _fallback_answer(question: str, city: str, selected: Sequence[_Candidate]) -> str:
     city_label = pamphlet_search.city_label(city)
+    if get_summary_style() == "polite_long":
+        if not selected:
+            return "資料に該当する記述が見当たりませんでした。"
+
+        primary = selected[0].chunk
+        primary_title = re.sub(r"\.(txt|md)$", "", primary.source_file, flags=re.I)
+        intro = f"{city_label}の資料「{primary_title}」にはご質問と関連する案内が掲載されています。[[1]]"
+
+        detail_sentences: List[str] = []
+        for idx, cand in enumerate(selected[:2], start=1):
+            chunk = cand.chunk
+            title = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
+            snippet = re.sub(r"\s+", " ", chunk.text).strip()
+            if not snippet:
+                continue
+            excerpt = snippet[:120]
+            detail_sentences.append(
+                f"例えば「{title}」では「{excerpt}」と紹介され、旅の雰囲気をイメージできます。[[{idx}]]"
+            )
+
+        if not detail_sentences:
+            detail_sentences.append(
+                "資料を参照すると、交通や見どころの概要が分かり、行程づくりの助けになります。[[1]]"
+            )
+
+        body = " ".join(detail_sentences)
+        return f"{intro}\n\n{body}".strip()
+
     if not selected:
         return "### 要約\n資料に該当する記述が見当たりませんでした。"
 

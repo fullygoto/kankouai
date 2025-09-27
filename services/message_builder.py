@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, List, Sequence
 
 from .sources_fmt import format_sources_md
+from .summary_config import get_summary_style
 
 SHOW_NOTES = False
 _MAX_DETAILS = 2
@@ -87,10 +88,18 @@ class PamphletMessage:
 
 
 def parse_pamphlet_answer(raw: str) -> PamphletAnswer:
+    raw_text = (raw or "").strip()
+    if not raw_text:
+        return PamphletAnswer()
+
+    lines = raw_text.splitlines()
+    if not any(_normalize_header(line) for line in lines):
+        return PamphletAnswer(summary=raw_text, details=[], notes=[])
+
     sections: dict[str, List[str]] = {name: [] for name in _HEADER_MAP.values()}
     current = "summary"
 
-    for line in (raw or "").splitlines():
+    for line in lines:
         header = _normalize_header(line)
         if header:
             current = header
@@ -109,6 +118,9 @@ def parse_pamphlet_answer(raw: str) -> PamphletAnswer:
 
 
 def _expand_summary(base: str, details: Sequence[str]) -> tuple[str, int]:
+    if get_summary_style() == "polite_long":
+        return (base or "").strip(), 0
+
     sentences = _split_sentences(base)
     detail_sentences = [_ensure_sentence(d) for d in details if d]
 
@@ -151,6 +163,32 @@ def build_pamphlet_message(
     remaining_details = [d for d in remaining_details if d and d != "資料に明記なし"]
     if len(remaining_details) > _MAX_DETAILS:
         remaining_details = remaining_details[:_MAX_DETAILS]
+
+    style = get_summary_style()
+
+    if style == "polite_long":
+        summary_candidate = summary_text.strip()
+        if not summary_candidate:
+            fallback = _ensure_sentence(answer.summary)
+            if fallback:
+                summary_candidate = fallback.strip()
+            elif remaining_details:
+                summary_candidate = _ensure_sentence(remaining_details[0]).strip()
+                remaining_details = remaining_details[1:]
+
+        summary_candidate = summary_candidate.strip()
+        text_parts: List[str] = [summary_candidate] if summary_candidate else []
+        sources_md = format_sources_md(sources)
+        if sources_md:
+            text_parts.append(sources_md)
+
+        text = "\n\n".join(part for part in text_parts if part).strip()
+        return PamphletMessage(
+            text=text,
+            summary=summary_candidate,
+            details=[],
+            sources_md=sources_md,
+        )
 
     if not summary_text:
         fallback = _ensure_sentence(answer.summary)
