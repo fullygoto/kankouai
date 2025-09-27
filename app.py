@@ -75,12 +75,14 @@ from services import (
     pamphlet_rag,
     pamphlet_search,
     pamphlet_summarize,
+    pamphlet_store,
     input_normalizer,
     dupe_guard,
     line_handlers,
     state as user_state,
 )
 from admin_pamphlets import bp as admin_pamphlets_bp
+from config import DATA_BASE_DIR as CONFIG_DATA_BASE_DIR
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
@@ -4077,18 +4079,21 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
 
 
 # データ格納先
-BASE_DIR       = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/data
-ENTRIES_FILE   = os.path.join(BASE_DIR, "entries.json")
-DATA_DIR       = os.path.join(BASE_DIR, "data")
-LOG_DIR        = os.path.join(BASE_DIR, "logs")
-LOG_FILE       = os.path.join(LOG_DIR, "questions_log.jsonl")
-SYNONYM_FILE   = os.path.join(BASE_DIR, "synonyms.json")
-USERS_FILE     = os.path.join(BASE_DIR, "users.json")
-NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
-SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
+BASE_PATH = Path(CONFIG_DATA_BASE_DIR).resolve()
+BASE_DIR = str(BASE_PATH)
+DATA_DIR_PATH = BASE_PATH / "data"
+LOG_DIR_PATH = BASE_PATH / "logs"
+ENTRIES_FILE = str(BASE_PATH / "entries.json")
+DATA_DIR = str(DATA_DIR_PATH)
+LOG_DIR = str(LOG_DIR_PATH)
+LOG_FILE = str(LOG_DIR_PATH / "questions_log.jsonl")
+SYNONYM_FILE = str(BASE_PATH / "synonyms.json")
+USERS_FILE = str(BASE_PATH / "users.json")
+NOTICES_FILE = str(BASE_PATH / "notices.json")
+SHOP_INFO_FILE = str(BASE_PATH / "shop_infos.json")
 
 # ★ 一度だけ案内フラグの保存先 & TTL（秒）
-PAUSED_NOTICE_FILE    = os.path.join(BASE_DIR, "paused_notice.json")  # もしくは DATA_DIR に置いても可
+PAUSED_NOTICE_FILE    = str(BASE_PATH / "paused_notice.json")  # もしくは DATA_DIR に置いても可
 PAUSED_NOTICE_TTL_SEC = int(os.getenv("PAUSED_NOTICE_TTL_SEC", "86400"))  # 既定: 24時間
 
 # 送信確定ログ（JSON Lines）
@@ -4099,8 +4104,37 @@ SEND_LOG_SAMPLE = float(os.environ.get("SEND_LOG_SAMPLE", "1.0"))
 
 # === Images: config + route + normalized save (唯一の正) ===
 MEDIA_URL_PREFIX = "/media/img"  # 画像URLの先頭
-IMAGES_DIR = os.path.join(DATA_DIR, "images")
-os.makedirs(IMAGES_DIR, exist_ok=True)
+IMAGES_DIR = str((DATA_DIR_PATH / "images"))
+
+
+def _prepare_runtime_dirs() -> None:
+    """Ensure writable directories exist before the app handles requests."""
+
+    for path in (BASE_PATH, DATA_DIR_PATH, LOG_DIR_PATH, Path(IMAGES_DIR)):
+        path.mkdir(parents=True, exist_ok=True)
+    pamphlet_store.ensure_dirs()
+
+
+_DIRS_PREPARED = False
+_DIRS_PREPARED_LOCK = threading.Lock()
+
+
+def _ensure_dirs_once() -> None:
+    """Prepare runtime directories once per process."""
+
+    global _DIRS_PREPARED
+    if _DIRS_PREPARED:
+        return
+    with _DIRS_PREPARED_LOCK:
+        if _DIRS_PREPARED:
+            return
+        _prepare_runtime_dirs()
+        _DIRS_PREPARED = True
+
+
+@app.before_request
+def _ensure_dirs_before_request() -> None:
+    _ensure_dirs_once()
 
 # 入力として受け付ける拡張子（出力は常に .jpg）
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -11741,5 +11775,6 @@ def admin_unhit_save_text():
 
 # メイン起動（重複禁止：これ1つだけ残す）
 if __name__ == "__main__":
+    _ensure_dirs_once()
     port = int(os.getenv("PORT","5000"))
     app.run(host="0.0.0.0", port=port, debug=(APP_ENV not in {"prod","production"}))

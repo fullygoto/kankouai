@@ -1,7 +1,11 @@
 # config.py
 import os
 
-PAMPHLET_BASE_DIR = os.getenv("PAMPHLET_BASE_DIR", "/var/data/pamphlets")
+from services.paths import get_data_base_dir
+
+DATA_BASE_DIR = get_data_base_dir()
+PAMPHLET_BASE_DIR = os.getenv("PAMPHLET_BASE_DIR") or str(DATA_BASE_DIR / "pamphlets")
+SYSTEM_BASE_DIR = os.getenv("SYSTEM_BASE_DIR") or str(DATA_BASE_DIR / "system")
 PAMPHLET_CITIES = {
     "goto": "五島市",
     "shinkamigoto": "新上五島町",
@@ -27,7 +31,9 @@ class BaseConfig:
     # 表示用
     ENV_NAME = os.getenv("APP_ENV", "development")
     # Pamphlet search
+    DATA_BASE_DIR = str(DATA_BASE_DIR)
     PAMPHLET_BASE_DIR = PAMPHLET_BASE_DIR
+    SYSTEM_BASE_DIR = SYSTEM_BASE_DIR
     PAMPHLET_TOPK = int(os.getenv("PAMPHLET_TOPK", "12"))
     PAMPHLET_CHUNK_SIZE = int(os.getenv("PAMPHLET_CHUNK_SIZE", "700"))
     PAMPHLET_CHUNK_OVERLAP = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "150"))

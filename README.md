@@ -29,7 +29,7 @@ pip install -r requirements.txt
 
 ### 2. パンフレット検索フォールバックの準備
 
-市町別パンフレットを以下のディレクトリ構成で配置します（既定パスは`/var/data/pamphlets`）。
+市町別パンフレットを以下のディレクトリ構成で配置します（既定パスは`./data/pamphlets`。本番環境では`/var/data/pamphlets`）。
 
 ```
 {PAMPHLET_BASE_DIR}/
@@ -47,7 +47,7 @@ pip install -r requirements.txt
 
 | 変数名 | 既定値 | 説明 |
 | ------ | ------ | ---- |
-| `PAMPHLET_BASE_DIR` | `/var/data/pamphlets` | パンフレットテキストの格納ルート |
+| `PAMPHLET_BASE_DIR` | `./data/pamphlets`（APP_ENV=production は `/var/data/pamphlets`） | パンフレットテキストの格納ルート |
 | `PAMPHLET_TOPK` | `3` | 要約に渡す上位チャンク数 |
 | `PAMPHLET_CHUNK_SIZE` | `1500` | チャンク長（文字数） |
 | `PAMPHLET_CHUNK_OVERLAP` | `200` | チャンク重複幅（文字数） |
@@ -119,7 +119,7 @@ pip install -r requirements.txt
 - 回答末尾には「出典（パンフレット名）」が付与されます。
 - 追加情報が必要な場合は、ユーザーが「もっと詳しく」を選ぶと詳細要約を再提示します。
 - LINE 停止/再開コマンド（「停止」「停止 60分」「解除」「再開」など）は SQLite でユーザー単位に永続化されます。
-  - 既定の保存先は `/var/data/system/user_state.sqlite` です。存在しない場合は自動作成されます。
+- 既定の保存先は `./data/system/user_state.sqlite`（本番は `/var/data/system/user_state.sqlite`）です。存在しない場合は自動作成されます。
   - コントロールの既定 TTL は `PAUSE_DEFAULT_TTL_SEC=86400`（24時間）で、メッセージ内の `60分`、`2h`、`1日` といった表記で上書きできます。
   - 環境変数 `CONTROL_CMD_ENABLED=true` のときに有効化されます。無効化すると旧挙動（ファイルフラグ）のみで動作します。
   - 管理者が `/admin/line/resume` を実行すると、保存済みの停止状態が全ユーザー分クリアされます。
