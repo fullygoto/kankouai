@@ -2986,6 +2986,9 @@ if _line_enabled():
                     tm.quick_reply = quick_reply
                 messages.append(tm)
             emit_response(event, messages)
+            app.logger.info("ROUTE=pamphlet text=%s", text)
+            if result.citations:
+                app.logger.info("CITATIONS=%s", result.citations)
             try:
                 extra = {"kind": "pamphlet"}
                 if result.city:
@@ -3289,16 +3292,32 @@ def handle_message(event):
         app.logger.debug("skip message for paused user: %s", uid)
         return
 
+    message_id = getattr(getattr(event, "message", None), "id", None)
+    event_ts_raw = getattr(event, "timestamp", None)
+    event_ts = None
+    if event_ts_raw is not None:
+        try:
+            event_ts = float(event_ts_raw) / 1000.0
+        except Exception:
+            event_ts = None
+
+    allow = dupe_guard.should_process_incoming(
+        user_id=uid or "anon",
+        message_id=message_id,
+        text=text or "",
+        event_ts=event_ts,
+        now=now_epoch,
+    )
+    key_digest = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:10]
+    flood_key = message_id or f"{uid}:{key_digest}"
+    app.logger.info("ANTIFLOOD key=%s hit=%s", flood_key, "true" if not allow else "false")
+    if not allow:
+        return
+
     reason = dupe_guard.evaluate_utterance(line_user_id or "anon", text)
     if reason:
         app.logger.debug("[dupe_guard] suppress input %s: %s", line_user_id, reason)
         return
-
-    if text:
-        dedupe_key = f"line:{line_user_id}:{text}"
-        if dupe_guard.seen_recent(dedupe_key):
-            app.logger.debug("[dupe_guard] suppressed duplicate message for %s", line_user_id)
-            return
 
     # --- ① ミュート/一時停止ゲート -------------------------
     try:
@@ -3420,15 +3439,17 @@ def handle_message(event):
         w, ok = get_weather_reply(text)
         app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
         if ok and w:
+            app.logger.info("ROUTE=special text=%s", text)
             _reply_quick_no_dedupe(event, w)
             save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
             return
-        
+
         # ④-2 mobility（レンタカー／タクシー／バス／レンタサイクル）→ fullyGOTOリンク最優先
         try:
             mmsg, mok = get_mobility_reply(text)  # ← ここでリンク or 事業者詳細を決定
             app.logger.debug(f"[quick] mobility_match={mok} text={text!r}")
             if mok and mmsg:
+                app.logger.info("ROUTE=special text=%s", text)
                 _reply_quick_no_dedupe(event, mmsg)  # 長文分割/重複抑止の既存ユーティリティを活用
                 try:
                     save_qa_log(text, mmsg, source="line", hit_db=False,
@@ -3444,6 +3465,7 @@ def handle_message(event):
         tmsg, ok = get_transport_reply(text)
         app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
         if ok and tmsg:
+            app.logger.info("ROUTE=special text=%s", text)
             _reply_quick_no_dedupe(event, tmsg)
             save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
             return
@@ -3608,6 +3630,7 @@ def handle_message(event):
             msgs.append(TextSendMessage(text=p))
 
         _safe_reply_or_push(event, msgs)
+        app.logger.info("ROUTE=%s text=%s", "tourism" if hit else "no_answer", text)
 
         joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
         save_qa_log(text, joined, source="line", hit_db=hit)

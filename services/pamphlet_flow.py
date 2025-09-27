@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -94,8 +95,8 @@ def build_response(
     session.clear_pending(user_id)
 
     answer = pamphlet_rag.answer_from_pamphlets(stripped, city_key)
-    raw_message = answer.get("answer", "").strip()
-    labelled_message = answer.get("answer_with_labels", "").strip()
+    labelled_message = (answer.get("answer_with_labels") or "").strip()
+    raw_message = labelled_message or (answer.get("answer") or "").strip()
     citations_info = answer.get("citations", []) or []
     sources_payload = citations_info or (answer.get("sources", []) or [])
     normalized_sources = normalize_sources(sources_payload)
@@ -106,8 +107,20 @@ def build_response(
     message = built.text
     sources_md = built.sources_md
 
+    def _sentences_have_labels(text: str) -> bool:
+        sentences = [seg.strip() for seg in re.split(r"(?<=[。！？!?])", text or "") if seg.strip()]
+        if not sentences:
+            return False
+        for seg in sentences:
+            if not seg.endswith("]]"):
+                return False
+        return True
+
     if not message:
         message = "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。"
+
+    if labelled_message and _sentences_have_labels(labelled_message) and not _sentences_have_labels(message):
+        message = labelled_message
 
     if not normalized_sources:
         session.clear_followup(user_id)
@@ -134,5 +147,5 @@ def build_response(
         sources_md=footer,
         more_available=False,
         citations=citations_info,
-        message_with_labels=labelled_message,
+        message_with_labels=message if message else labelled_message,
     )

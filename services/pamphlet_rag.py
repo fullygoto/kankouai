@@ -250,6 +250,15 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             min_score=_CITATION_MIN_SCORE,
         )
 
+    postprocessed = _enforce_summary_bounds(
+        postprocessed,
+        bounds=prompt_cfg.bounds,
+        question=question,
+        city=city,
+        selected=selected,
+        id_map=id_map,
+    )
+
     sources = [
         {
             "city": ref.city,
@@ -427,6 +436,20 @@ def postprocess_answer(
 ) -> _PostProcessResult:
     segments, invalid, labelled, plain = _extract_label_segments(answer_text or "", id_map)
     citations, allowed_labels = _aggregate_citations(segments, id_map, min_chars=min_chars, min_score=min_score)
+
+    allowed_set = set(allowed_labels)
+    if allowed_set:
+        filtered_labelled = []
+        filtered_plain = []
+        for label, text in segments:
+            if label in allowed_set:
+                filtered_labelled.append(f"{text}[[{label}]]")
+                filtered_plain.append(text)
+        rebuilt_labelled = "".join(filtered_labelled).strip()
+        rebuilt_plain = "".join(filtered_plain).strip()
+        if rebuilt_labelled:
+            labelled = rebuilt_labelled
+            plain = rebuilt_plain
 
     used_labels = allowed_labels
     if not labelled or not citations:
@@ -848,6 +871,98 @@ def _count_characters(text: str) -> int:
     if not text:
         return 0
     return len(text)
+
+
+def _append_sentence(base: str, addition: str) -> str:
+    base = (base or "").strip()
+    addition = (addition or "").strip()
+    if not addition:
+        return base
+    if not base:
+        return addition
+    if base.endswith("\n"):
+        return f"{base}{addition}"
+    return f"{base}\n\n{addition}" if "\n" in base else f"{base} {addition}"
+
+
+def _sentence_from_ref(ref: "CitationRef", label: int, *, desired_len: int) -> Tuple[str, str]:
+    snippet = re.sub(r"\s+", " ", ref.text or "").strip()
+    if not snippet:
+        return "", ""
+    target_len = max(desired_len, 120)
+    segment = snippet[:target_len]
+    if len(snippet) > target_len:
+        segment = segment.rstrip("。")
+    if not segment:
+        segment = snippet[:80]
+    segment = segment.strip()
+    if not segment:
+        return "", ""
+    if not segment.endswith("。"):
+        segment = f"{segment}。"
+    labelled = f"{segment}[[{label}]]"
+    return labelled, segment
+
+
+def _enforce_summary_bounds(
+    postprocessed: "_PostProcessResult",
+    *,
+    bounds: SummaryBounds,
+    question: str,
+    city: str,
+    selected: Sequence["_Candidate"],
+    id_map: Dict[int, "CitationRef"],
+) -> "_PostProcessResult":
+    labelled = postprocessed.answer_with_labels or ""
+    if not labelled:
+        return postprocessed
+
+    char_len = _count_characters(labelled)
+    if bounds.min_chars > 0 and char_len < bounds.min_chars:
+        fallback = _fallback_answer(question, city, selected)
+        replacement = postprocess_answer(
+            fallback,
+            id_map,
+            min_chars=_CITATION_MIN_CHARS,
+            min_score=_CITATION_MIN_SCORE,
+        )
+        if replacement.answer_with_labels:
+            postprocessed = replacement
+            labelled = postprocessed.answer_with_labels or ""
+            char_len = _count_characters(labelled)
+
+    if bounds.min_chars > 0 and postprocessed.used_labels:
+        label = postprocessed.used_labels[0]
+        ref = id_map.get(label)
+        while ref and char_len < bounds.min_chars:
+            addition_labelled, addition_plain = _sentence_from_ref(
+                ref,
+                label,
+                desired_len=bounds.min_chars - char_len,
+            )
+            if not addition_labelled:
+                break
+            postprocessed.answer_with_labels = _append_sentence(
+                postprocessed.answer_with_labels,
+                addition_labelled,
+            )
+            postprocessed.answer_without_labels = _append_sentence(
+                postprocessed.answer_without_labels,
+                addition_plain,
+            )
+            char_len = _count_characters(postprocessed.answer_with_labels)
+
+    if bounds.max_chars and char_len > bounds.max_chars:
+        postprocessed.answer_with_labels = _truncate_sentences(
+            postprocessed.answer_with_labels,
+            bounds.max_chars,
+        )
+        postprocessed.answer_without_labels = _truncate_sentences(
+            postprocessed.answer_without_labels,
+            bounds.max_chars,
+        )
+
+    return postprocessed
 
 
 def _generate_with_constraints(prompt_cfg: _PromptConfig) -> str:
