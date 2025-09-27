@@ -1,5 +1,3 @@
-import textwrap
-
 import pytest
 
 from services import pamphlet_rag, pamphlet_search
@@ -58,18 +56,7 @@ def test_build_context_with_labels(sample_id_map):
 
 
 def test_postprocess_applies_thresholds(sample_id_map):
-    answer = textwrap.dedent(
-        """
-        ### 要約
-        長い説明をまとめました。[[1]]
-
-        ### 詳細
-        - 補[[2]]
-
-        ### 出典
-        - 五島市/history
-        """
-    ).strip()
+    answer = "長い説明をまとめました。[[1]]\n夏祭りの雰囲気も伝わります。[[2]]"
 
     processed = pamphlet_rag.postprocess_answer(
         answer,
@@ -78,8 +65,8 @@ def test_postprocess_applies_thresholds(sample_id_map):
         min_score=0.2,
     )
 
-    assert processed.answer_with_labels.startswith("### 要約")
-    assert processed.answer_without_labels.startswith("### 要約")
+    assert processed.answer_with_labels.startswith("長い説明")
+    assert processed.answer_without_labels.startswith("長い説明")
     assert len(processed.citations) == 1
     assert processed.citations[0]["doc_id"] == "goto/history.txt"
     assert processed.used_labels == [1]
@@ -98,3 +85,12 @@ def test_postprocess_missing_labels_adds_note(sample_id_map):
     assert processed.citations == []
     assert processed.used_labels == []
     assert processed.invalid_labels == [9]
+
+
+def test_truncate_sentences_respects_label_boundaries():
+    text = "見どころを紹介します。[[1]]\n二つ目の文です。[[2]]"
+
+    truncated = pamphlet_rag._truncate_sentences(text, limit=20)
+
+    assert truncated.endswith("[[1]]")
+    assert "[[2]]" not in truncated

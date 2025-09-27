@@ -1,7 +1,10 @@
-from services.message_builder import build_pamphlet_message, parse_pamphlet_answer
+import importlib
+
+import services.message_builder as message_builder
 
 
-def test_build_message_removes_intent_and_notes():
+def test_build_message_removes_intent_and_notes(monkeypatch):
+    monkeypatch.setenv("SUMMARY_STYLE", "terse_short")
     raw = """質問の意図
 五島市の遣唐使について整理する。
 要約
@@ -17,8 +20,9 @@ def test_build_message_removes_intent_and_notes():
 - 五島市/五島市_観光ガイドブックひとたび五島.md/L20-22
 """
 
-    parsed = parse_pamphlet_answer(raw)
-    built = build_pamphlet_message(
+    importlib.reload(message_builder)
+    parsed = message_builder.parse_pamphlet_answer(raw)
+    built = message_builder.build_pamphlet_message(
         parsed,
         [
             "五島市/長崎五島観光ガイド.txt/L10-12",
@@ -36,3 +40,30 @@ def test_build_message_removes_intent_and_notes():
         assert line.startswith("- 五島市/")
         assert ".txt" not in line and ".md" not in line
         assert "L" not in line
+
+
+def test_build_message_polite_long_style(monkeypatch):
+    monkeypatch.setenv("SUMMARY_STYLE", "polite_long")
+    raw = "海辺の散策は潮の香りと教会の景観を楽しめます。[[1]]\n\n家族で参加できる体験も紹介されています。[[2]]"
+
+    importlib.reload(message_builder)
+    parsed = message_builder.parse_pamphlet_answer(raw)
+    built = message_builder.build_pamphlet_message(
+        parsed,
+        ["五島市/海と教会ガイド.txt", "五島市/体験プラン集.md"],
+    )
+
+    assert not built.text.startswith("###")
+    assert built.text.count("[[1]]") == 1
+    assert "### 出典" in built.text
+    assert built.details == []
+
+
+def test_parse_plain_answer_returns_summary(monkeypatch):
+    monkeypatch.setenv("SUMMARY_STYLE", "polite_long")
+    raw = "港町の散策路は季節の花が彩ります。[[3]]"
+
+    importlib.reload(message_builder)
+    parsed = message_builder.parse_pamphlet_answer(raw)
+    assert parsed.summary == raw
+    assert parsed.details == []
