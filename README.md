@@ -15,6 +15,7 @@
 - 管理画面から観光DB登録・FAQ化・タグ・エリア・類義語追加OK
 - 未ヒット質問/頻出レポートでAIの回答精度をどんどん進化
 - 全体バックアップ＆ZIP復元、Dropboxバックアップ連携も対応可
+- Render 本番向けロールバック基盤（/var/data・DB・アプリコードの瞬時復元）
 - Github＋Render（無料枠）でノーコスト運用可能
 
 ---
@@ -76,6 +77,41 @@ pip install -r requirements.txt
 - しきい値を下げると出典が増え、上げるとノイズを抑えられます。運用環境に合わせて `.env` で調整してください。
 - LLMがラベルを生成できなかった場合は本文末尾に注意書きが自動で追加され、出典表示は非表示になります。
 - `SUMMARY_MODE=adaptive` にすると質問意図から short/medium/long を自動選択し、2〜4文から最大800字まで出し分けます。
+
+---
+
+## ロールバック / バックアップ運用
+
+Render の本番環境で "失敗したら即時復元" を実現するための自動スナップショットとロールバック機構を搭載しています。詳細な手順・SLA は `docs/runbook.md` を参照してください。ここではサマリのみ記載します。
+
+### コマンドライン
+
+- 事前バックアップ: `scripts/backup_all.sh --notes "deploy YYYYMMDD"`
+- 最新スナップショットへ復元: `scripts/restore_all.sh --reason manual`
+- カナリアヘルスチェック: `python -m manage.rollback canary --snapshot <ID>`
+
+### 管理UI
+
+`/admin/rollback`（管理IP + ログイン必須）に復元ボタンと履歴一覧を追加しました。二段階確認とCSRF対策を兼ね備えています。
+
+### API / CLI
+
+- CLI: `python -m manage.rollback restore --snapshot <ID>`
+- API: `POST /admin/rollback/api/restore {"snapshot_id": "..."}`
+
+### 主要環境変数
+
+| 変数名 | 既定値 | 説明 |
+| ------ | ------ | ---- |
+| `DATA_BASE_DIR` | `/var/data` | ユーザーデータ領域（tar.gz でスナップショット） |
+| `BACKUP_DIR` | `/var/tmp/backup` | スナップショットの保存先 |
+| `BACKUP_RETENTION` | `14` | 保存世代数。超過分は自動削除 |
+| `ROLLBACK_READY_TIMEOUT_SEC` | `90` | カナリア監視のタイムアウト |
+| `ROLLBACK_READY_INTERVAL_SEC` | `10` | ヘルスチェックのポーリング間隔 |
+| `ROLLBACK_CANARY_ENABLED` | `true` | カナリア自動実行の有効/無効 |
+| `ALLOW_ADMIN_ROLLBACK_IPS` | `` | 管理UI/APIにアクセスできるCIDR（カンマ区切り） |
+
+Render のデプロイ前にはバックアップを取得し、デプロイ後はカナリアが `/readyz` を監視します。NG の場合は自動で直前スナップショットへ巻き戻します。
 
 ### 6. 入力ガードと自動返信抑止
 
