@@ -58,10 +58,11 @@ pip install -r requirements.txt
 | `CITATION_MIN_SCORE` | `0.15` | 検索スコア合算の下限。`CITATION_MIN_CHARS` を満たさなくてもスコアが基準を超えれば出典採用 |
 | `ANTIFLOOD_TTL_SEC` | `120` | 入力・出力の短時間重複を抑止するTTL（秒） |
 | `REPLAY_GUARD_SEC` | `150` | LINE webhook の遅延イベントを無視するしきい値（秒） |
-| `SUMMARY_STYLE` | `polite_long` | パンフレット要約の文体。`polite_long` は丁寧長文モード |
+| `SUMMARY_STYLE` | `polite_long` | パンフレット要約の文体（`SUMMARY_MODE`=legacy用）。|
 | `SUMMARY_MIN_CHARS` | `550` | 通常コンテキスト時の要約下限文字数 |
 | `SUMMARY_MAX_CHARS` | `800` | 要約の上限文字数（句点で丸める） |
 | `SUMMARY_MIN_FALLBACK` | `300` | コンテキストが少ない場合の最低文字数 |
+| `SUMMARY_MODE` | `adaptive` | 回答長の自動調整モード。`adaptive`/`terse`/`long` を選択 |
 | `CONTROL_CMD_ENABLED` | `true` | 「停止」「解除」コマンドの有効/無効 |
 | `ENABLE_EVIDENCE_TOGGLE` | `true` | Web UI で根拠付き本文のトグルを表示するかどうか |
 
@@ -74,6 +75,7 @@ pip install -r requirements.txt
 - 出典欄には実際に本文で参照したドキュメントだけが並び、`CITATION_MIN_CHARS` / `CITATION_MIN_SCORE` の閾値で自動的にフィルタリングされます。
 - しきい値を下げると出典が増え、上げるとノイズを抑えられます。運用環境に合わせて `.env` で調整してください。
 - LLMがラベルを生成できなかった場合は本文末尾に注意書きが自動で追加され、出典表示は非表示になります。
+- `SUMMARY_MODE=adaptive` にすると質問意図から short/medium/long を自動選択し、2〜4文から最大800字まで出し分けます。
 
 ### 6. 入力ガードと自動返信抑止
 
