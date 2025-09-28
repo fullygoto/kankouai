@@ -75,6 +75,7 @@ from services import (
     pamphlet_rag,
     pamphlet_search,
     pamphlet_summarize,
+    tourism_search,
     input_normalizer,
     dupe_guard,
     line_handlers,
@@ -2189,6 +2190,19 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
         wm_choice = "gotocity" if legacy else "none"
     e["wm_external_choice"] = wm_choice
     e["wm"] = wm_choice          # ← 追加（新コードが参照するエイリアス）
+
+    # エリアチェック済みフラグ（未設定時は False）
+    raw_checked = e.get("area_checked")
+    if raw_checked is None:
+        raw_checked = (
+            e.get("area_verified")
+            or e.get("areas_checked")
+            or e.get("area_check")
+        )
+    if isinstance(raw_checked, str):
+        e["area_checked"] = _boolish(raw_checked)
+    else:
+        e["area_checked"] = bool(raw_checked)
 
     return e
 
@@ -9018,6 +9032,46 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
                 break
         return out
 
+    def _short_description(entry: dict) -> str:
+        desc = (entry.get("desc") or "").strip()
+        if not desc:
+            return ""
+        clean = re.sub(r"\s+", " ", desc)
+        if len(clean) > 120:
+            clipped = clean[:120]
+            clipped = re.sub(r"[、。\.,;:・\s]+$", "", clipped)
+            clean = clipped if clipped else clean[:120]
+        return clean
+
+    def _format_entry_block(entry: dict, *, map_url: str | None = None) -> List[str]:
+        lines: List[str] = []
+        title = (entry.get("title") or "").strip()
+        if title:
+            lines.append(title)
+        desc_line = _short_description(entry)
+        if desc_line:
+            lines.append(desc_line)
+
+        def add(label: str, value) -> None:
+            if isinstance(value, list):
+                joined = " / ".join(str(v).strip() for v in value if str(v).strip())
+                text = joined
+            else:
+                text = (value or "").strip()
+            if text:
+                lines.append(f"{label}：{text}")
+
+        add("住所", entry.get("address"))
+        add("電話", entry.get("tel"))
+        add("営業", entry.get("open_hours"))
+        add("休み", entry.get("holiday"))
+        add("駐車", entry.get("parking"))
+        add("支払", entry.get("payment") or [])
+        add("地図URL", map_url or entry.get("map"))
+        add("カテゴリ", entry.get("category"))
+        add("エリア", entry.get("areas") or [])
+        return lines
+
     # ====== セッション状態（関数内だけで完結）======
     #   user_id が無い場合はセッションを使わず“従来表示”にフォールバック
     gf = globals().setdefault("_GUIDED_FLOW", {})   # {user_id: {stage, cand_titles, ...}}
@@ -9044,6 +9098,33 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
         t = (text or "").strip()
         return t in {"リセット", "やり直し", "キャンセル", "reset", "clear"}
 
+    # --- city state (area selection) ---
+    city_box = globals().setdefault("_TOURISM_CITY_STATE", {})
+
+    now_dt = datetime.utcnow()
+    try:
+        for key, info in list(city_box.items()):
+            exp = info.get("exp_at")
+            if isinstance(exp, datetime) and exp < now_dt:
+                city_box.pop(key, None)
+    except Exception:
+        pass
+
+    def _city_state_get(uid):
+        return city_box.get(uid) if uid else None
+
+    def _city_state_set(uid, **updates):
+        if not uid:
+            return None
+        state = city_box.setdefault(uid, {})
+        state.update({k: v for k, v in updates.items() if k})
+        state["exp_at"] = now_dt + timedelta(minutes=30)
+        return state
+
+    def _city_state_clear(uid):
+        if uid and uid in city_box:
+            city_box.pop(uid, None)
+
     # ========= 共通：質問テキスト =========
     q = (question or "").strip()
     if not q:
@@ -9059,478 +9140,99 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
         if ok0:
             return m0, False, ""  # 画像なし/即答扱い
 
-    # ========= 1) 継続フローの処理（user_id がある場合のみ）=========
+    # --- city selection flow -------------------------------------------------
+    state = _city_state_get(user_id)
+    choice_texts = {choice["text"] for choice in pamphlet_search.city_choices()}
+
+    if user_id and _is_reset_cmd(q):
+        _flow_clear(user_id)
+        _city_state_clear(user_id)
+        return "フローをリセットしました。知りたいスポット名やキーワードを送ってください。", True, ""
+
+    city_key = None
+    search_query = q
+
+    if user_id and q in choice_texts:
+        detected_city = tourism_search.detect_city_from_text(q)
+        pending_query = state.get("pending_query") if state else None
+        if detected_city:
+            city_key = detected_city
+            search_query = pending_query or ""
+            _city_state_set(user_id, city=detected_city, asked=False, pending_query=None)
+        else:
+            search_query = pending_query or ""
+    else:
+        detected_inline = tourism_search.detect_city_from_text(q)
+        if detected_inline:
+            city_key = detected_inline
+            if user_id:
+                _city_state_set(user_id, city=detected_inline, asked=False)
+        elif state and state.get("city"):
+            city_key = state.get("city")
+
+    if not city_key:
+        if user_id:
+            pending = q if q and q not in choice_texts else (state.get("pending_query") if state else None)
+            asked_flag = bool(state and state.get("asked"))
+            prompt = tourism_search.city_prompt(asked=asked_flag)
+            _city_state_set(
+                user_id,
+                asked=True,
+                pending_query=pending or (state.get("pending_query") if state else None),
+                city=None,
+            )
+            return prompt, True, ""
+        else:
+            return tourism_search.city_prompt(asked=True), True, ""
+
     if user_id:
-        # 明示リセット
-        if _is_reset_cmd(q):
-            _flow_clear(user_id)
-            return "フローをリセットしました。知りたいスポット名やキーワードを送ってください。", True, ""
+        _city_state_set(user_id, city=city_key, asked=False, pending_query=None)
 
-        st = _flow_get(user_id)
-        if st:
-            # いまの候補を再構築（常に最新エントリから）
-            es_all = [ _norm_entry(e) for e in load_entries() ]
-            cand = [e for e in es_all if (e.get("title") or "") in (st.get("cand_titles") or [])]
-            if not cand:
-                _flow_clear(user_id)
-                # 続行できないので通常検索にフォールバック
-            else:
-                s = q.strip()
-                idx = _first_int_in_text(s)
+    if q in choice_texts and not search_query.strip():
+        return "探したいスポット名やキーワードを教えてください。", True, ""
 
-                # ---- AREA ----
-                if st["stage"] == "area":
-                    areas = st.get("areas") or _areas_from(cand) or ["五島市","新上五島町","小値賀町","宇久町"]
-                    picked = None
-                    if idx and 1 <= idx <= len(areas):
-                        picked = areas[idx-1]
-                    elif s in areas:
-                        picked = s
-                    if not picked:
-                        return _format_choose_lines("まずエリアを選んでください：", areas), True, ""
+    search_query = search_query.strip() or q
 
-                    cand2 = [e for e in cand if picked in (e.get("areas") or [])] or cand
-                    if len(cand2) == 1:
-                        _flow_clear(user_id)
-                        e = cand2[0]
-                        # ---- 最終1件の組み立て（既存の仕様を踏襲）----
-                        record_source_from_entry(e)
-                        urls = _build_image_urls_for_entry(e)
-                        img_url = urls.get("image") or urls.get("thumb") or ""
-                        lat, lng = _entry_latlng(e)
-                        murl = entry_open_map_url(e, lat=lat, lng=lng)
-                        lines = []
-                        title = (e.get("title","") or "").strip()
-                        desc  = (e.get("desc","")  or "").strip()
-                        if title: lines.append(title)
-                        if desc:  lines.append(desc)
-                        def add(label, val):
-                            if isinstance(val, list):
-                                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                            else:
-                                v = (val or "").strip()
-                            if v:
-                                lines.append(f"{label}：{v}")
-                        add("住所", e.get("address"))
-                        add("電話", e.get("tel"))
-                        add("地図", murl or e.get("map"))
-                        add("エリア", e.get("areas") or [])
-                        add("休み", e.get("holiday"))
-                        add("営業時間", e.get("open_hours"))
-                        add("駐車場", e.get("parking"))
-                        add("支払方法", e.get("payment") or [])
-                        add("備考", e.get("remark"))
-                        add("リンク", e.get("links") or [])
-                        add("カテゴリー", e.get("category"))
-                        return "\n".join(lines), True, img_url
+    if not search_query:
+        return "探したいスポット名やキーワードを教えてください。", True, ""
 
-                    # 次=カテゴリー
-                    cats = _categories_from(cand2) or ["観光","飲食","宿泊"]
-                    _flow_set(user_id, {"stage":"category", "cand_titles":[(e.get("title") or "") for e in cand2], "cats": cats})
-                    return _format_choose_lines("次にカテゴリーを選んでください：", cats), True, ""
+    es = [_norm_entry(e) for e in load_entries()]
+    ranked_results = tourism_search.search(es, search_query, city_key=city_key, limit=3)
 
-                # ---- CATEGORY ----
-                if st["stage"] == "category":
-                    cats = st.get("cats") or _categories_from(cand)
-                    picked = None
-                    if idx and 1 <= idx <= len(cats):
-                        picked = cats[idx-1]
-                    elif q.strip() in cats:
-                        picked = q.strip()
-                    else:
-                        # エイリアス（表記ゆれ）吸収
-                        ALIASES = {
-                            "観光": ["観光","観光地"],
-                            "飲食": ["飲食","食事","グルメ","食べる・呑む"],
-                            "宿泊": ["宿泊","ホテル","旅館","民宿","泊まる"],
-                        }
-                        for k, vs in ALIASES.items():
-                            if q.strip() == k or q.strip() in vs:
-                                picked = k; break
-                    if not picked:
-                        return _format_choose_lines("次にカテゴリーを選んでください：", cats), True, ""
-
-                    cand2 = [e for e in cand if e.get("category") == picked] or cand
-                    if len(cand2) == 1:
-                        _flow_clear(user_id)
-                        e = cand2[0]
-                        record_source_from_entry(e)
-                        urls = _build_image_urls_for_entry(e)
-                        img_url = urls.get("image") or urls.get("thumb") or ""
-                        lat, lng = _entry_latlng(e)
-                        murl = entry_open_map_url(e, lat=lat, lng=lng)
-                        lines = []
-                        title = (e.get("title","") or "").strip()
-                        desc  = (e.get("desc","")  or "").strip()
-                        if title: lines.append(title)
-                        if desc:  lines.append(desc)
-                        def add(label, val):
-                            if isinstance(val, list):
-                                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                            else:
-                                v = (val or "").strip()
-                            if v:
-                                lines.append(f"{label}：{v}")
-                        add("住所", e.get("address"))
-                        add("電話", e.get("tel"))
-                        add("地図", murl or e.get("map"))
-                        add("エリア", e.get("areas") or [])
-                        add("休み", e.get("holiday"))
-                        add("営業時間", e.get("open_hours"))
-                        add("駐車場", e.get("parking"))
-                        add("支払方法", e.get("payment") or [])
-                        add("備考", e.get("remark"))
-                        add("リンク", e.get("links") or [])
-                        add("カテゴリー", e.get("category"))
-                        return "\n".join(lines), True, img_url
-
-                    # 次=タグ
-                    tags = _discriminative_tags(cand2)
-                    if not tags:
-                        # そのまま番号選択へ
-                        titles = [(e.get("title") or "") for e in cand2][:8]
-                        _flow_set(user_id, {"stage":"pick", "cand_titles":[(e.get("title") or "") for e in cand2], "titles": titles})
-                        return _format_choose_lines("候補が複数あります。番号で選んでください：", titles), True, ""
-                    _flow_set(user_id, {"stage":"tag", "cand_titles":[(e.get("title") or "") for e in cand2], "tags": tags})
-                    return _format_choose_lines("最後にタグで絞り込みましょう：", tags), True, ""
-
-                # ---- TAG ----
-                if st["stage"] == "tag":
-                    # 表示用タグ（クォート除去済み）
-                    tags = st.get("tags") or _discriminative_tags(cand)
-                    # ユーザー入力 → 正規化
-                    s_norm = _tag_norm(q)
-                    picked = None
-
-                    # 1) 番号選択
-                    if idx and 1 <= idx <= len(tags):
-                        picked = tags[idx-1]
-                    # 2) 名称選択（正規化一致）
-                    elif s_norm:
-                        for opt in tags:
-                            if _tag_norm(opt) == s_norm:
-                                picked = opt
-                                break
-
-                    if not picked:
-                        return _format_choose_lines("最後にタグで絞り込みましょう：", tags or []), True, ""
-
-                    # タグでフィルタ（エントリ側のタグも正規化して比較）
-                    def _has_tag(e) -> bool:
-                        for t in (e.get("tags") or []):
-                            if _tag_norm(t) == _tag_norm(picked):
-                                return True
-                        return False
-
-                    cand2 = [e for e in cand if _has_tag(e)] or cand
-                    if len(cand2) == 1:
-                        _flow_clear(user_id)
-                        e = cand2[0]
-                        record_source_from_entry(e)
-                        urls = _build_image_urls_for_entry(e)
-                        img_url = urls.get("image") or urls.get("thumb") or ""
-                        lat, lng = _entry_latlng(e)
-                        murl = entry_open_map_url(e, lat=lat, lng=lng)
-                        lines = []
-                        title = (e.get("title","") or "").strip()
-                        desc  = (e.get("desc","")  or "").strip()
-                        if title: lines.append(title)
-                        if desc:  lines.append(desc)
-                        def add(label, val):
-                            if isinstance(val, list):
-                                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                            else:
-                                v = (val or "").strip()
-                            if v:
-                                lines.append(f"{label}：{v}")
-                        add("住所", e.get("address"))
-                        add("電話", e.get("tel"))
-                        add("地図", murl or e.get("map"))
-                        add("エリア", e.get("areas") or [])
-                        add("休み", e.get("holiday"))
-                        add("営業時間", e.get("open_hours"))
-                        add("駐車場", e.get("parking"))
-                        add("支払方法", e.get("payment") or [])
-                        add("備考", e.get("remark"))
-                        add("リンク", e.get("links") or [])
-                        add("カテゴリー", e.get("category"))
-                        return "\n".join(lines), True, img_url
-
-                    # まだ複数 → 番号選択へ
-                    titles = [(e.get("title") or "") for e in cand2][:8]
-                    _flow_set(user_id, {"stage":"pick", "cand_titles":[(e.get("title") or "") for e in cand2], "titles": titles})
-                    return _format_choose_lines("まだ複数あります。番号で選んでください：", titles), True, ""
-
-                # ---- PICK ----
-                if st["stage"] == "pick":
-                    titles = st.get("titles") or [(e.get("title") or "") for e in cand][:8]
-                    idx = _first_int_in_text(q)
-                    picked_title = None
-                    if idx and 1 <= idx <= len(titles):
-                        picked_title = titles[idx-1]
-                    elif q.strip() in titles:
-                        picked_title = q.strip()
-                    if not picked_title:
-                        return _format_choose_lines("番号で選んでください：", titles), True, ""
-                    e = next((x for x in cand if (x.get("title") or "") == picked_title), None)
-                    _flow_clear(user_id)
-                    if not e:
-                        return "すみません、選択肢が見つかりませんでした。キーワードからやり直してください。", True, ""
-                    record_source_from_entry(e)
-                    urls = _build_image_urls_for_entry(e)
-                    img_url = urls.get("image") or urls.get("thumb") or ""
-                    lat, lng = _entry_latlng(e)
-                    murl = entry_open_map_url(e, lat=lat, lng=lng)
-                    lines = []
-                    title = (e.get("title","") or "").strip()
-                    desc  = (e.get("desc","")  or "").strip()
-                    if title: lines.append(title)
-                    if desc:  lines.append(desc)
-                    def add(label, val):
-                        if isinstance(val, list):
-                            v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                        else:
-                            v = (val or "").strip()
-                        if v:
-                            lines.append(f"{label}：{v}")
-                    add("住所", e.get("address"))
-                    add("電話", e.get("tel"))
-                    add("地図", murl or e.get("map"))
-                    add("エリア", e.get("areas") or [])
-                    add("休み", e.get("holiday"))
-                    add("営業時間", e.get("open_hours"))
-                    add("駐車場", e.get("parking"))
-                    add("支払方法", e.get("payment") or [])
-                    add("備考", e.get("remark"))
-                    add("リンク", e.get("links") or [])
-                    add("カテゴリー", e.get("category"))
-                    return "\n".join(lines), True, img_url
-
-                # 不明状態 → クリアして通常に戻す
-                _flow_clear(user_id)
-
-    # ========= 2) 通常検索（新規開始 or user_id無し or フローが無い）=========
-    qn = _n_local(q)
-    es = [ _norm_entry(e) for e in load_entries() ]  # 念のため正規化
-
-    # --- タイトル最優先のスコアリング ---
-    ranked = []  # (score, tie_breaker, entry)
-    for e in es:
-        title = e.get("title", "")
-        desc  = e.get("desc", "")
-        addr  = e.get("address", "")
-        tags  = e.get("tags", []) or []
-        areas = e.get("areas", []) or []
-
-        tn = _n_local(title)
-        dn = _n_local(desc)
-        an = _n_local(addr)
-
-        score = None
-        # 優先度：タイトル完全一致＞タイトル部分一致＞説明＞住所＞タグ・エリア
-        if qn and qn == tn:
-            score = 100
-        elif qn and qn in tn:
-            score = 80
-        elif qn and qn in dn:
-            score = 60
-        elif qn and qn in an:
-            score = 50
-        elif any(qn in _n_local(t) for t in tags):
-            score = 40
-        elif any(qn in _n_local(a) for a in areas):
-            score = 30
-
-        if score is not None:
-            # 近いタイトル長を優先（同点時の並び安定化）
-            tie = abs(len(tn) - len(qn))
-            ranked.append((score, tie, e))
-
-    if not ranked:
-        # 即返し（天気 / 交通）
-        m, ok = get_weather_reply(q)
+    if not ranked_results:
+        m, ok = get_weather_reply(search_query)
         if ok:
-            return m, False, ""
-        m, ok = get_transport_reply(q)
-        if ok:
-            return m, False, ""
-        refine, _meta = build_refine_suggestions(q)
+            return m, True, ""
+        refine, _meta = build_refine_suggestions(search_query)
         return "該当が見つかりませんでした。\n" + refine, False, ""
 
-    # スコア降順 → タイトル長の近さ昇順
-    ranked.sort(key=lambda t: (-t[0], t[1]))
-    hits = [e for _, __, e in ranked]
+    top_entry = ranked_results[0].entry
+    record_source_from_entry(top_entry)
+    urls = _build_image_urls_for_entry(top_entry)
+    img_url = urls.get("image") or urls.get("thumb") or ""
+    lat, lng = _entry_latlng(top_entry)
+    map_url = entry_open_map_url(top_entry, lat=lat, lng=lng)
 
-    # タイトル一致（完全 or 部分）の最上位が単独なら、それを即採用
-    top_score = ranked[0][0]
-    same_top_count = sum(1 for s, _, __ in ranked if s == top_score)
-    if same_top_count == 1:
-        hits = [hits[0]]
+    lines = _format_entry_block(top_entry, map_url=map_url)
 
-    # ---- 1件 → 既存の最終出力 ----
-    if len(hits) == 1:
-        e = hits[0]
-
-        # ★ 出典（フォームの「出典」テキストがあればのみ付与）
-        record_source_from_entry(e)
-
-        # ★ 画像URL（wm_external_choice を尊重）
-        urls = _build_image_urls_for_entry(e)
-        img_url = urls.get("image") or urls.get("thumb") or ""
-
-        # ★ 地図URL（place_id/共有URL優先 → 無ければ緯度経度/名称から生成）
-        lat, lng = _entry_latlng(e)
-        murl = entry_open_map_url(e, lat=lat, lng=lng)
-
-        # 本文は「タイトル1行＋説明1行」→以降に項目
-        lines = []
-        title = (e.get("title","") or "").strip()
-        desc  = (e.get("desc","")  or "").strip()
-        if title: lines.append(title)
-        if desc:  lines.append(desc)
-
-        def add(label, val):
-            if isinstance(val, list):
-                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
+    if len(ranked_results) > 1:
+        lines.append("")
+        lines.append("その他の候補：")
+        for alt in ranked_results[1:3]:
+            entry_alt = alt.entry
+            title_alt = (entry_alt.get("title") or "").strip()
+            area_alt = " / ".join(entry_alt.get("areas") or [])
+            suffix = f"（{area_alt}）" if area_alt else ""
+            snippet = _short_description(entry_alt)
+            if snippet:
+                snippet = snippet[:60]
+            if snippet:
+                lines.append(f"- {title_alt}{suffix}：{snippet}")
             else:
-                v = (val or "").strip()
-            if v:
-                lines.append(f"{label}：{v}")
+                lines.append(f"- {title_alt}{suffix}")
 
-        add("住所", e.get("address"))
-        add("電話", e.get("tel"))
-        if murl:
-            add("地図", murl)  # ← map文字列ではなく最適URL
-        else:
-            add("地図", e.get("map"))
-        add("エリア", e.get("areas") or [])
-        add("休み", e.get("holiday"))
-        add("営業時間", e.get("open_hours"))
-        add("駐車場", e.get("parking"))
-        add("支払方法", e.get("payment") or [])
-        add("備考", e.get("remark"))
-        add("リンク", e.get("links") or [])
-        add("カテゴリー", e.get("category"))
-
-        # タグは返信に入れない（現状維持）
-        return "\n".join(lines), True, img_url
-
-    # ---- 2件以上 → 段階的フロー開始（user_id がある場合）----
-    if user_id:
-        # 自動前進（エリア/カテゴリーが1種類しかないなら先に進める）
-        cand = hits[:]
-        # エリア自動決定
-        areas = _areas_from(cand)
-        stage = "area"
-        if len(areas) == 1:
-            picked = areas[0]
-            cand = [e for e in cand if picked in (e.get("areas") or [])] or cand
-            if len(cand) == 1:
-                # 1件に確定
-                e = cand[0]
-                record_source_from_entry(e)
-                urls = _build_image_urls_for_entry(e)
-                img_url = urls.get("image") or urls.get("thumb") or ""
-                lat, lng = _entry_latlng(e)
-                murl = entry_open_map_url(e, lat=lat, lng=lng)
-                lines = []
-                title = (e.get("title","") or "").strip()
-                desc  = (e.get("desc","")  or "").strip()
-                if title: lines.append(title)
-                if desc:  lines.append(desc)
-                def add(label, val):
-                    if isinstance(val, list):
-                        v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                    else:
-                        v = (val or "").strip()
-                    if v:
-                        lines.append(f"{label}：{v}")
-                add("住所", e.get("address"))
-                add("電話", e.get("tel"))
-                add("地図", murl or e.get("map"))
-                add("エリア", e.get("areas") or [])
-                add("休み", e.get("holiday"))
-                add("営業時間", e.get("open_hours"))
-                add("駐車場", e.get("parking"))
-                add("支払方法", e.get("payment") or [])
-                add("備考", e.get("remark"))
-                add("リンク", e.get("links") or [])
-                add("カテゴリー", e.get("category"))
-                return "\n".join(lines), True, img_url
-            stage = "category"
-            # カテゴリー自動決定
-            cats = _categories_from(cand)
-            if len(cats) == 1:
-                picked = cats[0]
-                cand = [e for e in cand if e.get("category") == picked] or cand
-                if len(cand) == 1:
-                    e = cand[0]
-                    record_source_from_entry(e)
-                    urls = _build_image_urls_for_entry(e)
-                    img_url = urls.get("image") or urls.get("thumb") or ""
-                    lat, lng = _entry_latlng(e)
-                    murl = entry_open_map_url(e, lat=lat, lng=lng)
-                    lines = []
-                    title = (e.get("title","") or "").strip()
-                    desc  = (e.get("desc","")  or "").strip()
-                    if title: lines.append(title)
-                    if desc:  lines.append(desc)
-                    def add(label, val):
-                        if isinstance(val, list):
-                            v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                        else:
-                            v = (val or "").strip()
-                        if v:
-                            lines.append(f"{label}：{v}")
-                    add("住所", e.get("address"))
-                    add("電話", e.get("tel"))
-                    add("地図", murl or e.get("map"))
-                    add("エリア", e.get("areas") or [])
-                    add("休み", e.get("holiday"))
-                    add("営業時間", e.get("open_hours"))
-                    add("駐車場", e.get("parking"))
-                    add("支払方法", e.get("payment") or [])
-                    add("備考", e.get("remark"))
-                    add("リンク", e.get("links") or [])
-                    add("カテゴリー", e.get("category"))
-                    return "\n".join(lines), True, img_url
-                stage = "tag"
-
-        # 状態を保存して最初の質問を返す
-        _flow_set(user_id, {
-            "stage": "area" if stage == "area" else ("category" if stage == "category" else "tag"),
-            "cand_titles": [(e.get("title") or "") for e in cand],
-            "areas": _areas_from(cand) if stage == "area" else None,
-            "cats": _categories_from(cand) if stage == "category" else None,
-            "tags": _discriminative_tags(cand) if stage == "tag" else None,
-        })
-        if stage == "area":
-            areas = _areas_from(cand) or ["五島市","新上五島町","小値賀町","宇久町"]
-            return _format_choose_lines("まずエリアを選んでください：", areas), True, ""
-        if stage == "category":
-            cats = _categories_from(cand) or ["観光","飲食","宿泊"]
-            return _format_choose_lines("次にカテゴリーを選んでください：", cats), True, ""
-        # stage == "tag"
-        tags = _discriminative_tags(cand)
-        if tags:
-            return _format_choose_lines("最後にタグで絞り込みましょう：", tags), True, ""
-        # タグが無ければ番号選択へ
-        titles = [(e.get("title") or "") for e in cand][:8]
-        _flow_set(user_id, {"stage":"pick", "cand_titles":[(e.get("title") or "") for e in cand], "titles": titles})
-        return _format_choose_lines("候補が複数あります。番号で選んでください：", titles), True, ""
-
-    # ---- user_id が無い場合は従来の一覧表示（互換モード）----
-    lines = ["候補が複数見つかりました。気になるものはありますか？"]
-    for i, e in enumerate(hits[:8], 1):
-        area_list = e.get("areas", []) or []
-        area = " / ".join(area_list) if area_list else ""
-        suffix = f"（{area}）" if area else ""
-        lines.append(f"{i}. {e.get('title','')}{suffix}")
-    if len(hits) > 8:
-        lines.append(f"…ほか {len(hits)-8} 件")
-
-    refine, _meta = build_refine_suggestions(q)
-    return "\n".join(lines) + "\n\n" + refine, True, ""
+    message = "\n".join(lines)
+    return message, True, img_url
 
 #  即返し（天気 / 運行状況） - 保証版
 # =========================

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -42,6 +43,7 @@ class _PromptConfig:
     prompt: str
     bounds: SummaryBounds
     style: str
+    question: str = ""
 
 
 PROMPT_SUMMARY_POLITE_LONG = (
@@ -64,22 +66,22 @@ PROMPT_SUMMARY_POLITE_LONG = (
 
 
 PROMPT_SUMMARY_TERSE_SHORT = (
-    "あなたのタスクは、以下のコンテキストだけを根拠に日本語で要約を書くことです。\n"
-    "ルール:\n"
-    "- 各文末に必ず [[番号]] を付けてください（例：「〜であった。[[1]]」）。\n"
-    "- [[番号]] は与えられた参照IDのみ使用し、推測や新規情報は禁止。\n"
-    "- 出典数を増やすための不要な分割は禁止。簡潔に。\n"
-    "- 指示されたセクション構成を守り、根拠は与えられた内容のみに限定する。\n\n"
+    "あなたは観光案内の編集者です。以下の【パンフ本文抜粋】だけを根拠に回答します。\n"
+    "- 「### 要約」で質問の核心を2〜4文で簡潔に述べる。\n"
+    "- 必要な場合のみ「### 詳細」に3〜4行の箇条書きで補足を付ける。不要なら省略。\n"
+    "- 外部知識や他テーマは出力せず、質問に必要な内容のみに限定する。\n"
+    "- 用語は本文と整合する語を使う（例：遣唐使、最終寄港地）。\n"
+    "- 文字数は状況に応じて柔軟に（上限800字、短くて十分なら短く）。\n"
+    "- 出典表示は現行方式を踏襲し、使用した出典のみ列挙する。\n\n"
     "{question_line}"
     "{city_line}"
-    "{query_line}\n\n"
-    "【コンテキスト（番号付き）】\n"
+    "【パンフ本文抜粋（番号付き）】\n"
     "{context}\n\n"
     "出力フォーマット:\n"
     "### 要約\n"
-    "質問に直接答える2〜4文。各文末に [[番号]] を付ける。\n\n"
+    "質問の核心を2〜4文。各文末に [[番号]] を付ける。\n\n"
     "### 詳細\n"
-    "- 重要な追加事項を箇条書き（最大2行・各行末に [[番号]]）。必要なければ省略。\n\n"
+    "- 重要な補足事項を箇条書き（最大3行・各行末に [[番号]]）。不要なら省略。\n\n"
     "### 出典\n"
     "- 市町/ファイル名（本文で使用した参照のみ）\n"
 )
@@ -916,8 +918,8 @@ def _build_prompt(
     style_mode = get_summary_style()
     bounds = _resolve_bounds(plan, context_text)
 
-    question_line = f"質問: {question}\n" if question else ""
-    city_line = f"対象市町: {city_label}\n" if city_label else ""
+    question_line = f"【ユーザーの質問】{question}\n" if question else ""
+    city_line = f"【対象市町】{city_label}\n" if city_label else ""
     query_line = ""
     if queries:
         joined = ", ".join(q for q in queries if q)
@@ -937,7 +939,7 @@ def _build_prompt(
             query_line=query_line,
             context=context_text,
         )
-        return _PromptConfig(prompt=prompt, bounds=bounds, style="polite_long")
+        return _PromptConfig(prompt=prompt, bounds=bounds, style="polite_long", question=question)
 
     if style_mode == "adaptive":
         plan_block = _format_plan_block(plan, city_label)
@@ -951,15 +953,14 @@ def _build_prompt(
         header_text = "\n".join([line for line in plan_header if line])
         context = context_text
         plan_prompt = PROMPT_ADAPTIVE_TEMPLATE.format(plan_block=f"{header_text}\n{plan_block}".strip(), context=context)
-        return _PromptConfig(prompt=plan_prompt, bounds=bounds, style=plan.style)
+        return _PromptConfig(prompt=plan_prompt, bounds=bounds, style=plan.style, question=question)
 
     prompt = PROMPT_SUMMARY_TERSE_SHORT.format(
         question_line=question_line,
         city_line=city_line,
-        query_line=query_line,
         context=context_text,
     )
-    return _PromptConfig(prompt=prompt, bounds=bounds, style=style_mode)
+    return _PromptConfig(prompt=prompt, bounds=bounds, style=style_mode, question=question)
 
 
 def _generate_answer(
@@ -1027,6 +1028,80 @@ def _count_characters(text: str) -> int:
     if not text:
         return 0
     return len(text)
+
+
+def _normalize_for_keywords(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    converted: List[str] = []
+    for char in normalized:
+        code = ord(char)
+        if 0x30A1 <= code <= 0x30F4:
+            converted.append(chr(code - 0x60))
+        else:
+            converted.append(char)
+    return "".join(converted).lower()
+
+
+def _question_keywords(question: str) -> List[str]:
+    if not question:
+        return []
+    base = _normalize_for_keywords(question)
+    tokens = re.findall(r"[a-z0-9一-龥ぁ-んー]{2,}", base)
+    keywords: List[str] = []
+    for token in tokens:
+        if token and token not in keywords:
+            keywords.append(token)
+    return keywords
+
+
+def _enforce_question_keywords(text: str, keywords: Sequence[str]) -> str:
+    if not text or not keywords:
+        return text
+    normalized_keywords = [_normalize_for_keywords(kw) for kw in keywords if kw]
+    if not normalized_keywords:
+        return text
+
+    lines = text.splitlines()
+    cleaned: List[str] = []
+    current_section: Optional[str] = None
+    detail_header_idx: Optional[int] = None
+    detail_has_content = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("### "):
+            if stripped.startswith("### 要約"):
+                current_section = "summary"
+            elif stripped.startswith("### 詳細"):
+                current_section = "detail"
+                detail_header_idx = len(cleaned)
+                detail_has_content = False
+            elif stripped.startswith("### 出典"):
+                current_section = "sources"
+            else:
+                current_section = None
+            cleaned.append(line.rstrip())
+            continue
+        if not stripped:
+            cleaned.append(line)
+            continue
+        if current_section in {"summary", "detail"}:
+            normalized_line = _normalize_for_keywords(stripped)
+            if not any(keyword in normalized_line for keyword in normalized_keywords):
+                continue
+            if current_section == "detail":
+                detail_has_content = True
+        cleaned.append(line)
+
+    if detail_header_idx is not None and not detail_has_content:
+        try:
+            cleaned.pop(detail_header_idx)
+            while detail_header_idx < len(cleaned) and not cleaned[detail_header_idx].strip():
+                cleaned.pop(detail_header_idx)
+        except IndexError:
+            pass
+
+    return "\n".join(cleaned).strip()
 
 
 def _append_sentence(base: str, addition: str) -> str:
@@ -1172,6 +1247,7 @@ def _generate_with_constraints(prompt_cfg: _PromptConfig) -> str:
         raw = _generate_answer(prompt_cfg.prompt, **gen_params)
         cleaned = _normalize_generated_text(raw)
         trimmed = _truncate_sentences(cleaned, min(prompt_cfg.bounds.max_chars, 800))
+        trimmed = _enforce_question_keywords(trimmed, _question_keywords(prompt_cfg.question))
         char_count = _count_characters(trimmed)
         if not trimmed:
             attempts += 1
