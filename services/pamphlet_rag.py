@@ -35,6 +35,12 @@ _CITATION_MIN_CHARS = int(os.getenv("CITATION_MIN_CHARS", "80"))
 _CITATION_MIN_SCORE = float(os.getenv("CITATION_MIN_SCORE", "0.15"))
 
 _LABEL_PATTERN = re.compile(r"\[\[(\d+)\]\]")
+_NOISE_YEAR_LINE = re.compile(r"^[0-9０-９]{1,4}年(?:頃|代|台|以降)?$")
+_NOISE_NUMBER_LINE = re.compile(r"^[0-9０-９]+$")
+_NOISE_MARK_LINE = re.compile(r"^[\s・*●○◆◇▶▷■□◉◎]+$")
+_NOISE_FOOTNOTE_LINE = re.compile(r"^\[[0-9０-９]+\]$")
+_FOCUS_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9一-龠々〆ヵヶぁ-んァ-ンゝゞー]{2,}")
+_FOCUS_BULLET_PREFIX = re.compile(r"^[\s\-・*●○◆◇▶▷■□◉◎]+")
 
 
 @dataclass
@@ -85,17 +91,16 @@ PROMPT_SUMMARY_TERSE_SHORT = (
 )
 
 PROMPT_ADAPTIVE_TEMPLATE = (
-    "あなたは観光案内の編集者です。以下の【パンフ本文抜粋（番号付き）】だけを根拠に日本語で回答します。\n"
-    "制約:\n"
-    "- 外部知識・推測は禁止。根拠のない固有名や年数は書かない。\n"
-    "- 文末に [[番号]] を必ず付けて根拠を示す（与えた番号のみ）。\n"
-    "- 回答の長さは Plan.style に従う：\n"
-    "  - short_direct: 2〜4文。必要なら最後に短い補足を一行。\n"
-    "  - medium_structured: 1段落＋必要なら箇条書き（最大1ブロック）。\n"
-    "  - long_explanatory: 1〜2段落、最大800字。冗長な言い換えは避ける。\n"
-    "- 読み手の意図を第一に、結論→要点→補足の順で簡潔に。\n"
-    "【Plan（要約）】\n"
-    "{plan_block}\n"
+    "あなたは観光案内の編集者です。以下の【パンフ本文抜粋（番号付き）】だけを根拠に日本語で回答します。\n\n"
+    "ルール:\n"
+    "- 質問の核心にまず1段落で答え、その後「### 詳細」で3〜5行の補足を必要な場合だけ付ける。\n"
+    "- 不要な背景や別テーマ（施設年表など）は出力しない。質問と直接関係する事実のみ。\n"
+    "- 固有名や年数は与えた抜粋内に明記があるものだけ。推測や一般知識は書かない。\n"
+    "- 文末に [[番号]] を必ず付け、使った番号に対応する文献のみ「### 出典」に列挙。\n"
+    "- 文字数は最大800字。短くて回答が完結するなら短くしてよい。\n\n"
+    "【ユーザー質問】\n"
+    "{question}\n\n"
+    "【前提スコープ】自治体: {city}\n\n"
     "【パンフ本文抜粋（番号付き）】\n"
     "{context}\n"
 )
@@ -134,6 +139,274 @@ def _load_synonym_map() -> Dict[str, List[str]]:
         variants = [str(item) for item in value if isinstance(item, str)]
         cleaned[key] = variants
     return cleaned
+
+
+def _clean_chunk_text(text: str) -> str:
+    lines: List[str] = []
+    for raw_line in (text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if _NOISE_MARK_LINE.match(stripped):
+            continue
+        if _NOISE_YEAR_LINE.fullmatch(stripped) or _NOISE_NUMBER_LINE.fullmatch(stripped):
+            continue
+        if _NOISE_FOOTNOTE_LINE.match(stripped) and len(stripped) <= 6:
+            continue
+        if len(stripped) <= 2:
+            continue
+        if not any(ch in stripped for ch in "。.!?！？"):
+            separator_count = sum(stripped.count(ch) for ch in "、,／/・ ")
+            if separator_count >= 3 and not re.search(r"(です|ます|する|した|れる|られる|開催|紹介|位置|伝わる)", stripped):
+                continue
+            if len(stripped) <= 6:
+                continue
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def _extract_focus_tokens(plan: Plan, question: str) -> List[str]:
+    tokens: List[str] = []
+    for key in ("keywords", "time"):
+        tokens.extend(plan.scope.get(key, []))
+    tokens.extend(_FOCUS_TOKEN_PATTERN.findall(question or ""))
+
+    split_tokens: List[str] = []
+    separators = ["の", "は", "を", "が", "に", "で", "と", "へ", "より"]
+    for token in tokens:
+        for sep in separators:
+            if sep in token:
+                parts = [part.strip() for part in token.split(sep) if len(part.strip()) >= 2]
+                split_tokens.extend(parts)
+    tokens.extend(split_tokens)
+
+    seen: List[str] = []
+    for token in tokens:
+        cleaned = (token or "").strip()
+        if len(cleaned) < 2:
+            continue
+        if cleaned in seen:
+            continue
+        seen.append(cleaned)
+    return seen
+
+
+def _should_keep_focus_line(content: str, tokens: Sequence[str]) -> bool:
+    lowered = content.lower()
+    for token in tokens:
+        norm = token.lower()
+        if norm and norm in lowered:
+            return True
+    return False
+
+
+def _filter_focus_text(labelled_text: str, tokens: Sequence[str]) -> str:
+    lines = labelled_text.splitlines()
+    if not lines:
+        return labelled_text
+
+    keep_flags: List[bool] = [False] * len(lines)
+    keep_all_refs = False
+    lowered_tokens = [tok.lower() for tok in tokens if tok]
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("### 出典"):
+            keep_flags[idx] = True
+            keep_all_refs = True
+            continue
+        if keep_all_refs:
+            keep_flags[idx] = bool(stripped)
+            continue
+        if stripped.startswith("###"):
+            keep_flags[idx] = True
+            continue
+        content = stripped
+        if stripped.startswith("-"):
+            content = _FOCUS_BULLET_PREFIX.sub("", stripped, count=1).strip()
+        if _should_keep_focus_line(content, lowered_tokens):
+            keep_flags[idx] = True
+
+    for idx, line in enumerate(lines):
+        if keep_flags[idx]:
+            continue
+        if line.strip():
+            continue
+        prev_keep = idx > 0 and keep_flags[idx - 1]
+        next_keep = idx + 1 < len(lines) and keep_flags[idx + 1]
+        if prev_keep or next_keep:
+            keep_flags[idx] = True
+
+    # Remove empty detail sections
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if stripped.startswith("### 詳細"):
+            j = idx + 1
+            has_content = False
+            while j < len(lines):
+                if lines[j].strip().startswith("###"):
+                    break
+                if keep_flags[j] and lines[j].strip():
+                    has_content = True
+                    break
+                j += 1
+            if not has_content:
+                for k in range(idx, j):
+                    keep_flags[k] = False
+            idx = j
+            continue
+        idx += 1
+
+    filtered: List[str] = []
+    last_blank = False
+    for line, keep in zip(lines, keep_flags):
+        if not keep:
+            continue
+        if not line.strip():
+            if last_blank or not filtered:
+                continue
+            filtered.append("")
+            last_blank = True
+            continue
+        filtered.append(line.rstrip())
+        last_blank = False
+
+    return "\n".join(filtered).strip()
+
+
+def _replace_reference_section(text: str, entries: Sequence[str]) -> str:
+    if not text:
+        return text
+    lines = text.splitlines()
+    result: List[str] = []
+    replaced = False
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if stripped.startswith("### 出典"):
+            replaced = True
+            result.append("### 出典")
+            idx += 1
+            while idx < len(lines) and not lines[idx].strip().startswith("###"):
+                idx += 1
+            for entry in entries:
+                result.append(entry)
+            continue
+        result.append(lines[idx].rstrip())
+        idx += 1
+
+    if not replaced:
+        if result and result[-1].strip():
+            result.append("")
+        result.append("### 出典")
+        for entry in entries:
+            result.append(entry)
+
+    cleaned: List[str] = []
+    last_blank = False
+    for line in result:
+        stripped = line.strip()
+        if not stripped:
+            if last_blank or not cleaned:
+                continue
+            cleaned.append("")
+            last_blank = True
+            continue
+        cleaned.append(line)
+        last_blank = False
+
+    while cleaned and cleaned[-1] == "":
+        cleaned.pop()
+
+    return "\n".join(cleaned)
+
+
+def _normalize_reference_section(result: "_PostProcessResult") -> "_PostProcessResult":
+    if not result.citations:
+        return result
+
+    entries: List[str] = []
+    seen: set[str] = set()
+    for citation in result.citations:
+        doc_id = citation.get("doc_id")
+        if not doc_id or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        if "/" in doc_id:
+            city_key, file_name = doc_id.split("/", 1)
+        else:
+            city_key, file_name = "", doc_id
+        city_label = pamphlet_search.city_label(city_key)
+        title = re.sub(r"\.(txt|md)$", "", file_name, flags=re.I)
+        entries.append(f"- {city_label}/{title}")
+
+    if not entries:
+        return result
+
+    result.answer_with_labels = _replace_reference_section(result.answer_with_labels, entries)
+    result.answer_without_labels = _replace_reference_section(result.answer_without_labels, entries)
+    return result
+
+
+def _apply_focus_guard(
+    result: "_PostProcessResult",
+    tokens: Sequence[str],
+    id_map: Dict[int, "CitationRef"],
+) -> "_PostProcessResult":
+    if not result.answer_with_labels or not tokens:
+        return result
+
+    filtered = _filter_focus_text(result.answer_with_labels, tokens)
+    if not filtered or filtered == result.answer_with_labels:
+        return result
+
+    refreshed = postprocess_answer(
+        filtered,
+        id_map,
+        min_chars=0,
+        min_score=_CITATION_MIN_SCORE,
+    )
+    if not refreshed.answer_with_labels:
+        return result
+    return refreshed
+
+
+def _ensure_city_reference(result: "_PostProcessResult", city_label: str) -> "_PostProcessResult":
+    if not city_label:
+        return result
+    plain = result.answer_without_labels or ""
+    if not plain.strip():
+        return result
+    if city_label in plain:
+        return result
+    labelled = result.answer_with_labels or ""
+    if not labelled.strip():
+        return result
+
+    label_lines = labelled.splitlines()
+    plain_lines = plain.splitlines()
+    modified = False
+
+    for idx, (lbl_line, plain_line) in enumerate(zip(label_lines, plain_lines)):
+        stripped_lbl = lbl_line.strip()
+        stripped_plain = plain_line.strip()
+        if not stripped_lbl or stripped_lbl.startswith("###") or stripped_lbl.startswith("-"):
+            continue
+        injected_plain = plain_line.replace(stripped_plain, f"{city_label}の資料によると、{stripped_plain}", 1)
+        injected_labelled = lbl_line.replace(stripped_lbl, f"{city_label}の資料によると、{stripped_lbl}", 1)
+        plain_lines[idx] = injected_plain
+        label_lines[idx] = injected_labelled
+        modified = True
+        break
+
+    if modified:
+        result.answer_with_labels = "\n".join(label_lines)
+        result.answer_without_labels = "\n".join(plain_lines)
+
+    return result
 
 
 def _expand_with_synonyms(question: str, plan: Plan) -> List[str]:
@@ -366,6 +639,7 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
     used_queries = list(base_queries)
 
     selected = _apply_scope(plan, selected)
+    selected = [cand for cand in selected if _clean_chunk_text(cand.chunk.text)]
 
     if len(selected) < 2 and confidence < _MIN_CONFIDENCE:
         first_pass = dict(debug_info)
@@ -373,7 +647,7 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
         expanded = [planned_question] + [q for q in rewritten if q and q != planned_question]
         if len(expanded) > 1:
             retry = _retrieve_chunks(city, expanded)
-            selected = retry["selected"]
+            selected = [cand for cand in retry["selected"] if _clean_chunk_text(cand.chunk.text)]
             confidence = retry["confidence"]
             debug_info = dict(retry.get("debug", {}) or {})
             if first_pass:
@@ -384,6 +658,7 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             debug_info = first_pass
 
     selected = _apply_scope(plan, selected)
+    selected = [cand for cand in selected if _clean_chunk_text(cand.chunk.text)]
 
     reused_seed = False
     if (not selected or confidence < _MIN_CONFIDENCE) and planned_question:
@@ -433,6 +708,11 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
         id_map=id_map,
         plan=plan,
     )
+
+    focus_tokens = _extract_focus_tokens(plan, planned_question)
+    postprocessed = _apply_focus_guard(postprocessed, focus_tokens, id_map)
+    postprocessed = _normalize_reference_section(postprocessed)
+    postprocessed = _ensure_city_reference(postprocessed, pamphlet_search.city_label(city))
 
     sources = [
         {
@@ -501,6 +781,9 @@ def build_context_with_labels(selected: Sequence[_Candidate]) -> Tuple[str, Dict
 
     for idx, candidate in enumerate(selected, start=1):
         chunk = candidate.chunk
+        cleaned_text = _clean_chunk_text(chunk.text)
+        if not cleaned_text:
+            continue
         city_label = pamphlet_search.city_label(chunk.city)
         title = re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I)
         doc_id = f"{chunk.city}/{chunk.source_file}"
@@ -513,10 +796,10 @@ def build_context_with_labels(selected: Sequence[_Candidate]) -> Tuple[str, Dict
             start_offset=chunk.char_start,
             end_offset=chunk.char_end,
             score=candidate.combined_score,
-            text=chunk.text,
+            text=cleaned_text,
         )
         id_map[idx] = ref
-        snippet = chunk.text.strip()
+        snippet = cleaned_text.strip()
         header = f"[[{idx}]] {city_label}/{title} L{chunk.line_start}-{chunk.line_end}"
         parts.append(f"{header}\n{snippet}")
 
@@ -928,18 +1211,14 @@ def _build_prompt(
         return _PromptConfig(prompt=prompt, bounds=bounds, style="polite_long")
 
     if style_mode == "adaptive":
-        plan_block = _format_plan_block(plan, city_label)
-        plan_header = []
-        if question_line:
-            plan_header.append(question_line.strip())
-        if city_line:
-            plan_header.append(city_line.strip())
-        if query_line:
-            plan_header.append(query_line.strip())
-        header_text = "\n".join([line for line in plan_header if line])
-        context = context_text
-        plan_prompt = PROMPT_ADAPTIVE_TEMPLATE.format(plan_block=f"{header_text}\n{plan_block}".strip(), context=context)
-        return _PromptConfig(prompt=plan_prompt, bounds=bounds, style=plan.style)
+        question_text = (question or "").strip()
+        city_text = city_label or city
+        prompt = PROMPT_ADAPTIVE_TEMPLATE.format(
+            question=question_text,
+            city=city_text,
+            context=context_text,
+        )
+        return _PromptConfig(prompt=prompt, bounds=bounds, style=plan.style)
 
     prompt = PROMPT_SUMMARY_TERSE_SHORT.format(
         question_line=question_line,
@@ -1239,44 +1518,40 @@ def _fallback_answer(plan: Plan, question: str, city: str, selected: Sequence[_C
 
 def _fallback_adaptive(plan: Plan, selected: Sequence[_Candidate], city_label: str) -> str:
     if not selected:
-        return "資料に該当する記述が見当たりませんでした。"
+        return "### 要約\n資料に該当する記述が見当たりませんでした。\n\n### 出典"
 
     def _sentence_from_candidate(cand: _Candidate, label: int) -> str:
-        text = re.sub(r"\s+", " ", cand.chunk.text or "").strip()
+        text = _clean_chunk_text(cand.chunk.text)
         if not text:
             title = re.sub(r"\.(txt|md)$", "", cand.chunk.source_file, flags=re.I)
             prefix = city_label + "の資料" if city_label else "資料"
             text = f"{prefix}「{title}」に関連情報があります。"
-        snippet = text[:140].rstrip("。")
-        if not snippet:
-            snippet = text[:80]
-        snippet = snippet.strip()
-        if not snippet:
-            snippet = "関連情報が掲載されています"
+        snippet = re.sub(r"\s+", " ", text).strip()
+        snippet = snippet[:140].rstrip("。") or snippet[:80]
+        snippet = (snippet or "関連情報が掲載されています").strip()
         if not snippet.endswith("。"):
             snippet += "。"
-        return f"{snippet}[[{label}]]"
+        prefix = ""
+        if city_label and city_label not in snippet:
+            prefix = f"{city_label}の資料によると、"
+        return f"{prefix}{snippet}[[{label}]]"
 
-    style = plan.style or "medium_structured"
-    primary = _sentence_from_candidate(selected[0], 1)
+    summary_line = _sentence_from_candidate(selected[0], 1)
 
-    if style == "short_direct":
-        extras = []
-        if len(selected) > 1:
-            extras.append(_sentence_from_candidate(selected[1], 2))
-        return " ".join([primary] + extras).strip()
+    detail_lines: List[str] = []
+    for idx, cand in enumerate(selected[1:3], start=2):
+        detail_lines.append(f"- {_sentence_from_candidate(cand, idx)}")
 
-    if style == "medium_structured":
-        bullets: List[str] = []
-        for idx, cand in enumerate(selected[1:3], start=2):
-            bullets.append(f"- {_sentence_from_candidate(cand, idx)}")
-        if bullets:
-            return "\n".join([primary] + bullets)
-        return primary
+    lines: List[str] = ["### 要約", summary_line]
+    if detail_lines:
+        lines.append("")
+        lines.append("### 詳細")
+        lines.extend(detail_lines)
 
-    extras = []
-    for idx, cand in enumerate(selected[1:4], start=2):
-        extras.append(_sentence_from_candidate(cand, idx))
-    if extras:
-        return "\n".join([primary, " ".join(extras)])
-    return primary
+    lines.append("")
+    lines.append("### 出典")
+    for idx, cand in enumerate(selected[:4], start=1):
+        title = re.sub(r"\.(txt|md)$", "", cand.chunk.source_file, flags=re.I)
+        lines.append(f"- {city_label}/{title}")
+
+    return "\n".join(lines).strip()
