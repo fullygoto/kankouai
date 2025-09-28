@@ -7,7 +7,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import pamphlet_search
 
@@ -20,6 +20,9 @@ class ScoredEntry:
     score: float
     matched_tokens: Tuple[str, ...]
     tie_breaker: Tuple[int, float]
+
+
+MATCH_THRESHOLD = 8.0
 
 
 def _normalize_text(text: str, *, keep_spaces: bool = False) -> str:
@@ -44,6 +47,7 @@ def _normalize_text(text: str, *, keep_spaces: bool = False) -> str:
         else:
             converted.append(char)
     lowered = "".join(converted).lower()
+    lowered = lowered.replace("~", "〜")
     if keep_spaces:
         return " ".join(lowered.split())
     return "".join(lowered.split())
@@ -132,7 +136,9 @@ def _coerce_bool(value: object) -> bool:
     return bool(value)
 
 
-def _entry_matches_city(entry: Dict[str, object], city_key: str) -> bool:
+def _entry_matches_city(entry: Dict[str, object], city_key: Optional[str]) -> bool:
+    if not city_key:
+        return True
     if not _coerce_bool(entry.get("area_checked")):
         return False
     areas = entry.get("areas") or []
@@ -169,7 +175,12 @@ def _entry_title_length(entry: Dict[str, object]) -> int:
     return len(title)
 
 
-def _score_entry(entry: Dict[str, object], tokens: Sequence[str], *, city_key: str) -> Tuple[float, List[str]]:
+def _score_entry(
+    entry: Dict[str, object],
+    tokens: Sequence[str],
+    *,
+    query_city: Optional[str],
+) -> Tuple[float, List[str]]:
     if not tokens:
         return 0.0, []
     title = _normalize_text(entry.get("title", ""))
@@ -185,39 +196,58 @@ def _score_entry(entry: Dict[str, object], tokens: Sequence[str], *, city_key: s
     for token in tokens:
         if not token:
             continue
+
+        token_score = 0.0
         if title:
             if token == title:
-                score += 10
-                matched.append(token)
-                continue
-            if token in title:
-                score += 5
-                matched.append(token)
+                token_score = max(token_score, 20.0)
+            else:
+                idx = title.find(token)
+                if idx == 0:
+                    token_score = max(token_score, 12.0)
+                elif 0 < idx <= 3:
+                    token_score = max(token_score, 12.0)
+                    prefix = title[:idx]
+                    if prefix in {"(有)", "（有）", "(株)", "（株）"}:
+                        token_score = max(token_score, 13.0)
+                elif idx >= 0:
+                    token_score = max(token_score, 8.0)
+
         if desc and token in desc:
-            score += 3
-            matched.append(token)
+            token_score = max(token_score, 4.0, token_score)
+
         for tag in tags:
             if tag and token in tag:
-                score += 2
-                matched.append(token)
+                token_score = max(token_score, 3.0, token_score)
                 break
-    if not score:
+
+        if token_score > 0:
+            score += token_score
+            matched.append(token)
+
+    if score <= 0:
         return 0.0, []
 
-    city_tokens = set(_city_token_set(city_key))
-    if city_tokens & set(tokens):
-        score += 2
+    if query_city and _entry_matches_city(entry, query_city):
+        score += 4.0
 
     return score, matched
 
 
-def search(entries: Iterable[Dict[str, object]], query: str, *, city_key: str, limit: int = 3) -> List[ScoredEntry]:
+def search(
+    entries: Iterable[Dict[str, object]],
+    query: str,
+    *,
+    city_key: Optional[str] = None,
+    limit: int = 3,
+) -> List[ScoredEntry]:
     """Return scored tourism entries for ``query`` limited to ``limit`` hits."""
 
     tokens = _tokenize(query)
     if not tokens:
         return []
     expanded_tokens = _expand_tokens(tokens)
+    query_city = detect_city_from_text(query)
     results: List[ScoredEntry] = []
 
     for entry in entries:
@@ -225,7 +255,7 @@ def search(entries: Iterable[Dict[str, object]], query: str, *, city_key: str, l
             continue
         if not _entry_matches_city(entry, city_key):
             continue
-        score, matched = _score_entry(entry, expanded_tokens, city_key=city_key)
+        score, matched = _score_entry(entry, expanded_tokens, query_city=query_city)
         if score <= 0:
             continue
         updated_ts = _parse_timestamp(
@@ -245,7 +275,20 @@ def search(entries: Iterable[Dict[str, object]], query: str, *, city_key: str, l
             )
         )
 
-    results.sort(key=lambda item: (-item.score, item.tie_breaker, _normalize_text(item.entry.get("title", ""))))
+    results.sort(
+        key=lambda item: (
+            -item.score,
+            -_parse_timestamp(
+                item.entry.get("updated_at")
+                or item.entry.get("updated")
+                or item.entry.get("modified_at")
+                or item.entry.get("modified")
+                or item.entry.get("created_at")
+            ),
+            _entry_title_length(item.entry),
+            _normalize_text(item.entry.get("title", "")),
+        )
+    )
     return results[:max(1, limit)]
 
 
@@ -274,4 +317,10 @@ def city_prompt(*, asked: bool) -> str:
     return "市町を「五島市」「新上五島町」「宇久町」「小値賀町」から教えてください。"
 
 
-__all__ = ["ScoredEntry", "search", "detect_city_from_text", "city_prompt"]
+__all__ = [
+    "ScoredEntry",
+    "search",
+    "detect_city_from_text",
+    "city_prompt",
+    "MATCH_THRESHOLD",
+]
