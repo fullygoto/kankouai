@@ -83,6 +83,7 @@ from services import (
 )
 from admin_pamphlets import bp as admin_pamphlets_bp
 from config import DATA_BASE_DIR as CONFIG_DATA_BASE_DIR
+from admin_rollback import bp as admin_rollback_bp
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
@@ -130,6 +131,7 @@ from config import get_config
 app.config.from_object(get_config())
 
 app.register_blueprint(admin_pamphlets_bp)
+app.register_blueprint(admin_rollback_bp)
 
 # Pamphlet search configuration
 pamphlet_search.configure(app.config)

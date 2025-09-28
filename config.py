@@ -42,6 +42,12 @@ class BaseConfig:
     PAMPHLET_MIN_CONFIDENCE = float(os.getenv("PAMPHLET_MIN_CONFIDENCE", "0.42"))
     GEN_MODEL = os.getenv("GEN_MODEL", "gpt-4o-mini")
     REWRITE_MODEL = os.getenv("REWRITE_MODEL", "gpt-4o-mini")
+    DATA_BASE_DIR = os.getenv("DATA_BASE_DIR", "/var/data")
+    BACKUP_DIR = os.getenv("BACKUP_DIR", "/var/tmp/backup")
+    BACKUP_RETENTION = int(os.getenv("BACKUP_RETENTION", "14"))
+    ROLLBACK_READY_TIMEOUT_SEC = int(os.getenv("ROLLBACK_READY_TIMEOUT_SEC", "90"))
+    ROLLBACK_CANARY_ENABLED = os.getenv("ROLLBACK_CANARY_ENABLED", "true").lower() in {"1", "true", "yes"}
+    ALLOW_ADMIN_ROLLBACK_IPS = os.getenv("ALLOW_ADMIN_ROLLBACK_IPS", "")
 
 class DevelopmentConfig(BaseConfig):
     DEBUG = True
