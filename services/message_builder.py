@@ -118,7 +118,7 @@ def parse_pamphlet_answer(raw: str) -> PamphletAnswer:
 
 
 def _expand_summary(base: str, details: Sequence[str]) -> tuple[str, int]:
-    if get_summary_style() in {"polite_long", "adaptive"}:
+    if get_summary_style() == "polite_long":
         return (base or "").strip(), 0
 
     sentences = _split_sentences(base)
@@ -157,16 +157,20 @@ def build_pamphlet_message(
     show_notes: bool = SHOW_NOTES,
 ) -> PamphletMessage:
     cleaned_details = [d for d in answer.details if d and d != "資料に明記なし"]
-    summary_text, used_detail_count = _expand_summary(answer.summary, cleaned_details)
+
+    style = get_summary_style()
+    if style in {"polite_long", "adaptive"}:
+        summary_text = (answer.summary or "").strip()
+        used_detail_count = 0
+    else:
+        summary_text, used_detail_count = _expand_summary(answer.summary, cleaned_details)
 
     remaining_details = cleaned_details[used_detail_count:]
     remaining_details = [d for d in remaining_details if d and d != "資料に明記なし"]
     if len(remaining_details) > _MAX_DETAILS:
         remaining_details = remaining_details[:_MAX_DETAILS]
 
-    style = get_summary_style()
-
-    if style in {"polite_long", "adaptive"}:
+    if style == "polite_long":
         summary_candidate = summary_text.strip()
         if not summary_candidate:
             fallback = _ensure_sentence(answer.summary)
