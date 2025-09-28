@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from config import PAMPHLET_BASE_DIR
+
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +215,7 @@ class _PamphletIndex:
 
 class PamphletIndexManager:
     def __init__(self) -> None:
-        self.base_dir = Path(os.getenv("PAMPHLET_BASE_DIR", "/var/data/pamphlets"))
+        self.base_dir = Path(os.getenv("PAMPHLET_BASE_DIR") or PAMPHLET_BASE_DIR)
         self.chunk_size = int(os.getenv("PAMPHLET_CHUNK_SIZE", "700"))
         self.chunk_overlap = int(os.getenv("PAMPHLET_CHUNK_OVERLAP", "150"))
         self._indexes: Dict[str, _PamphletIndex] = {}

@@ -80,6 +80,7 @@ from services import (
     line_handlers,
     state as user_state,
 )
+from services.paths import get_data_base_dir, ensure_data_directories
 from admin_pamphlets import bp as admin_pamphlets_bp
 from admin_rollback import bp as admin_rollback_bp
 
@@ -127,16 +128,6 @@ def safe_url_for(endpoint, **values):
         
 from config import get_config
 app.config.from_object(get_config())
-
-app.register_blueprint(admin_pamphlets_bp)
-app.register_blueprint(admin_rollback_bp)
-
-# Pamphlet search configuration
-pamphlet_search.configure(app.config)
-try:
-    pamphlet_search.load_all()
-except Exception:
-    app.logger.exception("[pamphlet] initial load failed")
 
 # 以降のメッセージ等で使うため、上限MBを設定から参照
 MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
@@ -4079,30 +4070,63 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
 
 
 # データ格納先
-BASE_DIR       = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/data
-ENTRIES_FILE   = os.path.join(BASE_DIR, "entries.json")
-DATA_DIR       = os.path.join(BASE_DIR, "data")
-LOG_DIR        = os.path.join(BASE_DIR, "logs")
-LOG_FILE       = os.path.join(LOG_DIR, "questions_log.jsonl")
-SYNONYM_FILE   = os.path.join(BASE_DIR, "synonyms.json")
-USERS_FILE     = os.path.join(BASE_DIR, "users.json")
-NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
-SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
+BASE_DIR: str = ""
+ENTRIES_FILE: str = ""
+DATA_DIR: str = ""
+LOG_DIR: str = ""
+LOG_FILE: str = ""
+SYNONYM_FILE: str = ""
+USERS_FILE: str = ""
+NOTICES_FILE: str = ""
+SHOP_INFO_FILE: str = ""
+PAUSED_NOTICE_FILE: str = ""
+SEND_LOG_FILE: str = ""
+_DATA_PATHS_INITIALIZED = False
+_APP_BOOTSTRAPPED = False
+
+
+def _configure_data_paths(flask_app: Flask) -> None:
+    global _DATA_PATHS_INITIALIZED
+    if _DATA_PATHS_INITIALIZED:
+        return
+    global BASE_DIR, ENTRIES_FILE, DATA_DIR, LOG_DIR, LOG_FILE
+    global SYNONYM_FILE, USERS_FILE, NOTICES_FILE, SHOP_INFO_FILE
+    global PAUSED_NOTICE_FILE, SEND_LOG_FILE
+
+    base_path = get_data_base_dir(flask_app.config)
+    BASE_DIR = str(base_path)
+    flask_app.config["DATA_BASE_DIR"] = BASE_DIR
+    ENTRIES_FILE = os.path.join(BASE_DIR, "entries.json")
+    DATA_DIR = os.path.join(BASE_DIR, "data")
+    LOG_DIR = os.path.join(BASE_DIR, "logs")
+    LOG_FILE = os.path.join(LOG_DIR, "questions_log.jsonl")
+    SYNONYM_FILE = os.path.join(BASE_DIR, "synonyms.json")
+    USERS_FILE = os.path.join(BASE_DIR, "users.json")
+    NOTICES_FILE = os.path.join(BASE_DIR, "notices.json")
+    SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
+    PAUSED_NOTICE_FILE = os.path.join(BASE_DIR, "paused_notice.json")
+    SEND_LOG_FILE = os.path.join(LOG_DIR, "send_log.jsonl")
+    global IMAGES_DIR
+    IMAGES_DIR = os.path.join(DATA_DIR, "images")
+
+    ensure_data_directories(
+        Path(BASE_DIR),
+        pamphlet_dir=flask_app.config.get("PAMPHLET_BASE_DIR"),
+    )
+    _DATA_PATHS_INITIALIZED = True
+
 
 # ★ 一度だけ案内フラグの保存先 & TTL（秒）
-PAUSED_NOTICE_FILE    = os.path.join(BASE_DIR, "paused_notice.json")  # もしくは DATA_DIR に置いても可
 PAUSED_NOTICE_TTL_SEC = int(os.getenv("PAUSED_NOTICE_TTL_SEC", "86400"))  # 既定: 24時間
 
 # 送信確定ログ（JSON Lines）
-SEND_LOG_FILE   = os.path.join(LOG_DIR, "send_log.jsonl")
 # ログのサンプリング（1.0=全件、0.0=無効）
 SEND_LOG_SAMPLE = float(os.environ.get("SEND_LOG_SAMPLE", "1.0"))
 
 
 # === Images: config + route + normalized save (唯一の正) ===
 MEDIA_URL_PREFIX = "/media/img"  # 画像URLの先頭
-IMAGES_DIR = os.path.join(DATA_DIR, "images")
-os.makedirs(IMAGES_DIR, exist_ok=True)
+IMAGES_DIR: str = ""
 
 # 入力として受け付ける拡張子（出力は常に .jpg）
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -5032,10 +5056,6 @@ def _save_syn_queue(data):
     _atomic_json_dump(PENDING_SYNONYMS_FILE, data)
 
 
-# 必要フォルダ作成
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
-
 # 便利関数: JSONをアトミックに保存
 def _atomic_json_dump(path, obj, *, create_backup: bool = False):
     path = Path(path)
@@ -5530,8 +5550,6 @@ def _bootstrap_files_and_admin():
             app.logger.warning(
                 "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
             )
-
-_bootstrap_files_and_admin()
 
 # 必須キーが未設定なら警告（起動は継続）
 if not OPENAI_API_KEY:
@@ -11739,6 +11757,27 @@ def admin_unhit_save_text():
     # 返却（フロントでトースト表示などに利用）
     return jsonify({"ok": True, "filename": fname})
 # ===== ここまで ==============================================================
+
+
+def create_app() -> Flask:
+    global _APP_BOOTSTRAPPED
+    if not _APP_BOOTSTRAPPED:
+        _configure_data_paths(app)
+        if "admin_pamphlets" not in app.blueprints:
+            app.register_blueprint(admin_pamphlets_bp)
+        if "admin_rollback" not in app.blueprints:
+            app.register_blueprint(admin_rollback_bp)
+        pamphlet_search.configure(app.config)
+        try:
+            pamphlet_search.load_all()
+        except Exception:
+            app.logger.exception("[pamphlet] initial load failed")
+        _bootstrap_files_and_admin()
+        _APP_BOOTSTRAPPED = True
+    return app
+
+
+create_app()
 
 
 # メイン起動（重複禁止：これ1つだけ残す）

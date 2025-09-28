@@ -123,6 +123,34 @@ def build_response(
         message = labelled_message
 
     if not normalized_sources:
+        fallback_docs = list(searcher(city_key, stripped, topk)) if city_key else []
+        fallback_text = summarizer(stripped, fallback_docs, detailed=detailed) if fallback_docs else ""
+        if fallback_text:
+            sections = fallback_text.strip()
+            sources_md = ""
+            if "### 出典" in sections:
+                body, tail = sections.split("### 出典", 1)
+                message_body = body.strip()
+                sources_md = "### 出典\n" + tail.strip()
+            else:
+                message_body = sections
+            used_labels = sorted({int(m.group(1)) for m in re.finditer(r"\[\[(\d+)\]\]", fallback_text)})
+            mapped_sources: List[str] = []
+            for idx in used_labels:
+                if 1 <= idx <= len(fallback_docs):
+                    chunk = fallback_docs[idx - 1].chunk
+                    mapped_sources.append(f"{chunk.city}/{chunk.source_file}")
+            session.set_followup(user_id, query=stripped, city=city_key)
+            return PamphletResponse(
+                kind="answer",
+                message=message_body,
+                city=city_key,
+                sources=mapped_sources,
+                sources_md=sources_md,
+                more_available=False,
+                citations=[],
+                message_with_labels=message_body,
+            )
         session.clear_followup(user_id)
         return PamphletResponse(
             kind="error",
