@@ -18,7 +18,7 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - allow running without OpenAI
     OpenAI = None  # type: ignore
 
-from . import pamphlet_search
+from . import pamphlet_search, sources_fmt as _sources_fmt
 from .pamphlet_planner import Plan, plan_answer
 from .summary_config import SummaryBounds, get_summary_bounds, get_summary_style
 
@@ -330,6 +330,9 @@ def _get_client() -> Optional[Any]:
     global _CLIENT
     if _CLIENT is not None:
         return _CLIENT
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key or not api_key.startswith("sk-"):
+        return None
     if OpenAI is None:
         return None
     try:
@@ -423,6 +426,15 @@ def answer_from_pamphlets(question: str, city: str) -> Dict[str, Any]:
             min_chars=_CITATION_MIN_CHARS,
             min_score=_CITATION_MIN_SCORE,
         )
+        if not postprocessed.answer_with_labels:
+            summary_result = _summary_fallback_answer(
+                planned_question,
+                selected,
+                confidence=confidence,
+                debug_info=debug_info,
+            )
+            if summary_result:
+                return summary_result
 
     postprocessed = _enforce_summary_bounds(
         postprocessed,
@@ -1280,3 +1292,82 @@ def _fallback_adaptive(plan: Plan, selected: Sequence[_Candidate], city_label: s
     if extras:
         return "\n".join([primary, " ".join(extras)])
     return primary
+
+
+# Re-export helpers for compatibility with existing callers/tests.
+normalize_sources = _sources_fmt.normalize_sources
+format_sources_md = _sources_fmt.format_sources_md
+
+
+def _summary_fallback_answer(
+    question: str,
+    selected: Sequence[_Candidate],
+    *,
+    confidence: float,
+    debug_info: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not selected:
+        return None
+    try:
+        from . import pamphlet_summarize
+    except Exception:
+        return None
+
+    docs = [
+        pamphlet_search.SearchResult(chunk=cand.chunk, score=cand.combined_score)
+        for cand in selected
+    ]
+    summary_text = pamphlet_summarize.summarize_with_gpt_nano(question, docs, detailed=False)
+    if not summary_text:
+        return None
+
+    label_matches = sorted({int(match.group(1)) for match in _LABEL_PATTERN.finditer(summary_text)})
+    if not label_matches:
+        return None
+
+    if "資料" not in summary_text:
+        prefix_label = label_matches[0]
+        intro = f"資料に基づく要約です。[[{prefix_label}]]"
+        if summary_text.startswith("### 要約"):
+            header, _, tail = summary_text.partition("### 要約")
+            body = tail.strip()
+            combined = intro if not body else f"{intro}\n{body}"
+            summary_text = "### 要約\n" + combined
+        else:
+            summary_text = f"{intro}\n{summary_text}" if summary_text else intro
+
+    citations: List[Dict[str, Any]] = []
+    sources: List[str] = []
+    for idx in label_matches:
+        if idx < 1 or idx > len(docs):
+            continue
+        chunk = docs[idx - 1].chunk
+        doc_id = f"{chunk.city}/{chunk.source_file}"
+        citations.append(
+            {
+                "doc_id": doc_id,
+                "title": re.sub(r"\.(txt|md)$", "", chunk.source_file, flags=re.I),
+                "file": chunk.source_file,
+                "city": pamphlet_search.city_label(chunk.city),
+                "labels": [idx],
+                "chunk_ids": [str(chunk.chunk_index)],
+                "char_count": len(chunk.text.strip()),
+                "score": float(docs[idx - 1].score),
+            }
+        )
+        sources.append(doc_id)
+
+    if not citations:
+        return None
+
+    debug_payload = dict(debug_info or {})
+    debug_payload["fallback_summary"] = True
+
+    return {
+        "answer": summary_text,
+        "answer_with_labels": summary_text,
+        "citations": citations,
+        "sources": sources,
+        "confidence": confidence,
+        "debug": debug_payload,
+    }

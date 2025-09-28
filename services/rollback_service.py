@@ -17,6 +17,8 @@ from typing import Optional
 
 import requests
 
+from services.paths import get_data_base_dir
+
 from .manifest import BackupManifest, SnapshotEntry, ISO_FORMAT
 
 LOGGER = logging.getLogger("rollback")
@@ -24,6 +26,10 @@ LOGGER = logging.getLogger("rollback")
 
 def _env_path(key: str, default: str) -> Path:
     return Path(os.getenv(key, default)).expanduser()
+
+
+def _default_data_base_dir() -> Path:
+    return get_data_base_dir()
 
 
 def _env_int(key: str, default: int) -> int:
@@ -35,7 +41,7 @@ def _env_int(key: str, default: int) -> int:
 
 @dataclass
 class RollbackSettings:
-    data_base_dir: Path = dataclasses.field(default_factory=lambda: _env_path("DATA_BASE_DIR", "/var/data"))
+    data_base_dir: Path = dataclasses.field(default_factory=_default_data_base_dir)
     backup_dir: Path = dataclasses.field(default_factory=lambda: _env_path("BACKUP_DIR", "/var/tmp/backup"))
     retention: int = dataclasses.field(default_factory=lambda: _env_int("BACKUP_RETENTION", 14))
     ready_timeout: int = dataclasses.field(default_factory=lambda: _env_int("ROLLBACK_READY_TIMEOUT_SEC", 90))

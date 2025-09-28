@@ -1,70 +1,71 @@
-import re
-
-import pytest
-
-from services import pamphlet_rag, pamphlet_search
+from services.pamphlet_search import PamphletChunk, SearchResult
+from services.pamphlet_summarize import summarize_with_gpt_nano
 
 
-@pytest.fixture
-def adaptive_env(tmp_path, monkeypatch):
-    base = tmp_path / "pamphlets"
-    (base / "goto").mkdir(parents=True, exist_ok=True)
-    text = (
-        "五島市の歴史をまとめたパンフレットです。遣唐使が寄港した804年の記録や"
-        "福江港の開港について説明しています。初めて訪れる方向けの見どころも紹介しています。"
-    ) * 10
-    (base / "goto" / "history.txt").write_text(text, encoding="utf-8")
-
-    monkeypatch.setenv("SUMMARY_MODE", "adaptive")
-    monkeypatch.setenv("CITATION_MIN_CHARS", "0")
-    monkeypatch.setenv("CITATION_MIN_SCORE", "0")
-
-    pamphlet_search.configure(
-        {
-            "PAMPHLET_BASE_DIR": str(base),
-            "PAMPHLET_CHUNK_SIZE": 400,
-            "PAMPHLET_CHUNK_OVERLAP": 40,
-        }
+def _make_result(city: str, source: str, text: str, score: float = 0.9) -> SearchResult:
+    chunk = PamphletChunk(
+        city=city,
+        source_file=source,
+        chunk_index=0,
+        text=text,
+        char_start=0,
+        char_end=len(text),
+        line_start=1,
+        line_end=text.count("\n") + 1,
     )
-    pamphlet_search.reindex_all()
-
-    yield
+    return SearchResult(chunk=chunk, score=score)
 
 
-def _fake_generate(prompt_cfg):
-    style = prompt_cfg.style
-    if style == "short_direct":
-        return "遣唐使の寄港地として知られています[[1]] 奈良時代の交流が残ります[[1]]"
-    if style == "medium_structured":
-        return "奈良時代の役割を紹介します[[1]]\n- 港の役目が記されています[[1]]"
-    return (
-        "遣唐使との交流背景を説明します[[1]]\n"
-        "奈良時代からの歴史や見どころを2文でまとめます[[1]]"
+def _section(body: str, title: str) -> str:
+    if title not in body:
+        return ""
+    after = body.split(title, 1)[1]
+    for marker in ("\n### ", "\n# "):
+        if marker in after:
+            after = after.split(marker, 1)[0]
+            break
+    return after.strip()
+
+
+def _sample_docs() -> list[SearchResult]:
+    base_text = (
+        "804年に遣唐使船が寄港した記録が残っており、当時の外交航海では福江の港が補給地となりました。"
+        "五島市は寄港船の水や食料を提供し、航路の安全を支えました。"
     )
+    extra = (
+        "航海の準備には僧や技術者が同行し、寄港後は現地での交流行事が開かれたと伝わっています。"
+        "福江城下ではその歴史を紹介する展示が整備されています。"
+    )
+    detailed = (
+        "奈良時代末期の遣唐使派遣は国家的事業であり、804年の船団は藤原冬嗣らが参加しました。"
+        "旅程には長崎県の島々が含まれ、五島で風待ちを行った記録が『続日本紀』に残ります。"
+        "航行を支える船団は、補給・修繕・祈祷を目的とした一行を伴いました。"
+    )
+    return [
+        _make_result("goto", "history.txt", base_text, 0.95),
+        _make_result("goto", "culture.txt", extra, 0.88),
+        _make_result("goto", "chronicle.txt", detailed, 0.86),
+    ]
 
 
-def test_short_direct_is_two_sentences(adaptive_env, monkeypatch):
-    monkeypatch.setattr(pamphlet_rag, "_generate_with_constraints", _fake_generate)
-    answer = pamphlet_rag.answer_from_pamphlets("開港はいつ？", "goto")
-    labelled = answer.get("answer_with_labels", "")
-    assert answer["debug"]["plan"]["style"] == "short_direct"
-    assert 1 <= labelled.count("[[") <= 2
-    assert len(labelled) <= 220
+def test_fact_question_prefers_short_summary():
+    output = summarize_with_gpt_nano("遣唐使の派遣年を教えて", _sample_docs(), detailed=False)
+    summary = _section(output, "### 要約")
+    detail = _section(output, "### 詳細")
+
+    assert output.startswith("### 要約")
+    assert len(summary.replace("\n", "")) <= 200
+    assert not detail
 
 
-def test_medium_structured_contains_bullet(adaptive_env, monkeypatch):
-    monkeypatch.setattr(pamphlet_rag, "_generate_with_constraints", _fake_generate)
-    answer = pamphlet_rag.answer_from_pamphlets("歴史の概要を教えて", "goto")
-    labelled = answer.get("answer_with_labels", "")
-    assert answer["debug"]["plan"]["style"] == "medium_structured"
-    assert "\n- " in labelled
+def test_detailed_request_respects_length_limit():
+    output = summarize_with_gpt_nano("遣唐使の背景を詳しく説明して", _sample_docs(), detailed=True)
+    summary = _section(output, "### 要約")
+    detail = _section(output, "### 詳細")
 
-
-def test_long_explanatory_two_paragraphs(adaptive_env, monkeypatch):
-    monkeypatch.setattr(pamphlet_rag, "_generate_with_constraints", _fake_generate)
-    answer = pamphlet_rag.answer_from_pamphlets("初めて行くので詳しく知りたい", "goto")
-    labelled = answer.get("answer_with_labels", "")
-    assert answer["debug"]["plan"]["style"] == "long_explanatory"
-    paragraphs = [p for p in labelled.split("\n") if p.strip()]
-    assert len(paragraphs) <= 4
-    assert len(labelled) <= 800
+    assert output.startswith("### 要約")
+    assert len(output) <= 800
+    assert detail
+    assert detail.count("\n- ") <= 5
+    assert summary.count("[[") >= 1
+    assert "[[1]]" in output
