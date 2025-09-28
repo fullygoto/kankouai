@@ -82,7 +82,7 @@ def build_response(
         show_quick = not record.get("asked", False)
         session.set_pending(user_id, stripped, asked=True)
         choices = pamphlet_search.city_choices() if show_quick else []
-        message = "どの市町の資料からお探ししますか？"
+        message = "どの市町の資料ですか？"
         if not show_quick:
             message = "対象の市町を「五島市」「新上五島町」「小値賀町」「宇久町」から教えてください。"
         return PamphletResponse(
