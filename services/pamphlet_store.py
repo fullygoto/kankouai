@@ -4,23 +4,34 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Dict, List
 
 import os
 import shutil
 
-from config import PAMPHLET_BASE_DIR, PAMPHLET_CITIES
+from config import PAMPHLET_CITIES
+from services.paths import get_data_base_dir
 
 
-BASE = Path(PAMPHLET_BASE_DIR)
+BASE = Path(os.getenv("PAMPHLET_BASE_DIR") or get_data_base_dir() / "pamphlets")
+_DIRS_READY = False
+_DIRS_LOCK = Lock()
 
 
 def ensure_dirs() -> None:
     """Ensure the base directory and per-city folders exist."""
 
-    BASE.mkdir(parents=True, exist_ok=True)
-    for slug in PAMPHLET_CITIES:
-        (BASE / slug).mkdir(parents=True, exist_ok=True)
+    global _DIRS_READY
+    if _DIRS_READY:
+        return
+    with _DIRS_LOCK:
+        if _DIRS_READY:
+            return
+        BASE.mkdir(parents=True, exist_ok=True)
+        for slug in PAMPHLET_CITIES:
+            (BASE / slug).mkdir(parents=True, exist_ok=True)
+        _DIRS_READY = True
 
 
 def _city_root(city: str) -> Path:

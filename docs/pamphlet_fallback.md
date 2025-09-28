@@ -19,7 +19,7 @@
 
 | 変数名 | 役割 | 備考 |
 | ------ | ---- | ---- |
-| `PAMPHLET_BASE_DIR` | パンフレットの保存先ルート | 既定 `/var/data/pamphlets` |
+| `PAMPHLET_BASE_DIR` | パンフレットの保存先ルート | 既定 `./data/pamphlets`（本番は `/var/data/pamphlets`） |
 | `PAMPHLET_TOPK` | 要約に渡すチャンク数 | 既定 3 件 |
 | `PAMPHLET_CHUNK_SIZE` | チャンクサイズ（文字数） | 既定 1500 |
 | `PAMPHLET_CHUNK_OVERLAP` | チャンク重複（文字数） | 既定 200 |

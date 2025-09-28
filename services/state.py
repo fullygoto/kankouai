@@ -10,9 +10,13 @@ import time
 from contextlib import contextmanager
 from typing import Dict, Optional
 
+from pathlib import Path
+
+from config import SYSTEM_BASE_DIR
+
 LOGGER = logging.getLogger(__name__)
 
-_DEFAULT_DB_PATH = "/var/data/system/user_state.sqlite"
+_DEFAULT_DB_PATH = str(Path(SYSTEM_BASE_DIR) / "user_state.sqlite")
 _INIT_LOCK = threading.Lock()
 _INITED_PATH: Optional[str] = None
 
