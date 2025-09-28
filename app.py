@@ -9098,33 +9098,6 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
         t = (text or "").strip()
         return t in {"リセット", "やり直し", "キャンセル", "reset", "clear"}
 
-    # --- city state (area selection) ---
-    city_box = globals().setdefault("_TOURISM_CITY_STATE", {})
-
-    now_dt = datetime.utcnow()
-    try:
-        for key, info in list(city_box.items()):
-            exp = info.get("exp_at")
-            if isinstance(exp, datetime) and exp < now_dt:
-                city_box.pop(key, None)
-    except Exception:
-        pass
-
-    def _city_state_get(uid):
-        return city_box.get(uid) if uid else None
-
-    def _city_state_set(uid, **updates):
-        if not uid:
-            return None
-        state = city_box.setdefault(uid, {})
-        state.update({k: v for k, v in updates.items() if k})
-        state["exp_at"] = now_dt + timedelta(minutes=30)
-        return state
-
-    def _city_state_clear(uid):
-        if uid and uid in city_box:
-            city_box.pop(uid, None)
-
     # ========= 共通：質問テキスト =========
     q = (question or "").strip()
     if not q:
@@ -9135,78 +9108,75 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
         st0 = _flow_get(user_id) if user_id else None
     except Exception:
         st0 = None
-    if not st0:
-        m0, ok0 = get_transport_reply(q)
-        if ok0:
-            return m0, False, ""  # 画像なし/即答扱い
-
-    # --- city selection flow -------------------------------------------------
-    state = _city_state_get(user_id)
     choice_texts = {choice["text"] for choice in pamphlet_search.city_choices()}
 
     if user_id and _is_reset_cmd(q):
         _flow_clear(user_id)
-        _city_state_clear(user_id)
         return "フローをリセットしました。知りたいスポット名やキーワードを送ってください。", True, ""
 
-    city_key = None
-    search_query = q
-
-    if user_id and q in choice_texts:
-        detected_city = tourism_search.detect_city_from_text(q)
-        pending_query = state.get("pending_query") if state else None
-        if detected_city:
-            city_key = detected_city
-            search_query = pending_query or ""
-            _city_state_set(user_id, city=detected_city, asked=False, pending_query=None)
+    def _pamphlet_route(text_input: str) -> tuple[str, bool, str]:
+        store_factory = globals().get("_pamphlet_session_store")
+        if callable(store_factory):
+            session_store = store_factory()
         else:
-            search_query = pending_query or ""
-    else:
-        detected_inline = tourism_search.detect_city_from_text(q)
-        if detected_inline:
-            city_key = detected_inline
-            if user_id:
-                _city_state_set(user_id, city=detected_inline, asked=False)
-        elif state and state.get("city"):
-            city_key = state.get("city")
+            session_store = globals().setdefault("_PAMPHLET_SESSION_FALLBACK", {})
+            session_store.setdefault("pamphlet", {"city": {}, "pending": {}, "followup": {}})
+            session_store.setdefault("pamphlet_city", {})
+            session_store.setdefault("pamphlet_pending", {})
+            session_store.setdefault("pamphlet_followup", {})
 
-    if not city_key:
-        if user_id:
-            pending = q if q and q not in choice_texts else (state.get("pending_query") if state else None)
-            asked_flag = bool(state and state.get("asked"))
-            prompt = tourism_search.city_prompt(asked=asked_flag)
-            _city_state_set(
-                user_id,
-                asked=True,
-                pending_query=pending or (state.get("pending_query") if state else None),
-                city=None,
-            )
-            return prompt, True, ""
-        else:
-            return tourism_search.city_prompt(asked=True), True, ""
+        topk = int(app.config.get("PAMPHLET_TOPK", 3) or 3)
+        ttl = int(app.config.get("PAMPHLET_SESSION_TTL", 1800) or 1800)
 
-    if user_id:
-        _city_state_set(user_id, city=city_key, asked=False, pending_query=None)
+        def _search(city: str, query: str, limit: int):
+            return pamphlet_search.search(city, query, limit)
 
-    if q in choice_texts and not search_query.strip():
-        return "探したいスポット名やキーワードを教えてください。", True, ""
+        def _summarize(query: str, docs, detailed: bool = False):
+            return pamphlet_summarize.summarize_with_gpt_nano(query, docs, detailed=detailed)
 
-    search_query = search_query.strip() or q
+        result = pamphlet_flow.build_response(
+            text_input,
+            user_id=user_id or "anon",
+            session_store=session_store,
+            topk=topk,
+            ttl=ttl,
+            searcher=_search,
+            summarizer=_summarize,
+        )
 
-    if not search_query:
-        return "探したいスポット名やキーワードを教えてください。", True, ""
+        if result.kind == "noop":
+            return "", False, ""
+
+        if result.kind == "ask_city":
+            return result.message or "どの市町の資料ですか？", True, ""
+
+        if result.kind == "answer":
+            message = result.message or ""
+            if result.sources_md and "### 出典" not in message:
+                message = f"{message}\n\n{result.sources_md}" if message else result.sources_md
+            return message, True, ""
+
+        return (result.message or "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。"), True, ""
+
+    if q in choice_texts or q.startswith("もっと詳しく"):
+        return _pamphlet_route(q)
+
+    weather_reply, weather_hit = get_weather_reply(q)
+    if weather_hit:
+        return weather_reply, False, ""
+
+    if not st0:
+        transport_reply, transport_hit = get_transport_reply(q)
+        if transport_hit:
+            return transport_reply, False, ""
 
     es = [_norm_entry(e) for e in load_entries()]
-    ranked_results = tourism_search.search(es, search_query, city_key=city_key, limit=3)
+    ranked_results = tourism_search.search(es, q, limit=3)
 
-    if not ranked_results:
-        m, ok = get_weather_reply(search_query)
-        if ok:
-            return m, True, ""
-        refine, _meta = build_refine_suggestions(search_query)
-        return "該当が見つかりませんでした。\n" + refine, False, ""
-
-    top_entry = ranked_results[0].entry
+    if ranked_results and ranked_results[0].score >= tourism_search.MATCH_THRESHOLD:
+        top_entry = ranked_results[0].entry
+    else:
+        return _pamphlet_route(q)
     record_source_from_entry(top_entry)
     urls = _build_image_urls_for_entry(top_entry)
     img_url = urls.get("image") or urls.get("thumb") or ""
