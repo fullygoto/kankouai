@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import pamphlet_search
-from app_utils import textnorm
 
 
 @dataclass(frozen=True)
@@ -20,14 +19,38 @@ class ScoredEntry:
     entry: Dict[str, object]
     score: float
     matched_tokens: Tuple[str, ...]
-    tie_breaker: Tuple[object, ...]
+    tie_breaker: Tuple[int, float]
 
 
-MATCH_THRESHOLD = 40.0
+MATCH_THRESHOLD = 8.0
 
 
 def _normalize_text(text: str, *, keep_spaces: bool = False) -> str:
-    return textnorm.normalize(text, keep_spaces=keep_spaces)
+    """Normalise Japanese text for robust matching."""
+
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", str(text))
+    converted: List[str] = []
+    for char in normalized:
+        code = ord(char)
+        if 0x30A1 <= code <= 0x30F4:  # Katakana → Hiragana
+            converted.append(chr(code - 0x60))
+        elif code == 0x30F7:  # ヷ
+            converted.append("わ")
+        elif code == 0x30F8:  # ヸ
+            converted.append("ゐ")
+        elif code == 0x30F9:  # ヹ
+            converted.append("ゑ")
+        elif code == 0x30FA:  # ヺ
+            converted.append("を")
+        else:
+            converted.append(char)
+    lowered = "".join(converted).lower()
+    lowered = lowered.replace("~", "〜")
+    if keep_spaces:
+        return " ".join(lowered.split())
+    return "".join(lowered.split())
 
 
 def _tokenize(query: str) -> List[str]:
@@ -147,25 +170,9 @@ def _parse_timestamp(value: object) -> float:
     return 0.0
 
 
-def _primary_area_key(entry: Dict[str, object]) -> str:
-    areas = entry.get("areas") or []
-    if isinstance(areas, (str, bytes)):
-        areas = [areas]
-    for area in areas:
-        if not area:
-            continue
-        normalized = _normalize_text(str(area), keep_spaces=True)
-        if normalized:
-            return normalized
-    return ""
-
-
-def _entry_popularity(entry: Dict[str, object]) -> float:
-    value = entry.get("popularity")
-    try:
-        return float(value)
-    except Exception:
-        return 0.0
+def _entry_title_length(entry: Dict[str, object]) -> int:
+    title = _normalize_text(str(entry.get("title", "")))
+    return len(title)
 
 
 def _score_entry(
@@ -176,10 +183,9 @@ def _score_entry(
 ) -> Tuple[float, List[str]]:
     if not tokens:
         return 0.0, []
-    title = str(entry.get("title", ""))
-    title_norm = _normalize_text(title)
-    desc_norm = _normalize_text(entry.get("desc", ""))
-    tags_norm = [
+    title = _normalize_text(entry.get("title", ""))
+    desc = _normalize_text(entry.get("desc", ""))
+    tags = [
         _normalize_text(tag)
         for tag in (entry.get("tags") or [])
         if isinstance(tag, str)
@@ -187,26 +193,32 @@ def _score_entry(
 
     matched: List[str] = []
     score = 0.0
-
     for token in tokens:
         if not token:
             continue
 
         token_score = 0.0
-        if title_norm:
-            if token == title_norm:
-                token_score = 100.0
-            elif title_norm.startswith(token):
-                token_score = max(token_score, 60.0)
-            elif token in title_norm:
-                token_score = max(token_score, 40.0)
+        if title:
+            if token == title:
+                token_score = max(token_score, 20.0)
+            else:
+                idx = title.find(token)
+                if idx == 0:
+                    token_score = max(token_score, 12.0)
+                elif 0 < idx <= 3:
+                    token_score = max(token_score, 12.0)
+                    prefix = title[:idx]
+                    if prefix in {"(有)", "（有）", "(株)", "（株）"}:
+                        token_score = max(token_score, 13.0)
+                elif idx >= 0:
+                    token_score = max(token_score, 8.0)
 
-        if desc_norm and token in desc_norm:
-            token_score = max(token_score, 12.0, token_score)
+        if desc and token in desc:
+            token_score = max(token_score, 4.0, token_score)
 
-        for tag in tags_norm:
+        for tag in tags:
             if tag and token in tag:
-                token_score = max(token_score, 10.0, token_score)
+                token_score = max(token_score, 3.0, token_score)
                 break
 
         if token_score > 0:
@@ -217,7 +229,7 @@ def _score_entry(
         return 0.0, []
 
     if query_city and _entry_matches_city(entry, query_city):
-        score += 8.0
+        score += 4.0
 
     return score, matched
 
@@ -253,12 +265,7 @@ def search(
             or entry.get("modified")
             or entry.get("created_at")
         )
-        tie_breaker = (
-            -updated_ts,
-            _primary_area_key(entry),
-            -_entry_popularity(entry),
-            _normalize_text(entry.get("title", "")),
-        )
+        tie_breaker = (_entry_title_length(entry), -updated_ts)
         results.append(
             ScoredEntry(
                 entry=entry,
@@ -278,62 +285,11 @@ def search(
                 or item.entry.get("modified")
                 or item.entry.get("created_at")
             ),
-            _primary_area_key(item.entry),
-            -_entry_popularity(item.entry),
+            _entry_title_length(item.entry),
             _normalize_text(item.entry.get("title", "")),
         )
     )
     return results[:max(1, limit)]
-
-
-def build_narrowing_suggestions(results: Sequence[ScoredEntry]) -> Dict[str, List[str]]:
-    """Return top tag/area candidates for narrowing when multiple hits exist."""
-
-    if len(results) < 2:
-        return {"tags": [], "areas": []}
-
-    tag_counter: Counter[str] = Counter()
-    tag_display: Dict[str, str] = {}
-    area_counter: Counter[str] = Counter()
-    area_display: Dict[str, str] = {}
-
-    for result in results:
-        entry = result.entry
-        for tag in entry.get("tags") or []:
-            if not isinstance(tag, str):
-                continue
-            label = tag.strip()
-            if not label:
-                continue
-            norm = _normalize_text(label)
-            if not norm:
-                continue
-            tag_counter[norm] += 1
-            tag_display.setdefault(norm, label)
-
-        areas = entry.get("areas") or []
-        if isinstance(areas, (str, bytes)):
-            areas = [areas]
-        for area in areas:
-            if not area:
-                continue
-            label = str(area).strip()
-            if not label:
-                continue
-            norm = _normalize_text(label)
-            if not norm:
-                continue
-            area_counter[norm] += 1
-            area_display.setdefault(norm, label)
-
-    def _top3(counter: Counter[str], display: Dict[str, str]) -> List[str]:
-        ordered = sorted(counter.items(), key=lambda item: (-item[1], display.get(item[0], "")))
-        return [display[key] for key, _count in ordered[:3]]
-
-    return {
-        "tags": _top3(tag_counter, tag_display),
-        "areas": _top3(area_counter, area_display),
-    }
 
 
 def detect_city_from_text(text: str) -> str | None:
@@ -364,7 +320,6 @@ def city_prompt(*, asked: bool) -> str:
 __all__ = [
     "ScoredEntry",
     "search",
-    "build_narrowing_suggestions",
     "detect_city_from_text",
     "city_prompt",
     "MATCH_THRESHOLD",

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Mapping, Any
+from typing import Mapping, Any, Iterable
 import os
 
 
@@ -15,13 +15,10 @@ def _normalize_path(value: str | os.PathLike[str]) -> Path:
 
 
 def default_data_base_dir(app_env: str | None) -> Path:
-    """Return the default base directory for persisted application data."""
-
-    # Render の Disk 永続化仕様に合わせ、既定で /var/data を用いる。
-    # ローカル開発でも Render との挙動差分を避けるため同一パスを採用するが、
-    # テストや個別環境では DATA_BASE_DIR 環境変数で上書き可能とする。
-    _ = app_env  # 実質未使用だが既存シグネチャ互換のため残す
-    return Path("/var/data")
+    env = (app_env or os.environ.get("APP_ENV") or "").lower()
+    if env == "production":
+        return Path("/var/data")
+    return Path("./data")
 
 
 def get_data_base_dir(config: Mapping[str, Any] | None = None) -> Path:
@@ -44,24 +41,20 @@ def get_data_base_dir(config: Mapping[str, Any] | None = None) -> Path:
     return default_data_base_dir(app_env)
 
 
-def ensure_data_directories(base_dir: Path) -> Mapping[str, Path]:
-    """Create and return the canonical directory layout for persisted data."""
+def ensure_data_directories(
+    base_dir: Path,
+    *,
+    pamphlet_dir: str | os.PathLike[str] | None = None,
+    extra_dirs: Iterable[str | os.PathLike[str]] | None = None,
+) -> None:
+    candidates: list[Path] = [base_dir, base_dir / "data", base_dir / "data" / "images", base_dir / "logs", base_dir / "system"]
 
-    normalized = _normalize_path(base_dir)
-    layout = {
-        "base": normalized,
-        "pamphlets": normalized / "pamphlets",
-        "entries": normalized / "entries",
-        "uploads": normalized / "uploads",
-        "images": normalized / "images",
-        "logs": normalized / "logs",
-    }
+    if pamphlet_dir:
+        candidates.append(_normalize_path(pamphlet_dir))
 
-    for path in layout.values():
+    if extra_dirs:
+        for item in extra_dirs:
+            candidates.append(_normalize_path(item))
+
+    for path in candidates:
         path.mkdir(parents=True, exist_ok=True)
-
-    # 旧来の data/ 構成を参照するコードがあっても壊さないよう、空であれば作成しておく。
-    legacy = normalized / "data"
-    legacy.mkdir(parents=True, exist_ok=True)
-
-    return layout

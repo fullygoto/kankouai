@@ -28,8 +28,6 @@
 !services/**
 !manage/
 !manage/**
-!app_utils/
-!app_utils/**
 
 # tests も許可
 !tests/

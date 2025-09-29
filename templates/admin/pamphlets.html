@@ -45,13 +45,6 @@
     #preview-status{color:var(--muted);font-size:13px;margin-top:8px}
     .muted{color:var(--muted)}
     .actions .btn{margin:0 2px}
-    .storage-card{margin-bottom:20px;padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:#f1f5f9}
-    .storage-card h2{margin:0 0 12px;font-size:17px}
-    .storage-card dl{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;margin:0;font-size:13px}
-    .storage-card dt{color:var(--muted)}
-    .storage-card dd{margin:0;font-family:'SFMono-Regular','Consolas','Menlo','Courier New',monospace;word-break:break-all}
-    .storage-card .disk-stats{margin-top:12px;font-size:13px;color:#0f172a}
-    .storage-card .disk-stats span{display:inline-block;margin-right:12px}
     @media (max-width: 880px){
       .panel{flex:1 1 100%}
       #preview-text{max-height:360px}
@@ -66,31 +59,6 @@
     {% include '_back_to_data.html' %}
     {% include '_admin_nav.html' %}
     <h1>パンフレットテキスト管理</h1>
-
-    {% if storage_info %}
-    <div class="storage-card">
-      <h2>保存先とディスク状況</h2>
-      <dl>
-        <dt>DATA_BASE_DIR</dt>
-        <dd>{{ storage_info.base }}</dd>
-        <dt>パンフレット</dt>
-        <dd>{{ storage_info.pamphlets }}</dd>
-        <dt>観光データ</dt>
-        <dd>{{ storage_info.entries }}</dd>
-        <dt>アップロード</dt>
-        <dd>{{ storage_info.uploads }}</dd>
-        <dt>画像</dt>
-        <dd>{{ storage_info.images }}</dd>
-      </dl>
-      {% if storage_info.disk_fmt %}
-      <div class="disk-stats">
-        <span>総容量 {{ storage_info.disk_fmt.total }}</span>
-        <span>使用中 {{ storage_info.disk_fmt.used }}</span>
-        <span>空き {{ storage_info.disk_fmt.free }}</span>
-      </div>
-      {% endif %}
-    </div>
-    {% endif %}
 
     <form method="get" action="{{ url_for('pamphlets_admin.pamphlets_index') }}" style="margin-bottom:16px;">
       <label for="pamphlet-city">市町</label>
