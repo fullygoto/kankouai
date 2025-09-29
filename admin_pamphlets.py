@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from functools import wraps
-from pathlib import Path
 from typing import Callable
-
-import shutil
 
 from flask import (
     Blueprint,
@@ -63,44 +60,11 @@ def pamphlets_index():
     except Exception as exc:
         flash(f"一覧取得に失敗しました: {exc}", "danger")
         files = []
-
-    base_dir = Path(current_app.config.get("DATA_BASE_DIR", "/var/data"))
-    pamphlet_root = Path(pamphlet_store.BASE).resolve()
-    try:
-        usage = shutil.disk_usage(base_dir)
-        disk_info = {
-            "total": usage.total,
-            "used": usage.used,
-            "free": usage.free,
-        }
-    except (FileNotFoundError, PermissionError, OSError):
-        disk_info = None
-
-    def _format_bytes(num: int) -> str:
-        units = ["B", "KB", "MB", "GB", "TB"]
-        value = float(num)
-        for unit in units:
-            if value < 1024.0 or unit == units[-1]:
-                return f"{value:.1f} {unit}"
-            value /= 1024.0
-        return f"{num} B"
-
-    storage_info = {
-        "base": str(base_dir),
-        "pamphlets": str(pamphlet_root),
-        "entries": str(Path(current_app.config.get("ENTRIES_DIR", base_dir / "entries"))),
-        "uploads": str(Path(current_app.config.get("UPLOADS_DIR", base_dir / "uploads"))),
-        "images": str(Path(current_app.config.get("IMAGES_DIR", base_dir / "images"))),
-        "disk": disk_info,
-        "disk_fmt": {k: _format_bytes(v) for k, v in (disk_info or {}).items()},
-    }
-
     return render_template(
         "admin/pamphlets.html",
         cities=PAMPHLET_CITIES,
         city=city,
         files=files,
-        storage_info=storage_info,
     )
 
 
