@@ -80,9 +80,9 @@ def test_edit_save_within_limit_creates_backup(monkeypatch, tmp_path):
             assert ("success", "保存しました。") in sess.get("_flashes", [])
 
         assert target.read_text(encoding="utf-8") == new_body
-        backup = target.with_suffix(target.suffix + ".bak")
-        assert backup.exists()
-        assert backup.read_text(encoding="utf-8") == "旧コンテンツ"
+        backups = sorted(target.parent.glob(f"{target.name}.bak-*"))
+        assert backups, "expected backup file"
+        assert backups[-1].read_text(encoding="utf-8") == "旧コンテンツ"
 
 
 def test_edit_save_rejects_large_payload(monkeypatch, tmp_path):

@@ -70,6 +70,7 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
 from watermark_ext import media_path_for
+from app_utils.storage import atomic_write_bytes, atomic_write_text
 from services import (
     pamphlet_flow,
     pamphlet_rag,
@@ -1910,6 +1911,43 @@ def api_nearby():
     return jsonify({"ok": True, "count": len(rows), "items": rows})
 
 
+@app.route("/api/search", methods=["GET"])
+def api_search():
+    query = (request.args.get("q") or "").strip()
+    if not query:
+        return jsonify({"ok": False, "error": "q is required"}), 400
+
+    try:
+        limit = int(request.args.get("limit", 5))
+    except Exception:
+        limit = 5
+    limit = max(1, min(limit, 20))
+
+    entries = [_norm_entry(e) for e in load_entries()]
+    results = tourism_search.search(entries, query, limit=limit)
+
+    payload = [
+        {
+            "entry": result.entry,
+            "score": result.score,
+            "matched_tokens": list(result.matched_tokens),
+        }
+        for result in results
+    ]
+
+    response: Dict[str, object] = {
+        "ok": True,
+        "count": len(results),
+        "results": payload,
+    }
+
+    suggestions = tourism_search.build_narrowing_suggestions(results)
+    if any(suggestions.values()):
+        response["narrowing_suggestions"] = suggestions
+
+    return jsonify(response)
+
+
 # =========================
 #  正規化ヘルパー
 # =========================
@@ -3502,6 +3540,15 @@ def handle_message(event):
             # 旧実装：引数を受け取れない場合は従来通り
             ans, hit, img_url = _answer_from_entries_min(text)
 
+        suggestions: Dict[str, List[str]] = {"tags": [], "areas": []}
+        if hit:
+            try:
+                entries_for_suggestions = load_entries()
+                ranked_for_suggestions = tourism_search.search(entries_for_suggestions, text, limit=5)
+                suggestions = tourism_search.build_narrowing_suggestions(ranked_for_suggestions)
+            except Exception:
+                suggestions = {"tags": [], "areas": []}
+
         # --- 画像URL（署名＆透かし適用） ---
         msgs = []
 
@@ -3633,8 +3680,46 @@ def handle_message(event):
                 app.logger.exception("pamphlet fallback failed")
 
         # 本文は安全分割して複数通に
+        if hit and any(suggestions.values()):
+            prompt_lines = []
+            if suggestions.get("tags"):
+                prompt_lines.append("タグで絞り込みできます：（{}）".format(" / ".join(suggestions["tags"])))
+            if suggestions.get("areas"):
+                prompt_lines.append("エリア候補：（{}）".format(" / ".join(suggestions["areas"])))
+            if prompt_lines:
+                ans = ans.rstrip() + "\n\n" + "\n".join(prompt_lines)
+
         for p in _split_for_line(ans):
             msgs.append(TextSendMessage(text=p))
+
+        if hit and any(suggestions.values()):
+            quick_items = []
+            for tag in suggestions.get("tags", []):
+                label = tag[:12]
+                quick_items.append(
+                    QuickReplyButton(
+                        action=MessageAction(
+                            label=label,
+                            text=f"{tag}のスポットを教えて",
+                        )
+                    )
+                )
+            for area in suggestions.get("areas", []):
+                label = area[:12]
+                quick_items.append(
+                    QuickReplyButton(
+                        action=MessageAction(
+                            label=label,
+                            text=f"{area}の観光スポットを教えて",
+                        )
+                    )
+                )
+            quick_items = quick_items[:6]
+            if quick_items:
+                for message in reversed(msgs):
+                    if isinstance(message, TextSendMessage):
+                        message.quick_reply = QuickReply(items=quick_items)
+                        break
 
         _safe_reply_or_push(event, msgs)
         app.logger.info("ROUTE=%s text=%s", "tourism" if hit else "no_answer", text)
@@ -4108,25 +4193,37 @@ def _configure_data_paths(flask_app: Flask) -> None:
     global PAUSED_NOTICE_FILE, SEND_LOG_FILE
 
     base_path = get_data_base_dir(flask_app.config)
-    BASE_DIR = str(base_path)
+    layout = ensure_data_directories(base_path)
+    BASE_DIR = str(layout["base"])
     flask_app.config["DATA_BASE_DIR"] = BASE_DIR
-    ENTRIES_FILE = os.path.join(BASE_DIR, "entries.json")
-    DATA_DIR = os.path.join(BASE_DIR, "data")
-    LOG_DIR = os.path.join(BASE_DIR, "logs")
-    LOG_FILE = os.path.join(LOG_DIR, "questions_log.jsonl")
-    SYNONYM_FILE = os.path.join(BASE_DIR, "synonyms.json")
-    USERS_FILE = os.path.join(BASE_DIR, "users.json")
-    NOTICES_FILE = os.path.join(BASE_DIR, "notices.json")
-    SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
-    PAUSED_NOTICE_FILE = os.path.join(BASE_DIR, "paused_notice.json")
-    SEND_LOG_FILE = os.path.join(LOG_DIR, "send_log.jsonl")
-    global IMAGES_DIR
-    IMAGES_DIR = os.path.join(DATA_DIR, "images")
 
-    ensure_data_directories(
-        Path(BASE_DIR),
-        pamphlet_dir=flask_app.config.get("PAMPHLET_BASE_DIR"),
-    )
+    entries_dir = layout["entries"]
+    uploads_dir = layout["uploads"]
+    images_dir = layout["images"]
+    logs_dir = layout["logs"]
+
+    ENTRIES_FILE = str(entries_dir / "entries.json")
+    DATA_DIR = str(uploads_dir)
+    LOG_DIR = str(logs_dir)
+    LOG_FILE = os.path.join(LOG_DIR, "questions_log.jsonl")
+    SYNONYM_FILE = str(entries_dir / "synonyms.json")
+    USERS_FILE = str(entries_dir / "users.json")
+    NOTICES_FILE = str(entries_dir / "notices.json")
+    SHOP_INFO_FILE = str(entries_dir / "shop_infos.json")
+    PAUSED_NOTICE_FILE = str(entries_dir / "paused_notice.json")
+    SEND_LOG_FILE = os.path.join(LOG_DIR, "send_log.jsonl")
+
+    global IMAGES_DIR
+    IMAGES_DIR = str(images_dir)
+    flask_app.config["IMAGES_DIR"] = IMAGES_DIR
+    flask_app.config["ENTRIES_DIR"] = str(entries_dir)
+    flask_app.config["UPLOADS_DIR"] = DATA_DIR
+    global MEDIA_ROOT, MEDIA_DIR
+    MEDIA_ROOT = IMAGES_DIR
+    MEDIA_DIR = Path(IMAGES_DIR).resolve()
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    flask_app.config["MEDIA_ROOT"] = IMAGES_DIR
+    flask_app.config["MEDIA_DIR"] = IMAGES_DIR
     _DATA_PATHS_INITIALIZED = True
 
 
@@ -5072,41 +5169,8 @@ def _save_syn_queue(data):
 
 # 便利関数: JSONをアトミックに保存
 def _atomic_json_dump(path, obj, *, create_backup: bool = False):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-
-        if create_backup and path.exists():
-            ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-            backup_path = path.with_name(f"{path.name}.bak-{ts}")
-            shutil.copy2(path, backup_path)
-
-        os.replace(tmp_path, path)
-
-        try:
-            flags = getattr(os, "O_RDONLY", 0)
-            if hasattr(os, "O_DIRECTORY"):
-                flags |= os.O_DIRECTORY
-            dir_fd = os.open(str(path.parent), flags)
-        except (FileNotFoundError, NotADirectoryError, AttributeError, PermissionError, OSError):
-            dir_fd = None
-        if dir_fd is not None:
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except FileNotFoundError:
-            pass
+    payload = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+    atomic_write_bytes(Path(path), payload, create_backup=create_backup)
 
 
 def _append_jsonl(path: str, obj: dict):
@@ -9863,6 +9927,30 @@ def readyz():
     except Exception as ex:
         problems.append(f"media:{ex}")
 
+    storage_paths = {}
+    try:
+        base_dir = Path(app.config.get("DATA_BASE_DIR", "/var/data"))
+        storage_paths = {
+            "base": base_dir,
+            "pamphlets": Path(app.config.get("PAMPHLET_BASE_DIR", base_dir / "pamphlets")),
+            "entries": Path(app.config.get("ENTRIES_DIR", base_dir / "entries")),
+            "uploads": Path(app.config.get("UPLOADS_DIR", base_dir / "uploads")),
+            "images": Path(app.config.get("IMAGES_DIR", base_dir / "images")),
+        }
+        for key, path in storage_paths.items():
+            try:
+                if not path.exists() or not path.is_dir():
+                    problems.append(f"missing_dir:{path}")
+                    continue
+                test_file = path / ".readyz.tmp"
+                with open(test_file, "w", encoding="utf-8") as fh:
+                    fh.write("ok")
+                os.remove(test_file)
+            except Exception:
+                problems.append(f"not_writable:{path}")
+    except Exception as ex:
+        problems.append(f"storage:{ex}")
+
     pamphlet_state = pamphlet_search.overall_state()
     pamphlet_status = pamphlet_search.status()
     if pamphlet_state == "error":
@@ -9873,6 +9961,9 @@ def readyz():
         "pamphlet_index": pamphlet_state,
         "pamphlet_index_status": pamphlet_status,
     }
+
+    if storage_paths:
+        body["storage_paths"] = {key: str(path) for key, path in storage_paths.items()}
 
     build_info = _git_metadata_for_readyz()
     if build_info:
@@ -10254,19 +10345,13 @@ def _write_text(path: str, text: str, encoding: str = "utf-8"):
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
-        with open(path + ".tmp", "w", encoding=encoding, newline="\n") as wf:
-            wf.write(text)
-        os.replace(path + ".tmp", path)
+        atomic_write_text(path, text, encoding=encoding)
         return encoding, None
     except UnicodeEncodeError as e:
         if encoding.lower() == "cp932":
-            # CP932に載らない文字があった → UTF-8で保存して通知
-            with open(path + ".tmp", "w", encoding="utf-8", newline="\n") as wf:
-                wf.write(text)
-            os.replace(path + ".tmp", path)
+            atomic_write_text(path, text, encoding="utf-8")
             return "utf-8", f"一部の文字がCP932に無いため UTF-8 で保存しました（{e}）"
-        else:
-            raise
+        raise
 
 def _list_txt_files():
     files = []
