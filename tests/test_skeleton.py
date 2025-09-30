@@ -3,22 +3,22 @@
 
 def test_import_skeleton_modules() -> None:
     """Verify that the placeholder modules can be imported."""
-    import app  # noqa: F401
-    from app import (  # noqa: F401
+    import coreapp  # noqa: F401
+    from coreapp import (  # noqa: F401
         config,
         intent,
         llm,
         schemas,
     )
-    from app.responders import (  # noqa: F401
+    from coreapp.responders import (  # noqa: F401
         entries,
         fallback,
         pamphlet,
         priority,
     )
-    from app.search import entries_index, normalize, pamphlet_index  # noqa: F401
+    from coreapp.search import entries_index, normalize, pamphlet_index  # noqa: F401
 
-    assert app is not None
+    assert coreapp is not None
     assert config is not None
     assert intent is not None
     assert llm is not None
