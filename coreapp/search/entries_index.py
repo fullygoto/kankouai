@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterable, List, Sequence
 import json
 from collections import Counter
 
+from coreapp.config import MIN_QUERY_CHARS
+
 from .normalize import (
     hiragana,
     hiragana_without_diacritics,
@@ -97,25 +99,30 @@ class _Document:
         self.score_bias = max(0.0, 5.0 - len(title) * 0.05)
 
     @staticmethod
-    def _build_title_forms(entry: Dict[str, Any]) -> List[str]:
-        forms: List[str] = []
+    def _build_title_forms(entry: Dict[str, Any]) -> List[tuple[str, bool]]:
+        forms: List[tuple[str, bool]] = []
+        seen: set[str] = set()
+
         title = normalize_text(entry.get("title", ""))
         if title:
-            forms.append(title)
+            forms.append((title, False))
+            seen.add(title)
+
+        alias_candidates: List[str] = []
         for key in ("kana", "yomi", "reading", "ruby", "furigana"):
             value = entry.get(key)
             if value:
-                forms.append(normalize_text(value))
-                forms.append(hiragana(value))
-                forms.append(hiragana_without_diacritics(value))
-                forms.append(simplify_kana(value))
-        unique: List[str] = []
-        seen: set[str] = set()
-        for item in forms:
-            if item and item not in seen:
-                seen.add(item)
-                unique.append(item)
-        return unique
+                alias_candidates.append(normalize_text(value))
+                alias_candidates.append(hiragana(value))
+                alias_candidates.append(hiragana_without_diacritics(value))
+                alias_candidates.append(simplify_kana(value))
+
+        for alias in alias_candidates:
+            if alias and alias not in seen:
+                seen.add(alias)
+                forms.append((alias, True))
+
+        return forms
 
     @staticmethod
     def _build_aux_forms(entry: Dict[str, Any]) -> List[str]:
@@ -159,7 +166,43 @@ class _Document:
                 return False
         return True
 
-    def score(self, token_groups: Sequence[Sequence[str]]) -> tuple[float, List[str]]:
+    @staticmethod
+    def _title_match_score(
+        title: str,
+        token: str,
+        *,
+        is_alias: bool,
+        short_query: bool,
+    ) -> float:
+        pos = title.find(token)
+        if pos < 0:
+            return 0.0
+
+        title_len = len(title)
+        token_len = len(token)
+
+        if token_len == title_len and pos == 0:
+            score = 6.0
+        elif pos == 0:
+            score = 5.0
+        elif pos + token_len == title_len:
+            score = 4.6
+        else:
+            score = 4.2
+
+        if short_query:
+            score -= min(pos, 20) * 0.05
+        if is_alias:
+            score += 0.3
+
+        return max(score, 0.5)
+
+    def score(
+        self,
+        token_groups: Sequence[Sequence[str]],
+        *,
+        short_query: bool,
+    ) -> tuple[float, List[str]]:
         matched: List[str] = []
         total = 0.0
 
@@ -170,28 +213,37 @@ class _Document:
                 if not token:
                     continue
                 token_score = 0.0
-                for title in self.title_forms:
-                    pos = title.find(token)
-                    if pos < 0:
-                        continue
-                    if title == token:
-                        token_score = max(token_score, 6.0)
-                    elif pos == 0:
-                        token_score = max(token_score, 5.0)
-                    elif pos + len(token) == len(title):
-                        token_score = max(token_score, 4.5)
-                    else:
-                        token_score = max(token_score, 4.0)
+                for title, is_alias in self.title_forms:
+                    candidate = self._title_match_score(
+                        title,
+                        token,
+                        is_alias=is_alias,
+                        short_query=short_query,
+                    )
+                    if candidate > token_score:
+                        token_score = candidate
                 if token_score == 0.0:
                     for aux in self.aux_forms:
-                        if token in aux:
-                            token_score = max(token_score, 2.5)
+                        pos = aux.find(token)
+                        if pos >= 0:
+                            base = 2.5
+                            if short_query:
+                                base -= min(pos, 40) * 0.03
+                            token_score = max(token_score, max(base, 0.3))
                     for tag in self.tag_forms:
-                        if token in tag:
-                            token_score = max(token_score, 3.0)
+                        pos = tag.find(token)
+                        if pos >= 0:
+                            base = 3.0
+                            if short_query:
+                                base -= min(pos, 40) * 0.04
+                            token_score = max(token_score, max(base, 0.4))
                     for area in self.area_forms:
-                        if token in area:
-                            token_score = max(token_score, 2.0)
+                        pos = area.find(token)
+                        if pos >= 0:
+                            base = 2.0
+                            if short_query:
+                                base -= min(pos, 40) * 0.03
+                            token_score = max(token_score, max(base, 0.2))
 
                 if token_score > best_score:
                     best_score = token_score
@@ -225,6 +277,11 @@ class EntriesIndex:
         filters: Dict[str, str] | None = None,
         limit: int | None = None,
     ) -> List[EntryMatch]:
+        normalized_query = normalize_text(query)
+        if len(normalized_query) < MIN_QUERY_CHARS:
+            return []
+
+        short_query = len(normalized_query) <= MIN_QUERY_CHARS
         token_groups = _expand_tokens(_tokenize(query), self._synonyms)
         if not token_groups:
             return []
@@ -233,14 +290,20 @@ class EntriesIndex:
         for document in self._documents:
             if not document.matches_filters(filters):
                 continue
-            score, matched = document.score(token_groups)
+            score, matched = document.score(token_groups, short_query=short_query)
             if score <= 0:
                 continue
             matches.append(EntryMatch(document.entry, score, tuple(matched)))
 
         matches.sort(key=lambda item: (-item.score, normalize_text(item.entry.get("title", ""))))
-        if limit is not None:
-            return matches[:limit]
+
+        effective_limit = limit
+        if short_query:
+            cap = 5
+            effective_limit = cap if effective_limit is None else min(effective_limit, cap)
+
+        if effective_limit is not None:
+            return matches[:effective_limit]
         return matches
 
     def top_filters(self, matches: Sequence[EntryMatch], *, limit: int = 5) -> List[Dict[str, str]]:
