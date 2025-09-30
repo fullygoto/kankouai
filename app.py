@@ -9962,64 +9962,84 @@ def _git_metadata_for_readyz() -> dict:
     return info
 
 
+def _probe_writable(dirpath: Path) -> bool:
+    try:
+        dirpath.mkdir(parents=True, exist_ok=True)
+        probe = dirpath / ".readyz_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
 @app.route("/readyz", methods=["GET"])
 def readyz():
-    problems = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    details: dict[str, str] = {}
 
-    # Redis（レート制限などで使用している場合）
+    base_dir = Path(app.config.get("DATA_BASE_DIR", "/var/data"))
+    details["data_base_dir"] = str(base_dir)
+
+    if not base_dir.exists():
+        errors.append("data_base_dir:not_found")
+    elif not base_dir.is_dir():
+        errors.append("data_base_dir:not_directory")
+    elif not _probe_writable(base_dir):
+        errors.append("data_base_dir:not_writable")
+
+    pamphlet_dir = Path(
+        app.config.get("PAMPHLET_BASE_DIR", str(base_dir / "pamphlets"))
+    )
+    details["pamphlet_base_dir"] = str(pamphlet_dir)
+    if not pamphlet_dir.exists():
+        warnings.append("pamphlet_base_dir:missing")
+
     try:
         uri = app.config.get("RATE_STORAGE_URI")
         if uri and uri not in ("memory://",):
             import redis  # pip install redis
+
             r = redis.from_url(uri)
             r.ping()
     except Exception as ex:
-        problems.append(f"redis:{ex}")
+        errors.append(f"redis:{ex}")
 
-    # DB（SQLAlchemyを使っている場合のみ）
     try:
         db = globals().get("db")
         if db:
-            # SQLAlchemy 2.x でも通るように text を使う
             try:
                 from sqlalchemy import text as _sql_text
+
                 db.session.execute(_sql_text("SELECT 1"))
             except Exception:
-                # SQLAlchemyを使っていない・未インストールでもここは素通り
                 db.session.execute("SELECT 1")
     except Exception as ex:
-        problems.append(f"db:{ex}")
+        errors.append(f"db:{ex}")
 
-    # mediaディレクトリに書き込めるか
-    import os, tempfile
     try:
-        mdir = app.config.get("MEDIA_DIR", ".")
-        os.makedirs(mdir, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=mdir, delete=True) as _:
+        media_dir = app.config.get("MEDIA_DIR", ".")
+        os.makedirs(media_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=media_dir, delete=True):
             pass
     except Exception as ex:
-        problems.append(f"media:{ex}")
+        errors.append(f"media:{ex}")
 
     pamphlet_state = pamphlet_search.overall_state()
-    pamphlet_status = pamphlet_search.status()
     if pamphlet_state == "error":
-        problems.append("pamphlet_index:error")
+        errors.append("pamphlet_index:error")
+
+    status = "ok" if not errors else "error"
+    code = 200 if status == "ok" else 503
 
     body = {
-        "status": "ready",
-        "pamphlet_index": pamphlet_state,
-        "pamphlet_index_status": pamphlet_status,
+        "status": status,
+        "errors": errors,
+        "warnings": warnings,
+        "details": details,
     }
-
-    build_info = _git_metadata_for_readyz()
-    if build_info:
-        body["build"] = build_info
-
-    if problems:
-        body["status"] = "degraded"
-        body["errors"] = problems
-        return body, 503
-    return body, 200
+    return jsonify(body), code
 
 
 
