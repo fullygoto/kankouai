@@ -85,6 +85,10 @@ from services.paths import get_data_base_dir, ensure_data_directories
 from coreapp.intent import get_intent_detector, is_transport_query, is_weather_query
 from coreapp.search.entries_index import load_entries_index
 from coreapp.responders.entries import EntriesResponder
+from coreapp.responders.pamphlet import (
+    CITY_CHOICES as CORE_PAMPHLET_CITY_CHOICES,
+    PamphletResponder,
+)
 from coreapp.responders.priority import PriorityResponder, transport_reply_text, weather_reply_text
 from admin_pamphlets import bp as admin_pamphlets_bp
 from admin_rollback import bp as admin_rollback_bp
@@ -144,6 +148,9 @@ PRIORITY_RESPONDER = PriorityResponder()
 _ENTRIES_RESPONDER: EntriesResponder | None = None
 _ENTRIES_RESPONDER_LOCK = threading.Lock()
 _ENTRIES_LAST_QUICK_REPLIES: list[dict[str, str]] | None = None
+
+_PAMPHLET_SUMMARY_RESPONDER: PamphletResponder | None = None
+_PAMPHLET_SUMMARY_LOCK = threading.Lock()
 
 @app.template_filter("b64encode")
 def jinja_b64encode(s):
@@ -6169,6 +6176,60 @@ def _get_entries_responder(refresh: bool = False) -> EntriesResponder:
         return _ENTRIES_RESPONDER
 
 
+def _load_pamphlet_summaries() -> list[dict[str, str]]:
+    base_dir_raw = app.config.get("PAMPHLET_BASE_DIR")
+    if not base_dir_raw:
+        return []
+
+    base_dir = Path(base_dir_raw)
+    if not base_dir.exists():
+        return []
+
+    entries: list[dict[str, str]] = []
+    seen_files: set[Path] = set()
+    for choice in CORE_PAMPHLET_CITY_CHOICES:
+        label = choice.get("label") or ""
+        key = choice.get("key") or ""
+        for folder_name in {label, key}:
+            if not folder_name:
+                continue
+            city_dir = base_dir / folder_name
+            if not city_dir.exists() or not city_dir.is_dir():
+                continue
+            for pattern in ("*.txt", "*.md"):
+                for file_path in sorted(city_dir.glob(pattern)):
+                    if file_path in seen_files:
+                        continue
+                    try:
+                        text = file_path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        text = file_path.read_text(encoding="utf-8", errors="ignore")
+                    except OSError:
+                        continue
+                    seen_files.add(file_path)
+                    entries.append(
+                        {
+                            "city": label or key,
+                            "source": file_path.name,
+                            "text": text,
+                        }
+                    )
+    return entries
+
+
+def _get_pamphlet_summary_responder(refresh: bool = False) -> PamphletResponder | None:
+    global _PAMPHLET_SUMMARY_RESPONDER
+    with _PAMPHLET_SUMMARY_LOCK:
+        if refresh or _PAMPHLET_SUMMARY_RESPONDER is None:
+            dataset = _load_pamphlet_summaries()
+            if not dataset:
+                _PAMPHLET_SUMMARY_RESPONDER = None
+            else:
+                _PAMPHLET_SUMMARY_RESPONDER = PamphletResponder(pamphlets=dataset)
+        return _PAMPHLET_SUMMARY_RESPONDER
+
+
+
 def _validate_entries_payload(entries, *, allow_empty: bool = False) -> list[dict]:
     """entries.json 向けデータの最小検証と正規化を行う"""
     if not isinstance(entries, list):
@@ -9158,6 +9219,39 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
         _flow_clear(user_id)
         return "フローをリセットしました。知りたいスポット名やキーワードを送ってください。", True, ""
 
+    def _pamphlet_summary_route(text_input: str) -> tuple[str, bool, str]:
+        global _ENTRIES_LAST_QUICK_REPLIES
+        responder = _get_pamphlet_summary_responder()
+        if responder is None:
+            return "", False, ""
+
+        state_context: dict[str, Any] | None = None
+        if user_id and state_holder is not None:
+            state_context = state_holder.setdefault("pamphlet_summary", {})
+
+        context = state_context if state_context is not None else {}
+        result = responder.respond(text_input, context=context)
+
+        if result.kind == "noop":
+            return "", False, ""
+
+        if state_holder is not None:
+            state_holder["pamphlet_summary"] = context
+
+        if result.kind == "ask_city":
+            quick = result.quick_replies or []
+            if quick:
+                _ENTRIES_LAST_QUICK_REPLIES = quick
+            return result.message, True, ""
+
+        if result.kind == "summary":
+            return result.message, True, ""
+
+        if result.kind == "no_hit":
+            return result.message, True, ""
+
+        return "", False, ""
+
     def _pamphlet_route(text_input: str) -> tuple[str, bool, str]:
         store_factory = globals().get("_pamphlet_session_store")
         if callable(store_factory):
@@ -9258,7 +9352,14 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
                     _flow_clear(user_id)
             if response.quick_replies:
                 _ENTRIES_LAST_QUICK_REPLIES = response.quick_replies
+            summary_msg, handled_summary, _ = _pamphlet_summary_route(q)
+            if handled_summary:
+                return summary_msg, True, ""
             return _pamphlet_route(q)
+
+        summary_msg, handled_summary, _ = _pamphlet_summary_route(q)
+        if handled_summary:
+            return summary_msg, True, ""
 
         return _pamphlet_route(q)
     record_source_from_entry(top_entry)
