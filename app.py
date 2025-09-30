@@ -83,6 +83,8 @@ from services import (
 )
 from services.paths import get_data_base_dir, ensure_data_directories
 from coreapp.intent import get_intent_detector, is_transport_query, is_weather_query
+from coreapp.search.entries_index import load_entries_index
+from coreapp.responders.entries import EntriesResponder
 from coreapp.responders.priority import PriorityResponder, transport_reply_text, weather_reply_text
 from admin_pamphlets import bp as admin_pamphlets_bp
 from admin_rollback import bp as admin_rollback_bp
@@ -138,6 +140,10 @@ MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
 # === Core responder singletons ============================================
 PRIORITY_INTENT = get_intent_detector()
 PRIORITY_RESPONDER = PriorityResponder()
+
+_ENTRIES_RESPONDER: EntriesResponder | None = None
+_ENTRIES_RESPONDER_LOCK = threading.Lock()
+_ENTRIES_LAST_QUICK_REPLIES: list[dict[str, str]] | None = None
 
 @app.template_filter("b64encode")
 def jinja_b64encode(s):
@@ -3504,6 +3510,8 @@ def handle_message(event):
 
         # --- 画像URL（署名＆透かし適用） ---
         msgs = []
+        entries_quick = globals().get("_ENTRIES_LAST_QUICK_REPLIES") or []
+        globals()["_ENTRIES_LAST_QUICK_REPLIES"] = None
 
         def _line_img_pair_from_url(img_url_in: str, wm_mode_in: str | None):
             """
@@ -3633,8 +3641,26 @@ def handle_message(event):
                 app.logger.exception("pamphlet fallback failed")
 
         # 本文は安全分割して複数通に
-        for p in _split_for_line(ans):
-            msgs.append(TextSendMessage(text=p))
+        parts = _split_for_line(ans)
+        if not parts:
+            parts = [ans]
+
+        quick_reply_obj = None
+        if entries_quick:
+            items = []
+            for item in entries_quick[:5]:
+                label = (item.get("label") or item.get("value") or "").strip()
+                payload = (item.get("payload") or item.get("value") or "").strip()
+                if label and payload:
+                    items.append(QuickReplyButton(action=MessageAction(label=label[:20], text=payload)))
+            if items:
+                quick_reply_obj = QuickReply(items=items)
+
+        for idx, part in enumerate(parts):
+            tm = TextSendMessage(text=part)
+            if quick_reply_obj and idx == len(parts) - 1:
+                tm.quick_reply = quick_reply_obj
+            msgs.append(tm)
 
         _safe_reply_or_push(event, msgs)
         app.logger.info("ROUTE=%s text=%s", "tourism" if hit else "no_answer", text)
@@ -6131,6 +6157,18 @@ def load_entries():
     return [_norm_entry(e) for e in raw if isinstance(e, dict)]
 
 
+def _get_entries_responder(refresh: bool = False) -> EntriesResponder:
+    global _ENTRIES_RESPONDER
+    with _ENTRIES_RESPONDER_LOCK:
+        if refresh or _ENTRIES_RESPONDER is None:
+            try:
+                entries = load_entries()
+            except Exception:
+                entries = []
+            _ENTRIES_RESPONDER = EntriesResponder(entries=entries)
+        return _ENTRIES_RESPONDER
+
+
 def _validate_entries_payload(entries, *, allow_empty: bool = False) -> list[dict]:
     """entries.json 向けデータの最小検証と正規化を行う"""
     if not isinstance(entries, list):
@@ -6181,6 +6219,10 @@ def save_entries(entries):
         except Exception:
             app.logger.exception("[dedupe] failed")
     _atomic_json_dump(ENTRIES_FILE, items, create_backup=True)
+    try:
+        _get_entries_responder(refresh=True)
+    except Exception:
+        app.logger.exception("entries responder refresh failed")
 
 
 def load_synonyms():
@@ -8950,6 +8992,8 @@ def admin_line_test_push():
 # --- 最低限のDB回答（ヒット/複数/未ヒット） ---
 # 1) まず _answer_from_entries_min を修正
 def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_id: str | None = None):
+    global _ENTRIES_LAST_QUICK_REPLIES
+    _ENTRIES_LAST_QUICK_REPLIES = None
     import unicodedata, re
     from datetime import datetime, timedelta
 
@@ -9176,6 +9220,46 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
     if ranked_results and ranked_results[0].score >= tourism_search.MATCH_THRESHOLD:
         top_entry = ranked_results[0].entry
     else:
+        responder_state: dict[str, Any] = {}
+        state_holder: dict[str, Any] | None = None
+        if user_id:
+            state_holder = st0 or {}
+            responder_state = state_holder.setdefault("entries_flow", {})
+        response = None
+        try:
+            response = _get_entries_responder().respond(q, context=responder_state)
+        except Exception:
+            app.logger.exception("entries responder failed")
+            response = None
+
+        if response and response.kind == "detail":
+            if user_id and state_holder is not None:
+                state_holder.pop("entries_flow", None)
+                if state_holder:
+                    _flow_set(user_id, state_holder)
+                else:
+                    _flow_clear(user_id)
+            _ENTRIES_LAST_QUICK_REPLIES = response.quick_replies or []
+            return response.message, True, response.image_url or ""
+
+        if response and response.kind == "choices":
+            if user_id and state_holder is not None:
+                state_holder["entries_flow"] = responder_state
+                _flow_set(user_id, state_holder)
+            _ENTRIES_LAST_QUICK_REPLIES = response.quick_replies or []
+            return response.message, True, ""
+
+        if response and response.kind == "no_hit":
+            if user_id and state_holder is not None:
+                state_holder.pop("entries_flow", None)
+                if state_holder:
+                    _flow_set(user_id, state_holder)
+                else:
+                    _flow_clear(user_id)
+            if response.quick_replies:
+                _ENTRIES_LAST_QUICK_REPLIES = response.quick_replies
+            return _pamphlet_route(q)
+
         return _pamphlet_route(q)
     record_source_from_entry(top_entry)
     urls = _build_image_urls_for_entry(top_entry)
