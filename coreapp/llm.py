@@ -7,8 +7,16 @@ import math
 import re
 from typing import Any, Dict, Iterable, List
 
+from coreapp.config import (
+    MODEL_DEFAULT,
+    MODEL_HARD,
+    THRESHOLD_PIECES_HARD,
+    THRESHOLD_REPROMPTS_HARD,
+    THRESHOLD_SCORE_HARD,
+)
 
-MODEL_NAME = "gpt-4o-mini"
+
+MODEL_NAME = MODEL_DEFAULT
 
 
 def _clean(text: str) -> str:
@@ -96,4 +104,45 @@ def get_llm_client() -> LLMClient:
     return LLMClient()
 
 
-__all__ = ["LLMClient", "LLMRequest", "MODEL_NAME", "get_llm_client"]
+def _coerce_score(value: Any) -> float | None:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(score):
+        return None
+    return score
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def pick_model(score: Any, pieces_cnt: Any, reprompts: Any) -> str:
+    """Return the most suitable model based on retrieval metrics."""
+
+    numeric_score = _coerce_score(score)
+    pieces = max(0, _coerce_int(pieces_cnt))
+    retries = max(0, _coerce_int(reprompts))
+
+    upgrade = False
+    if numeric_score is not None and numeric_score < THRESHOLD_SCORE_HARD:
+        upgrade = True
+    if pieces >= THRESHOLD_PIECES_HARD:
+        upgrade = True
+    if retries >= THRESHOLD_REPROMPTS_HARD:
+        upgrade = True
+
+    return MODEL_HARD if upgrade else MODEL_DEFAULT
+
+
+__all__ = [
+    "LLMClient",
+    "LLMRequest",
+    "MODEL_NAME",
+    "get_llm_client",
+    "pick_model",
+]
