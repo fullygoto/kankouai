@@ -10,6 +10,7 @@ import unicodedata
 from typing import Callable, Optional, Tuple
 
 from services import state as user_state
+from coreapp import state as suspension_state
 
 LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +106,10 @@ def process_control_command(
         ttl_sec = int(ttl or PAUSE_DEFAULT_TTL_SEC)
         state = user_state.pause(user_id, ttl_sec=ttl_sec, now=now_epoch)
         paused_until = state["paused_until"]
+        try:
+            suspension_state.suspend_user(user_id)
+        except Exception:
+            LOGGER.exception("failed to persist suspension flag for %s", user_id)
         message = f"{format_pause_until(paused_until)}まで応答を停止します。『解除』で再開できます。"
         try:
             reply_func(event, message)
@@ -114,6 +119,10 @@ def process_control_command(
 
     # resume command
     resume_state = user_state.resume(user_id, now=now_epoch)
+    try:
+        suspension_state.resume_user(user_id)
+    except Exception:
+        LOGGER.exception("failed to clear suspension flag for %s", user_id)
     current_paused = bool(resume_state.get("was_paused"))
     paused_until = resume_state.get("paused_until")
     if paused_until:
@@ -122,7 +131,11 @@ def process_control_command(
             user_id,
             paused_until,
         )
-    message = "応答を再開しました。" if current_paused else "現在、応答は稼働中です。"
+    message = (
+        "応答を再開しました。引き続きご利用ください。"
+        if current_paused
+        else "現在、応答は稼働中です。"
+    )
     try:
         reply_func(event, message)
     except Exception:
@@ -137,4 +150,9 @@ def process_control_command(
 def control_is_paused(user_id: str, now_epoch: Optional[int] = None) -> bool:
     if not CONTROL_CMD_ENABLED:
         return False
+    try:
+        if suspension_state.is_suspended(user_id):
+            return True
+    except Exception:
+        LOGGER.exception("failed to check suspension flag for %s", user_id)
     return user_state.is_paused(user_id, now_epoch)

@@ -1,6 +1,5 @@
 """Intent detection helpers for the responder skeleton."""
 from __future__ import annotations
-
 from dataclasses import dataclass
 import re
 import unicodedata
@@ -19,6 +18,60 @@ def normalize_for_matching(text: str | None) -> str:
     """Public helper exposing the normalisation used for intent checks."""
 
     return _normalize(text)
+
+
+# --- Pause / resume commands ---------------------------------------------
+
+_PAUSE_COMMANDS: tuple[str, ...] = tuple(
+    _normalize(token)
+    for token in (
+        "停止",
+        "一時停止",
+        "ストップ",
+        "ミュート",
+        "pause",
+        "stop",
+    )
+)
+
+_RESUME_COMMANDS: tuple[str, ...] = tuple(
+    _normalize(token)
+    for token in (
+        "解除",
+        "再開",
+        "応答再開",
+        "ミュート解除",
+        "resume",
+        "unpause",
+    )
+)
+
+
+def _matches_command(text: str, commands: Iterable[str]) -> bool:
+    for keyword in commands:
+        if not keyword:
+            continue
+        if text == keyword or text.startswith(f"{keyword} "):
+            return True
+    return False
+
+
+def is_pause_command(text: str | None) -> bool:
+    """Return ``True`` if the text requests conversation suspension."""
+
+    normalized = _normalize(text)
+    if not normalized:
+        return False
+    return _matches_command(normalized, _PAUSE_COMMANDS)
+
+
+def is_resume_command(text: str | None) -> bool:
+    """Return ``True`` if the text asks to resume a suspended conversation."""
+
+    normalized = _normalize(text)
+    if not normalized:
+        return False
+    return _matches_command(normalized, _RESUME_COMMANDS)
 
 
 # --- Priority trigger dictionaries ---------------------------------------
@@ -177,6 +230,8 @@ __all__ = [
     "TRANSPORT_VEHICLE_KEYWORDS",
     "WEATHER_KEYWORDS",
     "get_intent_detector",
+    "is_pause_command",
+    "is_resume_command",
     "is_transport_query",
     "normalize_for_matching",
     "is_viewpoint_map_query",
