@@ -1,8 +1,9 @@
 from tests.utils import load_test_app
 
 
-def test_readyz_reports_build_and_pamphlet_status(monkeypatch, tmp_path):
+def test_readyz_returns_expected_schema(monkeypatch, tmp_path):
     base_dir = tmp_path / "pamphlets"
+    base_dir.mkdir()
 
     with load_test_app(
         monkeypatch,
@@ -19,16 +20,10 @@ def test_readyz_reports_build_and_pamphlet_status(monkeypatch, tmp_path):
         assert response.status_code == 200
 
         payload = response.get_json()
-        assert payload["status"] in {"ready", "degraded"}
-        assert payload["pamphlet_index"]
+        assert payload["status"] == "ok"
+        assert payload["errors"] == []
+        assert payload["warnings"] == []
 
-        per_city = payload["pamphlet_index_status"]
-        assert isinstance(per_city, dict)
-        # 4 市町すべてが返ること
-        assert {"goto", "shinkamigoto", "ojika", "uku"}.issubset(per_city.keys())
-
-        build = payload.get("build")
-        assert build is None or "commit" in build or "branch" in build
-        if build is not None:
-            assert build.get("env")
-            assert "dirty" in build
+        details = payload["details"]
+        assert details["data_base_dir"] == str(app.config["DATA_BASE_DIR"])
+        assert details["pamphlet_base_dir"] == str(base_dir)
