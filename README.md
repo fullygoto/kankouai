@@ -53,7 +53,10 @@ pip install -r requirements.txt
 
 | 変数名 | 既定値 | 説明 |
 | ------ | ------ | ---- |
+| `DATA_BASE_DIR` | `/var/data` | 永続ディスクのルートディレクトリ |
 | `PAMPHLET_BASE_DIR` | `/var/data/pamphlets` | パンフレットテキストの格納ルート |
+| `SEED_PAMPHLET_DIR` | `<repo>/seeds/pamphlets` | 初回起動時にコピーするシードデータ（任意） |
+| `ADMIN_TOKEN` | （空文字） | `/ops/backup/pamphlets` への保護用トークン。設定時は `X-Admin-Token` ヘッダで送信 |
 | `PAMPHLET_TOPK` | `3` | 要約に渡す上位チャンク数 |
 | `PAMPHLET_CHUNK_SIZE` | `1500` | チャンク長（文字数） |
 | `PAMPHLET_CHUNK_OVERLAP` | `200` | チャンク重複幅（文字数） |
@@ -73,6 +76,8 @@ pip install -r requirements.txt
 | `ENABLE_EVIDENCE_TOGGLE` | `true` | Web UI で根拠付き本文のトグルを表示するかどうか |
 
 アップロードは 64MB まで受け付けますが、ブラウザからの編集保存は軽量テキスト運用を想定して 2MB で上限判定します。
+
+- `/var/data/pamphlets` が空の場合は `seeds/pamphlets` 配下の初期データを自動コピーします。既存の `pamphlets/`、`data/pamphlets/`、`static/pamphlets/` にある `.txt` は初回起動時に `/var/data/pamphlets` へ移行されます。
 
 ### 5. 出典ラベル付きRAG応答
 

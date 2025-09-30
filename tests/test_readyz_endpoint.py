@@ -22,8 +22,9 @@ def test_readyz_returns_expected_schema(monkeypatch, tmp_path):
         payload = response.get_json()
         assert payload["status"] == "ok"
         assert payload["errors"] == []
-        assert payload["warnings"] == []
+        assert "pamphlet_base_dir:empty" in payload["warnings"]
 
         details = payload["details"]
         assert details["data_base_dir"] == str(app.config["DATA_BASE_DIR"])
         assert details["pamphlet_base_dir"] == str(base_dir)
+        assert details.get("pamphlet_count") == 0
