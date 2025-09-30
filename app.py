@@ -82,6 +82,8 @@ from services import (
     state as user_state,
 )
 from services.paths import get_data_base_dir, ensure_data_directories
+from coreapp.intent import get_intent_detector, is_transport_query, is_weather_query
+from coreapp.responders.priority import PriorityResponder, transport_reply_text, weather_reply_text
 from admin_pamphlets import bp as admin_pamphlets_bp
 from admin_rollback import bp as admin_rollback_bp
 
@@ -132,6 +134,10 @@ app.config.from_object(get_config())
 
 # 以降のメッセージ等で使うため、上限MBを設定から参照
 MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
+
+# === Core responder singletons ============================================
+PRIORITY_INTENT = get_intent_detector()
+PRIORITY_RESPONDER = PriorityResponder()
 
 @app.template_filter("b64encode")
 def jinja_b64encode(s):
@@ -3442,14 +3448,18 @@ def handle_message(event):
 
     # --- ④ 即答リンク（天気・mobility・交通） -----------------
     try:
-        # ④-1 天気
-        w, ok = get_weather_reply(text)
-        app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
-        if ok and w:
-            app.logger.info("ROUTE=special text=%s", text)
-            _reply_quick_no_dedupe(event, w)
-            save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
-            return
+        priority_label = PRIORITY_INTENT.classify_priority(text)
+        if priority_label:
+            ans = PRIORITY_RESPONDER.answer(text, label=priority_label)
+            app.logger.debug("[quick] priority_label=%s text=%r", priority_label, text)
+            if ans and ans.message:
+                app.logger.info("ROUTE=special text=%s", text)
+                _reply_quick_no_dedupe(event, ans.message)
+                try:
+                    save_qa_log(text, ans.message, source="line", hit_db=False, extra={"kind": ans.kind})
+                except Exception:
+                    pass
+                return
 
         # ④-2 mobility（レンタカー／タクシー／バス／レンタサイクル）→ fullyGOTOリンク最優先
         try:
@@ -3466,16 +3476,6 @@ def handle_message(event):
                 return
         except Exception as e:
             app.logger.exception(f"mobility link-first failed: {e}")
-
-
-        # ④-3 交通（運行状況：船・飛行機）
-        tmsg, ok = get_transport_reply(text)
-        app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
-        if ok and tmsg:
-            app.logger.info("ROUTE=special text=%s", text)
-            _reply_quick_no_dedupe(event, tmsg)
-            save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
-            return
     except Exception as e:
         app.logger.exception(f"quick link reply failed: {e}")
 
@@ -9222,66 +9222,18 @@ def _is_mobility_text(s: str) -> bool:
     return any(w in t for w in MOBILITY_TRIGGERS)
 
 def get_weather_reply(text: str):
-    """
-    「天気/天候/予報/weather」を含めば即リンクを返す
-    """
-    t = _norm_text_jp(text)
-    if not any(k in t for k in ["天気", "天候", "予報", "weather"]):
-        return "", False
+    """Return weather reply text and flag if the query matches."""
 
-    msg = (
-        "【五島列島の主な天気情報リンク】\n"
-        "五島市: https://weathernews.jp/onebox/tenki/nagasaki/42211/\n"
-        "新上五島町: https://weathernews.jp/onebox/tenki/nagasaki/42411/\n"
-        "小値賀町: https://tenki.jp/forecast/9/45/8440/42383/\n"
-        "宇久町: https://weathernews.jp/onebox/33.262381/129.131027/q=%E9%95%B7%E5%B4%8E%E7%9C%8C%E4%BD%90%E4%B8%96%E4%BF%9D%E5%B8%82%E5%AE%87%E4%B9%85%E7%94%BA&v=da56215a2617fc2203c6cae4306d5fd8c92e3e26c724245d91160a4b3597570a&lang=ja&type=week"
-    )
-    return msg, True
+    if not is_weather_query(text):
+        return "", False
+    return weather_reply_text(), True
 
 def get_transport_reply(text: str):
-    """
-    「運行/運航/運休/欠航/状況/情報/status」か、乗り物語（船/フェリー/…/空港 等）の
-    どちらかでも含まれていれば即リンクを返す。
-    片方しか特定できなければ、その片方だけ返す。
-    戻り値: (message:str, ok:bool)
-    """
-    t = _norm_text_jp(text)
+    """Return transport reply text and flag if the query matches."""
 
-    # ② 状態語を少し拡充（任意）
-    state_hit = any(k in t for k in ["運行", "運航", "運休", "欠航", "遅延", "見合わせ", "運転見合わせ", "状況", "情報", "status"])
-
-    # ① ORC を追加
-    vehicle_hit = any(k in t for k in [
-        "船","フェリー","ジェットフォイル","高速船","太古",
-        "飛行機","空港","福江空港","五島つばき空港","ana","jal","orc","オリエンタルエアブリッジ"
-    ])
-    if not (state_hit or vehicle_hit):
+    if not is_transport_query(text):
         return "", False
-
-    wants_ship = any(k in t for k in ["船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船"])
-    # ① ORC を追加
-    wants_fly  = any(k in t for k in ["飛行機","空港","フライト","福江空港","五島つばき空港","ana","jal","orc","オリエンタルエアブリッジ"])
-
-    ship_section = (
-        "【長崎ー五島航路 運行状況】\n"
-        "・野母商船「フェリー太古」運航情報  \n"
-        "  http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-        "・九州商船「フェリー・ジェットフォイル」運航情報  \n"
-        "  https://kyusho.co.jp/status\n"
-        "・五島産業汽船「フェリー」運航情報  \n"
-        "  https://www.goto-sangyo.co.jp/\n"
-        "その他の航路や詳細は各リンクをご覧ください。"
-    )
-    fly_section = (
-        "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
-        "▶ https://www.fukuekuko.jp/"
-    )
-
-    if wants_ship and not wants_fly:
-        return ship_section, True
-    if wants_fly and not wants_ship:
-        return fly_section, True
-    return ship_section + "\n\n" + fly_section, True
+    return transport_reply_text(text), True
 
 
 # エリア -> ページURL（そのまま流用）
