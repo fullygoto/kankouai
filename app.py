@@ -90,6 +90,15 @@ from coreapp.responders.pamphlet import (
     PamphletResponder,
 )
 from coreapp.responders.priority import PriorityResponder, transport_reply_text, weather_reply_text
+from coreapp.storage import (
+    BASE_DIR,
+    count_pamphlet_files,
+    count_pamphlets_by_city,
+    create_pamphlet_backup,
+    ensure_dirs,
+    migrate_from_legacy_paths,
+    seed_from_repo_if_empty,
+)
 from admin_pamphlets import bp as admin_pamphlets_bp
 from admin_rollback import bp as admin_rollback_bp
 
@@ -127,6 +136,16 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 #  Flask / 設定
 # =========================
 app = Flask(__name__)
+
+ensure_dirs()
+_bootstrap_sentinel = Path(BASE_DIR / ".bootstrap.done")
+if not _bootstrap_sentinel.exists():
+    migrate_from_legacy_paths()
+    seed_from_repo_if_empty()
+    try:
+        _bootstrap_sentinel.write_text("ok", encoding="utf-8")
+    except OSError:
+        app.logger.warning("Failed to write bootstrap sentinel", exc_info=True)
 
 @app.template_global()
 def safe_url_for(endpoint, **values):
@@ -8560,6 +8579,26 @@ def internal_backup():
     return jsonify({"ok": True, "saved": path})
 
 
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+
+@app.route("/ops/backup/pamphlets", methods=["POST"])
+@login_required
+def ops_backup_pamphlets():
+    """Create and return a tarball backup of the pamphlet texts."""
+
+    if ADMIN_TOKEN and request.headers.get("X-Admin-Token") != ADMIN_TOKEN:
+        return jsonify({"error": "forbidden"}), 403
+
+    archive = create_pamphlet_backup()
+    return send_file(
+        archive,
+        as_attachment=True,
+        download_name=archive.name,
+        mimetype="application/gzip",
+    )
+
+
 # === 管理者ボタン：最優先で停止/再開 ==========================================
 @app.post("/admin/line/pause")
 def admin_line_pause():  # 既存の endpoint 名が admin_line_pause ならそちらに合わせて
@@ -9977,7 +10016,7 @@ def _probe_writable(dirpath: Path) -> bool:
 def readyz():
     errors: list[str] = []
     warnings: list[str] = []
-    details: dict[str, str] = {}
+    details: dict[str, object] = {}
 
     base_dir = Path(app.config.get("DATA_BASE_DIR", "/var/data"))
     details["data_base_dir"] = str(base_dir)
@@ -9993,8 +10032,18 @@ def readyz():
         app.config.get("PAMPHLET_BASE_DIR", str(base_dir / "pamphlets"))
     )
     details["pamphlet_base_dir"] = str(pamphlet_dir)
+    pamphlet_count = 0
     if not pamphlet_dir.exists():
         warnings.append("pamphlet_base_dir:missing")
+    else:
+        try:
+            pamphlet_count = count_pamphlet_files()
+        except Exception as ex:  # pragma: no cover - defensive guard
+            warnings.append(f"pamphlet_scan:{ex}")
+        if pamphlet_count == 0:
+            warnings.append("pamphlet_base_dir:empty")
+    details["pamphlet_count"] = pamphlet_count
+    details["pamphlet_count_by_city"] = count_pamphlets_by_city()
 
     try:
         uri = app.config.get("RATE_STORAGE_URI")
@@ -10039,7 +10088,10 @@ def readyz():
         "warnings": warnings,
         "details": details,
     }
-    return jsonify(body), code
+    response = jsonify(body)
+    response.status_code = code
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 

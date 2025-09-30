@@ -114,6 +114,7 @@ def load_test_app(monkeypatch, tmp_path, extra_env=None):
     module_name = f"app_for_test_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, ROOT / "app.py")
     module = importlib.util.module_from_spec(spec)
+    module.__spec__ = spec
     sys.modules[module_name] = module
     loader = spec.loader
     assert loader is not None
