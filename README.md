@@ -18,7 +18,12 @@
 - Render 本番向けロールバック基盤（/var/data・DB・アプリコードの瞬時復元）
 - Github＋Render（無料枠）でノーコスト運用可能
 
+
 ---
+
+## ドキュメント
+
+- [応答仕様 v1.0 差分メモ](docs/response-spec-v1-notes.md)
 
 ## セットアップ
 
