@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 import json
 from collections import Counter
 
-from coreapp.config import MIN_QUERY_CHARS
+from coreapp.search.query_limits import min_query_chars
 
 from .normalize import (
     hiragana,
@@ -278,10 +278,11 @@ class EntriesIndex:
         limit: int | None = None,
     ) -> List[EntryMatch]:
         normalized_query = normalize_text(query)
-        if len(normalized_query) < MIN_QUERY_CHARS:
+        min_chars = min_query_chars()
+        if len(normalized_query) < min_chars:
             return []
 
-        short_query = len(normalized_query) <= MIN_QUERY_CHARS
+        short_query = len(normalized_query) <= min_chars
         token_groups = _expand_tokens(_tokenize(query), self._synonyms)
         if not token_groups:
             return []

@@ -1,3 +1,5 @@
+from coreapp import config as cfg
+
 from tests.utils import load_test_app
 
 
@@ -28,3 +30,7 @@ def test_readyz_returns_expected_schema(monkeypatch, tmp_path):
         assert details["data_base_dir"] == str(app.config["DATA_BASE_DIR"])
         assert details["pamphlet_base_dir"] == str(base_dir)
         assert details.get("pamphlet_count") == 0
+        flags = details.get("flags") or {}
+        assert flags.get("MIN_QUERY_CHARS") == cfg.MIN_QUERY_CHARS
+        assert flags.get("ENABLE_ENTRIES_2CHAR") == cfg.ENABLE_ENTRIES_2CHAR
+        assert flags.get("EFFECTIVE_MIN_QUERY_CHARS") == cfg.MIN_QUERY_CHARS

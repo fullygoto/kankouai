@@ -3,6 +3,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from coreapp import config as cfg
+
 from tests.utils import load_test_app
 
 
@@ -38,6 +40,8 @@ def test_readyz_reports_missing_data_base_dir(monkeypatch, tmp_path):
         _assert_data_base_dir_error(payload, "data_base_dir:not_found")
         assert payload["details"]["data_base_dir"] == str(data_dir)
         assert payload["details"]["pamphlet_base_dir"].endswith("pamphlets")
+        flags = payload["details"].get("flags") or {}
+        assert flags.get("MIN_QUERY_CHARS") == cfg.MIN_QUERY_CHARS
 
 
 def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_path):

@@ -82,6 +82,7 @@ from services import (
     state as user_state,
 )
 from services.paths import get_data_base_dir, ensure_data_directories
+from coreapp import config as cfg
 from coreapp.intent import get_intent_detector, is_transport_query, is_weather_query
 from coreapp.search.entries_index import load_entries_index
 from coreapp.responders.entries import EntriesResponder
@@ -90,6 +91,7 @@ from coreapp.responders.pamphlet import (
     PamphletResponder,
 )
 from coreapp.responders.priority import PriorityResponder, transport_reply_text, weather_reply_text
+from coreapp.search.query_limits import min_query_chars
 from coreapp.storage import (
     BASE_DIR,
     count_pamphlet_files,
@@ -10079,6 +10081,14 @@ def readyz():
     if pamphlet_state == "error":
         errors.append("pamphlet_index:error")
 
+    flags: dict[str, object] = {}
+    flags["MIN_QUERY_CHARS"] = getattr(cfg, "MIN_QUERY_CHARS", None)
+    flags["ENABLE_ENTRIES_2CHAR"] = getattr(cfg, "ENABLE_ENTRIES_2CHAR", 1)
+    try:
+        flags["EFFECTIVE_MIN_QUERY_CHARS"] = min_query_chars()
+    except Exception:
+        flags["EFFECTIVE_MIN_QUERY_CHARS"] = flags.get("MIN_QUERY_CHARS")
+
     status = "ok" if not errors else "error"
     code = 200 if status == "ok" else 503
 
@@ -10088,6 +10098,8 @@ def readyz():
         "warnings": warnings,
         "details": details,
     }
+    details["pamphlet_index"] = pamphlet_state
+    details["flags"] = flags
     response = jsonify(body)
     response.status_code = code
     response.headers["Cache-Control"] = "no-store"
