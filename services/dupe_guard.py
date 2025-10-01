@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 from time import time
 from typing import Dict, Optional
+
+from coreapp.search.query_limits import min_query_chars, normalize_for_length
 
 _CACHE: Dict[str, float] = {}
 _RECENT_INPUTS: Dict[str, tuple[str, float]] = {}
@@ -16,7 +17,6 @@ _EVENT_TEXT_KEYS: Dict[str, float] = {}
 
 WINDOW = float(os.getenv("ANTIFLOOD_TTL_SEC", "120"))
 _REPLAY_WINDOW = float(os.getenv("REPLAY_GUARD_SEC", "150"))
-_TOKEN_RE = re.compile(r"[\w]+|[\u3040-\u30FF]+|[\u4E00-\u9FFF]+")
 
 
 def _purge(cache: Dict[str, float], *, now: Optional[float] = None) -> None:
@@ -89,8 +89,9 @@ def evaluate_utterance(user_id: str, text: str, *, min_tokens: int = 2) -> Optio
     if not normalized:
         return "empty"
 
-    tokens = _TOKEN_RE.findall(normalized)
-    if len(tokens) < min_tokens and len(normalized) < (min_tokens + 1):
+    compact = normalize_for_length(normalized)
+    effective_min = max(min_query_chars(), min_tokens)
+    if len(compact) < effective_min:
         return "too_short"
 
     now = time()

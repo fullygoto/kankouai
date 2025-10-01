@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from coreapp.search.entries_index import EntriesIndex, EntryMatch, load_entries_index
+from coreapp.search.query_limits import is_too_short
 
 
 @dataclass
@@ -77,6 +78,11 @@ class EntriesResponder:
         # New query or state reset.
         state.clear()
         tokens = (message or "").strip()
+        if is_too_short(tokens):
+            return EntriesResponderResult(
+                kind="no_hit",
+                message="観光データから該当する情報は見つかりませんでした。",
+            )
         matches = self._index.search(tokens)
         if not matches:
             return EntriesResponderResult(
