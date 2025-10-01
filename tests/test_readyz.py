@@ -32,6 +32,18 @@ def test_readyz_reports_missing_data_base_dir(monkeypatch, tmp_path):
         shutil.rmtree(data_dir)
 
         client = app.test_client()
+        monkeypatch.setattr(
+            module,
+            "_describe_mount",
+            lambda path: {
+                "path": str(path),
+                "resolved_path": str(path),
+                "device": "tmpfs",
+                "mount_point": str(path),
+                "fs_type": "tmpfs",
+                "options": ["rw"],
+            },
+        )
         response = client.get("/readyz")
 
         assert response.status_code == 503
@@ -42,6 +54,7 @@ def test_readyz_reports_missing_data_base_dir(monkeypatch, tmp_path):
         assert payload["details"]["pamphlet_base_dir"].endswith("pamphlets")
         flags = payload["details"].get("flags") or {}
         assert flags.get("MIN_QUERY_CHARS") == cfg.MIN_QUERY_CHARS
+        assert flags.get("DATA_BASE_DIR") == str(data_dir)
 
 
 def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_path):
@@ -53,6 +66,18 @@ def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_pat
         data_dir.write_text("not a directory", encoding="utf-8")
 
         client = app.test_client()
+        monkeypatch.setattr(
+            module,
+            "_describe_mount",
+            lambda path: {
+                "path": str(path),
+                "resolved_path": str(path),
+                "device": "tmpfs",
+                "mount_point": str(path),
+                "fs_type": "tmpfs",
+                "options": ["rw"],
+            },
+        )
         response = client.get("/readyz")
 
         assert response.status_code == 503
@@ -80,6 +105,18 @@ def test_readyz_reports_not_writable(monkeypatch, tmp_path):
         assert Path(app.config["DATA_BASE_DIR"]) == base
 
         client = app.test_client()
+        monkeypatch.setattr(
+            module,
+            "_describe_mount",
+            lambda path: {
+                "path": str(path),
+                "resolved_path": str(path),
+                "device": "tmpfs",
+                "mount_point": str(path),
+                "fs_type": "tmpfs",
+                "options": ["ro"],
+            },
+        )
         response = client.get("/readyz")
         assert response.status_code == 503
         payload = response.get_json()
