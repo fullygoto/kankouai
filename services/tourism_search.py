@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from coreapp.search.query_limits import min_query_chars, normalize_for_length
+
 from . import pamphlet_search
 
 
@@ -242,6 +244,9 @@ def search(
     limit: int = 3,
 ) -> List[ScoredEntry]:
     """Return scored tourism entries for ``query`` limited to ``limit`` hits."""
+
+    if len(normalize_for_length(query)) < min_query_chars():
+        return []
 
     tokens = _tokenize(query)
     if not tokens:
