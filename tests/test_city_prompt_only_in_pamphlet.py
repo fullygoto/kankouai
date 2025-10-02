@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from coreapp.responders.pamphlet import CITY_PROMPT
+
 pytest.importorskip("flask")
 pytest.importorskip("werkzeug")
 pytest.importorskip("dotenv")
@@ -56,7 +58,7 @@ def test_city_prompt_only_in_pamphlet(monkeypatch, tmp_path):
 
         prompt, hit_prompt, _ = app_module._answer_from_entries_min("遣唐使の時代", user_id="user1")
         assert hit_prompt is True
-        assert "どの市町の資料ですか？" in prompt
+        assert CITY_PROMPT in prompt
 
         summary, hit_summary, _ = app_module._answer_from_entries_min("五島市", user_id="user1")
         assert hit_summary is True

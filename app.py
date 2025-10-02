@@ -91,7 +91,7 @@ from coreapp.responders.pamphlet import (
     PamphletResponder,
 )
 from coreapp.responders.priority import PriorityResponder, transport_reply_text, weather_reply_text
-from coreapp.search.query_limits import min_query_chars
+from coreapp.search.query_limits import is_too_short, min_query_chars
 from coreapp.storage import (
     BASE_DIR,
     count_pamphlet_files,
@@ -2393,16 +2393,42 @@ def _remote_ip():
 
 # 文字列は「;」区切りで複数指定可（例: "20/minute;1000/day"）
 ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
-# 例: RATE_STORAGE_URI="redis://:pass@redis:6379/0"
-RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI") or "memory://"
+
+
+def _resolve_rate_storage_url() -> str:
+    """Return the configured rate limit storage URL.
+
+    ``RATE_STORAGE_URL`` takes precedence over the legacy ``RATE_STORAGE_URI``
+    environment variable so that existing deployments can transition
+    gradually.  ``memory://`` is kept as the default for local development
+    but is rejected in production environments.
+    """
+
+    primary = os.environ.get("RATE_STORAGE_URL")
+    if primary:
+        return primary
+    legacy = os.environ.get("RATE_STORAGE_URI")
+    if legacy:
+        return legacy
+    return "memory://"
+
+
+RATE_STORAGE_URL = _resolve_rate_storage_url()
+app.config["RATE_STORAGE_URL"] = RATE_STORAGE_URL
+# Backward compatibility for modules that still read RATE_STORAGE_URI.
+app.config["RATE_STORAGE_URI"] = RATE_STORAGE_URL
 
 # 本番で memory:// は共有されず危険なので禁止
-if _APP_ENV_EARLY in {"prod", "production"} and (not RATE_STORAGE_URI or RATE_STORAGE_URI.startswith("memory://")):
-    raise RuntimeError("In production, set RATE_STORAGE_URI to a shared backend (e.g., redis://...)")
+if _APP_ENV_EARLY in {"prod", "production"} and (
+    not RATE_STORAGE_URL or RATE_STORAGE_URL.startswith("memory://")
+):
+    raise RuntimeError(
+        "In production, set RATE_STORAGE_URL to a shared backend (e.g., redis://...)"
+    )
 
 if Limiter:
     # ★一度だけ初期化し、必要なら後からデコレータで利用
-    limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URI)
+    limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URL)
     limiter.init_app(app)
     limit_deco = limiter.limit
 else:
@@ -10014,6 +10040,45 @@ def _probe_writable(dirpath: Path) -> bool:
         return False
 
 
+def _describe_mount(path: Path) -> dict[str, object]:
+    """Return mount information for ``path`` based on ``/proc/mounts``."""
+
+    info: dict[str, object] = {"path": str(path)}
+    try:
+        info["resolved_path"] = str(path.resolve())
+    except OSError:
+        info["resolved_path"] = str(path)
+
+    try:
+        mount_path = os.path.realpath(str(path))
+        best: tuple[str, str, str, str] | None = None
+        with open("/proc/mounts", "r", encoding="utf-8") as mounts:
+            for line in mounts:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                device, mount_point, fs_type, options = parts[:4]
+                mount_point_clean = mount_point.replace("\\040", " ")
+                if not mount_path.startswith(mount_point_clean.rstrip("/")) and mount_path != mount_point_clean:
+                    continue
+                if best is None or len(mount_point_clean) > len(best[1]):
+                    best = (device, mount_point_clean, fs_type, options)
+        if best:
+            device, mount_point_clean, fs_type, options = best
+            info.update(
+                {
+                    "device": device,
+                    "mount_point": mount_point_clean,
+                    "fs_type": fs_type,
+                    "options": options.split(",") if options else [],
+                }
+            )
+    except OSError:
+        pass
+
+    return info
+
+
 @app.route("/readyz", methods=["GET"])
 def readyz():
     errors: list[str] = []
@@ -10046,9 +10111,10 @@ def readyz():
             warnings.append("pamphlet_base_dir:empty")
     details["pamphlet_count"] = pamphlet_count
     details["pamphlet_count_by_city"] = count_pamphlets_by_city()
+    details["fs_mount"] = _describe_mount(base_dir)
 
     try:
-        uri = app.config.get("RATE_STORAGE_URI")
+        uri = app.config.get("RATE_STORAGE_URL") or app.config.get("RATE_STORAGE_URI")
         if uri and uri not in ("memory://",):
             import redis  # pip install redis
 
@@ -10082,12 +10148,21 @@ def readyz():
         errors.append("pamphlet_index:error")
 
     flags: dict[str, object] = {}
+    flags["DATA_BASE_DIR"] = str(app.config.get("DATA_BASE_DIR", base_dir))
+    flags["PAMPHLET_BASE_DIR"] = str(app.config.get("PAMPHLET_BASE_DIR", pamphlet_dir))
     flags["MIN_QUERY_CHARS"] = getattr(cfg, "MIN_QUERY_CHARS", None)
-    flags["ENABLE_ENTRIES_2CHAR"] = getattr(cfg, "ENABLE_ENTRIES_2CHAR", 1)
+    if hasattr(cfg, "ENABLE_ENTRIES_2CHAR"):
+        flags["ENABLE_ENTRIES_2CHAR"] = getattr(cfg, "ENABLE_ENTRIES_2CHAR")
     try:
         flags["EFFECTIVE_MIN_QUERY_CHARS"] = min_query_chars()
     except Exception:
         flags["EFFECTIVE_MIN_QUERY_CHARS"] = flags.get("MIN_QUERY_CHARS")
+
+    for key in ("ENABLE_MODEL_SWITCH", "ENABLE_PAMPHLET", "SAFE_MODE"):
+        if key in os.environ:
+            flags[key] = os.environ[key]
+        elif hasattr(cfg, key):
+            flags[key] = getattr(cfg, key)
 
     status = "ok" if not errors else "error"
     code = 200 if status == "ok" else 503
@@ -10859,6 +10934,9 @@ def clean_query_for_search(question):
     return q.strip()
 
 def find_entry_info(question):
+    if is_too_short(question):
+        return []
+
     entries = load_entries()
     synonyms = load_synonyms()
     areas_master = ["五島市", "新上五島町", "宇久町", "小値賀町"]

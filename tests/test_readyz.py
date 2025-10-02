@@ -3,6 +3,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("flask")
+pytest.importorskip("werkzeug")
+pytest.importorskip("dotenv")
+
 from coreapp import config as cfg
 
 from tests.utils import load_test_app
@@ -32,9 +38,22 @@ def test_readyz_reports_missing_data_base_dir(monkeypatch, tmp_path):
         shutil.rmtree(data_dir)
 
         client = app.test_client()
+        monkeypatch.setattr(
+            module,
+            "_describe_mount",
+            lambda path: {
+                "path": str(path),
+                "resolved_path": str(path),
+                "device": "tmpfs",
+                "mount_point": str(path),
+                "fs_type": "tmpfs",
+                "options": ["rw"],
+            },
+        )
         response = client.get("/readyz")
 
         assert response.status_code == 503
+        assert response.headers["Content-Type"].startswith("application/json")
         payload = response.get_json()
         assert payload["status"] == "error"
         _assert_data_base_dir_error(payload, "data_base_dir:not_found")
@@ -42,6 +61,7 @@ def test_readyz_reports_missing_data_base_dir(monkeypatch, tmp_path):
         assert payload["details"]["pamphlet_base_dir"].endswith("pamphlets")
         flags = payload["details"].get("flags") or {}
         assert flags.get("MIN_QUERY_CHARS") == cfg.MIN_QUERY_CHARS
+        assert flags.get("DATA_BASE_DIR") == str(data_dir)
 
 
 def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_path):
@@ -53,9 +73,22 @@ def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_pat
         data_dir.write_text("not a directory", encoding="utf-8")
 
         client = app.test_client()
+        monkeypatch.setattr(
+            module,
+            "_describe_mount",
+            lambda path: {
+                "path": str(path),
+                "resolved_path": str(path),
+                "device": "tmpfs",
+                "mount_point": str(path),
+                "fs_type": "tmpfs",
+                "options": ["rw"],
+            },
+        )
         response = client.get("/readyz")
 
         assert response.status_code == 503
+        assert response.headers["Content-Type"].startswith("application/json")
         payload = response.get_json()
         assert payload["status"] == "error"
         _assert_data_base_dir_error(payload, "data_base_dir:not_directory")
@@ -64,9 +97,6 @@ def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_pat
 def test_readyz_reports_not_writable(monkeypatch, tmp_path):
     base = tmp_path / "data"
     base.mkdir()
-    probe_dir = base / ".readyz_probe"
-    probe_dir.mkdir()
-    base.chmod(0o555)
 
     monkeypatch.setenv("DATA_BASE_DIR", str(base))
     monkeypatch.setenv("SECRET_KEY", "test")
@@ -80,11 +110,23 @@ def test_readyz_reports_not_writable(monkeypatch, tmp_path):
         assert Path(app.config["DATA_BASE_DIR"]) == base
 
         client = app.test_client()
+        monkeypatch.setattr(
+            module,
+            "_describe_mount",
+            lambda path: {
+                "path": str(path),
+                "resolved_path": str(path),
+                "device": "tmpfs",
+                "mount_point": str(path),
+                "fs_type": "tmpfs",
+                "options": ["ro"],
+            },
+        )
+        monkeypatch.setattr(module, "_probe_writable", lambda path: False)
+
         response = client.get("/readyz")
         assert response.status_code == 503
+        assert response.headers["Content-Type"].startswith("application/json")
         payload = response.get_json()
         assert payload["status"] == "error"
         _assert_data_base_dir_error(payload, "data_base_dir:not_writable")
-
-    base.chmod(0o755)
-    probe_dir.rmdir()

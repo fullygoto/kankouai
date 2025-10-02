@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from coreapp.responders.pamphlet import CITY_PROMPT
+
 pytest.importorskip("flask")
 pytest.importorskip("werkzeug")
 pytest.importorskip("dotenv")
@@ -59,7 +61,7 @@ def test_pamphlet_answer_style_fixed(monkeypatch, tmp_path):
 
         prompt, hit_prompt, _ = app_module._answer_from_entries_min("遣唐使について知りたい", user_id="user2")
         assert hit_prompt is True
-        assert "どの市町の資料ですか？" in prompt
+        assert CITY_PROMPT in prompt
 
         answer, hit_answer, _ = app_module._answer_from_entries_min("五島市", user_id="user2")
         assert hit_answer is True

@@ -1,0 +1,40 @@
+name: Release Checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  smoke-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run targeted tests
+        run: |
+          pytest \
+            tests/test_readyz.py \
+            tests/test_readyz_endpoint.py \
+            tests/test_readyz_pamphlets.py \
+            tests/test_entries_minlen_e2e.py \
+            tests/test_pamphlet.py \
+            tests/test_pamphlet_answer_style.py \
+            tests/test_pamphlet_answer_style_fixed.py \
+            tests/test_pamphlet_fallback.py \
+            tests/test_pamphlet_persistence.py \
+            tests/test_city_prompt_only_in_pamphlet.py \
+            tests/test_rate_storage_env.py

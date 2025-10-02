@@ -13,6 +13,9 @@ from coreapp.search.pamphlet_index import (
 )
 
 
+CITY_PROMPT = "どの市町の資料ですか？"
+
+
 CITY_CHOICES: List[Dict[str, str]] = [
     {"key": "goto", "label": "五島市"},
     {"key": "shinkamigoto", "label": "新上五島町"},
@@ -107,7 +110,7 @@ class PamphletResponder:
             quick, web = self._choices_payload()
             return PamphletResponderResult(
                 kind="ask_city",
-                message="市町を選択してください。",
+                message=CITY_PROMPT,
                 quick_replies=quick,
                 web_buttons=web,
             )
@@ -152,4 +155,9 @@ class PamphletResponder:
         )
 
 
-__all__ = ["CITY_CHOICES", "PamphletResponder", "PamphletResponderResult"]
+__all__ = [
+    "CITY_CHOICES",
+    "CITY_PROMPT",
+    "PamphletResponder",
+    "PamphletResponderResult",
+]
