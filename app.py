@@ -3032,7 +3032,7 @@ if _line_enabled():
             return False
 
         if result.kind == "ask_city":
-            msg = TextSendMessage(text=result.message or "市町を選択してください。")
+            msg = TextSendMessage(text=result.message or pamphlet_flow.CITY_PROMPT)
             if result.quick_choices:
                 items = [
                     QuickReplyButton(action=MessageAction(label=choice["label"], text=choice["text"]))
@@ -9353,7 +9353,7 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
             return "", False, ""
 
         if result.kind == "ask_city":
-            return result.message or "どの市町の資料ですか？", True, ""
+            return result.message or pamphlet_flow.CITY_PROMPT, True, ""
 
         if result.kind == "answer":
             message = result.message or ""

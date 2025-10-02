@@ -11,6 +11,7 @@ from . import pamphlet_rag, pamphlet_search, pamphlet_session
 from .message_builder import build_pamphlet_message, parse_pamphlet_answer
 from .sources_fmt import format_sources_md, normalize_sources
 from .pamphlet_search import SearchResult, detect_city_from_text
+from .pamphlet_constants import CITY_PROMPT
 
 _ENABLE_EVIDENCE_TOGGLE = os.getenv("ENABLE_EVIDENCE_TOGGLE", "true").lower() == "true"
 
@@ -82,7 +83,7 @@ def build_response(
         show_quick = not record.get("asked", False)
         session.set_pending(user_id, stripped, asked=True)
         choices = pamphlet_search.city_choices() if show_quick else []
-        message = "どの市町の資料ですか？"
+        message = CITY_PROMPT
         if not show_quick:
             message = "対象の市町を「五島市」「新上五島町」「小値賀町」「宇久町」から教えてください。"
         return PamphletResponse(

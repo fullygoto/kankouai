@@ -11,6 +11,7 @@ from coreapp.search.pamphlet_index import (
     PamphletIndex,
     load_pamphlet_index,
 )
+from services.pamphlet_constants import CITY_PROMPT
 
 
 CITY_CHOICES: List[Dict[str, str]] = [
@@ -107,7 +108,7 @@ class PamphletResponder:
             quick, web = self._choices_payload()
             return PamphletResponderResult(
                 kind="ask_city",
-                message="市町を選択してください。",
+                message=CITY_PROMPT,
                 quick_replies=quick,
                 web_buttons=web,
             )
