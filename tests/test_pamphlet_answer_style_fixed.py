@@ -9,6 +9,7 @@ pytest.importorskip("dotenv")
 pytest.importorskip("linebot")
 pytest.importorskip("PIL")
 
+from services.pamphlet_constants import CITY_PROMPT
 from tests.utils import load_test_app
 
 
@@ -18,7 +19,7 @@ def _setup_pamphlet(app_module):
     city_dir.mkdir(parents=True, exist_ok=True)
     pamphlet_text = textwrap.dedent(
         """
-        遣唐使は630年から約260年間続き、およそ20回の派遣が記録されている。五島は最終寄港地として整備され、唐の制度や文化を学ぶことが目的だった。
+        遣唐使は630年から約260年間続き、約20回の派遣が記録されている。五島は最終寄港地として整備され、唐の制度や文化を学ぶことが目的だった。
         五島の港では航海の安全祈願や補給が行われ、遣唐使船はここから大海原へ出帆した。
         """
     ).strip()
@@ -59,7 +60,7 @@ def test_pamphlet_answer_style_fixed(monkeypatch, tmp_path):
 
         prompt, hit_prompt, _ = app_module._answer_from_entries_min("遣唐使について知りたい", user_id="user2")
         assert hit_prompt is True
-        assert "どの市町の資料ですか？" in prompt
+        assert CITY_PROMPT in prompt
 
         answer, hit_answer, _ = app_module._answer_from_entries_min("五島市", user_id="user2")
         assert hit_answer is True

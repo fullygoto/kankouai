@@ -3,9 +3,15 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
+
 from coreapp import config as cfg
 
 from tests.utils import load_test_app
+
+
+pytest.importorskip("flask")
+pytest.importorskip("werkzeug")
 
 
 def _load_readyz_app(monkeypatch, tmp_path, base_dir_name: str):
@@ -87,24 +93,13 @@ def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_pat
 
 
 def test_readyz_reports_not_writable(monkeypatch, tmp_path):
-    base = tmp_path / "data"
-    base.mkdir()
-    probe_dir = base / ".readyz_probe"
-    probe_dir.mkdir()
-    base.chmod(0o555)
-
-    monkeypatch.setenv("DATA_BASE_DIR", str(base))
-    monkeypatch.setenv("SECRET_KEY", "test")
-
-    with load_test_app(
-        monkeypatch,
-        tmp_path,
-        extra_env={"DATA_BASE_DIR": base, "SECRET_KEY": "test"},
-    ) as module:
+    with _load_readyz_app(monkeypatch, tmp_path, "writable") as module:
         app = module.app
-        assert Path(app.config["DATA_BASE_DIR"]) == base
+        base = Path(app.config["DATA_BASE_DIR"])
+        assert base.exists()
 
         client = app.test_client()
+        monkeypatch.setattr(module, "_probe_writable", lambda _path: False)
         monkeypatch.setattr(
             module,
             "_describe_mount",
@@ -117,11 +112,11 @@ def test_readyz_reports_not_writable(monkeypatch, tmp_path):
                 "options": ["ro"],
             },
         )
+
         response = client.get("/readyz")
+
         assert response.status_code == 503
+        assert response.content_type == "application/json"
         payload = response.get_json()
         assert payload["status"] == "error"
         _assert_data_base_dir_error(payload, "data_base_dir:not_writable")
-
-    base.chmod(0o755)
-    probe_dir.rmdir()

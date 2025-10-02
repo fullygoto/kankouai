@@ -12,6 +12,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from coreapp.search.query_limits import min_query_chars, normalize_for_length
 
 from . import pamphlet_search
+from .pamphlet_constants import CITY_PROMPT
 
 
 @dataclass(frozen=True)
@@ -316,7 +317,7 @@ def detect_city_from_text(text: str) -> str | None:
 def city_prompt(*, asked: bool) -> str:
     choices = [choice["text"] for choice in pamphlet_search.city_choices()]
     if not asked:
-        lines = ["どの市町の資料ですか？"]
+        lines = [CITY_PROMPT]
         lines.extend(f"- {choice}" for choice in choices)
         return "\n".join(lines)
     return "市町を「五島市」「新上五島町」「宇久町」「小値賀町」から教えてください。"
