@@ -22,6 +22,8 @@
 # docs も許可
 !docs/
 !docs/**
+!ops/
+!ops/**
 
 # services パッケージを許可
 !services/
@@ -40,6 +42,7 @@
 # GitHub workflow
 !.github/
 !.github/**
+!render.yaml
 
 # logs フォルダ自体は保持するが、ログ本体は無視
 !logs/
