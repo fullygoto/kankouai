@@ -272,7 +272,9 @@ def test_admin_backup_restore_and_status(monkeypatch, tmp_path):
 
         ready = client.get("/readyz")
         assert ready.status_code == 200
-        assert ready.get_json()["status"] in {"ready", "degraded"}
+        ready_payload = ready.get_json()
+        assert ready_payload["status"] == "ok"
+        assert ready_payload["ok"] is True
 
         health = client.get("/healthz")
         assert health.status_code == 200

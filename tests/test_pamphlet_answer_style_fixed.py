@@ -79,6 +79,6 @@ def test_pamphlet_answer_style_fixed(monkeypatch, tmp_path):
         sources_section = _extract_section(answer, "### 出典")
         assert sources_section
         for line in sources_section.splitlines():
-            assert line.startswith("- 五島市/")
-            assert ".txt" not in line
+            assert line.startswith("- [[")
+            assert "五島市" in line
             assert "L" not in line

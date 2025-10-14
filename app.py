@@ -9956,11 +9956,11 @@ def _debug_test_weather():
 
 @app.route("/healthz", methods=["GET", "HEAD"])
 def healthz():
-    # 必要なら軽い自己診断をここに追加可
-    return ("ok", 200, {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-store",
-    })
+    """Lightweight liveness probe used by staging/production."""
+
+    response = jsonify({"ok": True})
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 def _git_metadata_for_readyz() -> dict:
     info: dict[str, object] = {}
@@ -10168,6 +10168,7 @@ def readyz():
     code = 200 if status == "ok" else 503
 
     body = {
+        "ok": not errors,
         "status": status,
         "errors": errors,
         "warnings": warnings,

@@ -13,8 +13,8 @@ def test_normalize_sources_from_strings():
     normalized = pamphlet_rag.normalize_sources(raw)
 
     assert normalized == [
-        ("五島市", "長崎五島観光ガイド"),
-        ("新上五島町", "しま山ガイド"),
+        ("五島市", "長崎五島観光ガイド.txt"),
+        ("新上五島町", "しま山ガイド.md"),
     ]
 
 
@@ -28,8 +28,8 @@ def test_normalize_sources_from_dicts():
     normalized = pamphlet_rag.normalize_sources(raw)
 
     assert normalized == [
-        ("五島市", "五島市_観光ガイドブックひとたび五島"),
-        ("新上五島町", "しま山ガイドブック"),
+        ("五島市", "五島市_観光ガイドブックひとたび五島.txt"),
+        ("新上五島町", "しま山ガイドブック.md"),
     ]
 
 
@@ -43,7 +43,7 @@ def test_normalize_sources_mixed_and_invalid():
 
     normalized = pamphlet_rag.normalize_sources(raw)
 
-    assert normalized == [("五島市", "長崎五島観光ガイド")]
+    assert normalized == [("五島市", "長崎五島観光ガイド.txt")]
 
 
 def test_format_sources_md_output():
@@ -57,8 +57,8 @@ def test_format_sources_md_output():
 
     assert md == (
         "### 出典\n"
-        "- 五島市/長崎五島観光ガイド\n"
-        "- 五島市/五島市_観光ガイドブックひとたび五島"
+        "- [[1]] 五島市 / 長崎五島観光ガイド.txt\n"
+        "- [[2]] 五島市 / 五島市_観光ガイドブックひとたび五島.txt"
     )
 
 
