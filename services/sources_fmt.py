@@ -10,8 +10,7 @@ from . import pamphlet_search
 _SRC_RE = re.compile(
     r"""
     ^(?P<city>[^/]+)/              # 市町 (五島市 など)
-    (?P<file>[^/]+?)               # ファイル名 (拡張子なしを想定)
-    (?:\.(?:txt|md))?             # txt/md 拡張子は捨てる
+    (?P<file>[^/]+?(?:\.[^/]+)?)  # ファイル名（拡張子込み）
     (?:/L?\d+(?:-\d+)?)?$        # /L12-15 のような行番号は捨てる
     """,
     re.X | re.I,
@@ -22,7 +21,6 @@ def _clean_file_name(value: str | None) -> str | None:
     if not value:
         return None
     name = os.path.basename(str(value))
-    name = re.sub(r"\.(txt|md)$", "", name, flags=re.I)
     return name or None
 
 
@@ -48,15 +46,21 @@ def normalize_sources(sources: Iterable[Any]) -> List[Tuple[str, str]]:
 
             file_val = raw.get("file") or raw.get("filename") or raw.get("path")
             file_stem = _clean_file_name(file_val)
+        else:
+            chunk = getattr(raw, "chunk", None)
+            if chunk is not None:
+                city = pamphlet_search.city_label(getattr(chunk, "city", ""))
+                file_stem = _clean_file_name(getattr(chunk, "source_file", ""))
 
         if not city or not file_stem:
             continue
 
-        key = (city, file_stem)
+        city_label = pamphlet_search.city_label(city)
+        key = (city_label, file_stem.lower())
         if key in seen:
             continue
         seen.add(key)
-        items.append(key)
+        items.append((city_label, file_stem))
 
     return items
 
@@ -67,5 +71,8 @@ def format_sources_md(sources: Iterable[Any], heading: str = "### 出典") -> st
     items = normalize_sources(sources)
     if not items:
         return ""
-    body = "\n".join(f"- {city}/{file_stem}" for city, file_stem in items)
+    body_lines = []
+    for idx, (city, file_name) in enumerate(items, 1):
+        body_lines.append(f"- [[{idx}]] {city} / {file_name}")
+    body = "\n".join(body_lines)
     return f"{heading}\n{body}"

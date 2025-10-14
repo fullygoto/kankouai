@@ -37,8 +37,8 @@ def test_build_message_removes_intent_and_notes(monkeypatch):
     assert built.text.count("### 出典") == 1
     assert len(built.details) <= 2
     for line in built.sources_md.splitlines()[1:]:
-        assert line.startswith("- 五島市/")
-        assert ".txt" not in line and ".md" not in line
+        assert line.startswith("- [[")
+        assert "五島市" in line
         assert "L" not in line
 
 
@@ -54,7 +54,8 @@ def test_build_message_polite_long_style(monkeypatch):
     )
 
     assert not built.text.startswith("###")
-    assert built.text.count("[[1]]") == 1
+    summary_part = built.text.split("### 出典", 1)[0]
+    assert summary_part.count("[[1]]") == 1
     assert "### 出典" in built.text
     assert built.details == []
 
