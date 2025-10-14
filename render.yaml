@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: kankouai-prod
+    env: python
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:app --log-file -
+    healthCheckPath: /readyz
+    # Render の Rolling Deploy では、新コンテナが /readyz ヘルシーになるまで既存コンテナが維持され、リクエストが途切れません。
+    preDeployCommand: bash ops/predeploy.sh

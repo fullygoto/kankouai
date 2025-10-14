@@ -205,6 +205,7 @@ pytest tests/test_routing_priority.py \
 3. `develop` を `main` にマージし、本番 Render をカナリア（ワーカー1）でデプロイする。
 4. カナリアで上記スモークを再実施し、15分程度ログの `ROUTE`/`CTRL`/`CITATIONS`/`ANTIFLOOD` を監視する。
 5. 問題なければワーカー数を通常値に戻し本番リリース完了。
+6. 安定稼働を確認したら `release/YYYYmmdd-HHMM` 形式でタグを作成し、`main` の対象コミットに push してください（例: `git tag release/20250318-1200 && git push origin release/20250318-1200`）。
 
 ### ロールバック
 
