@@ -159,8 +159,18 @@ def safe_url_for(endpoint, **values):
 from config import get_config
 app.config.from_object(get_config())
 
+MEDIA_ROOT = os.getenv("MEDIA_ROOT") or app.config.get("MEDIA_ROOT") or MEDIA_ROOT
+IMAGES_DIR = os.getenv("IMAGES_DIR") or app.config.get("IMAGES_DIR") or MEDIA_ROOT
+MEDIA_ROOT = IMAGES_DIR
+app.config["MEDIA_ROOT"] = MEDIA_ROOT
+app.config["IMAGES_DIR"] = IMAGES_DIR
+app.config["MEDIA_DIR"] = os.getenv("MEDIA_DIR") or app.config.get("MEDIA_DIR") or MEDIA_ROOT
+MEDIA_DIR = Path(app.config["MEDIA_DIR"]).expanduser()
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
 # 以降のメッセージ等で使うため、上限MBを設定から参照
-MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
+MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 64)
 
 # === Core responder singletons ============================================
 PRIORITY_INTENT = get_intent_detector()
@@ -605,13 +615,21 @@ def _resolve_wm_kind(arg: str | None):
 # ==== 画像配信（署名 + 透かし対応）=============================
 # 依存: Pillow, safe_join, send_file, load_entries(), app など
 # 既存の設定が無い場合のデフォルト
-MEDIA_ROOT = os.getenv("MEDIA_ROOT", "media/img")
+_APP_ENV_MEDIA = (os.getenv("APP_ENV") or "staging").lower()
+_MEDIA_FALLBACK = (
+    os.getenv("MEDIA_ROOT")
+    or os.getenv("MEDIA_DIR")
+    or os.getenv("IMAGES_DIR")
+    or ("/var/data" if _APP_ENV_MEDIA in {"production", "prod", "staging", "stage"} else "media/img")
+)
+MEDIA_ROOT = _MEDIA_FALLBACK
 WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
-IMAGE_PROTECT    = os.getenv("IMAGE_PROTECT",    "0").lower() in {"1","true","on","yes"}
+_IMAGE_PROTECT_DEFAULT = "1" if _APP_ENV_MEDIA in {"production", "prod"} else "0"
+IMAGE_PROTECT = os.getenv("IMAGE_PROTECT", _IMAGE_PROTECT_DEFAULT).lower() in {"1","true","on","yes"}
 
 # ==== 画像保存/配信のディレクトリ統一（互換アライメント） ====
 MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img")
-IMAGES_DIR = os.getenv("IMAGES_DIR") or MEDIA_ROOT
+IMAGES_DIR = os.getenv("IMAGES_DIR") or os.getenv("MEDIA_DIR") or MEDIA_ROOT
 MEDIA_ROOT = IMAGES_DIR  # ← 配信・保存とも同じ実体を指すように統一
 try:
     app.logger.info("[media] MEDIA_ROOT=%s  IMAGES_DIR=%s  URL_PREFIX=%s",
@@ -621,13 +639,9 @@ except Exception:
 
 
 # watermark_utils などから Flask 設定経由で参照できるようにする
+# （config.py の読み込み後に改めて上書きします）
 app.config["MEDIA_ROOT"] = MEDIA_ROOT
 app.config["IMAGES_DIR"] = IMAGES_DIR
-
-
-# === 保存ヘルパー（/media/img 配下に“確実に保存”＋mtimeで新しい順を保証） ===
-MEDIA_DIR = Path(MEDIA_ROOT).resolve()
-MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 def _wm_variant_name(base_filename: str, kind: str, *, out_ext: str | None=None) -> str:
     """kind: 'fullygoto' | 'gotocity' | 'src'"""
@@ -2368,7 +2382,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "2"))
 
 # 早期に APP_ENV を取得（このブロック内だけで使う）
-_APP_ENV_EARLY = os.getenv("APP_ENV", "dev").lower()
+_APP_ENV_EARLY = os.getenv("APP_ENV", "staging").lower()
 
 # 本番で ProxyHop が 0 以下は危険なのでブロック
 if _APP_ENV_EARLY in {"prod", "production"} and TRUSTED_PROXY_HOPS <= 0:
@@ -2391,8 +2405,13 @@ def _remote_ip():
     # ProxyFix 適用後は remote_addr が実クライアントIP
     return (request.remote_addr or "0.0.0.0").strip()
 
-# 文字列は「;」区切りで複数指定可（例: "20/minute;1000/day"）
-ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
+# 文字列は「;」または「,」区切りで複数指定可（例: "10/minute,200/day"）
+_ASK_LIMITS_RAW = os.environ.get("ASK_LIMITS", "10/minute,200/day")
+ASK_LIMITS = ";".join(
+    part.strip()
+    for part in re.split(r"[;,]", _ASK_LIMITS_RAW)
+    if part.strip()
+)
 
 
 def _resolve_rate_storage_url() -> str:
@@ -2401,7 +2420,8 @@ def _resolve_rate_storage_url() -> str:
     ``RATE_STORAGE_URL`` takes precedence over the legacy ``RATE_STORAGE_URI``
     environment variable so that existing deployments can transition
     gradually.  ``memory://`` is kept as the default for local development
-    but is rejected in production environments.
+    but production environments will try to fall back to a Redis URL when
+    available.
     """
 
     primary = os.environ.get("RATE_STORAGE_URL")
@@ -2410,6 +2430,11 @@ def _resolve_rate_storage_url() -> str:
     legacy = os.environ.get("RATE_STORAGE_URI")
     if legacy:
         return legacy
+    if _APP_ENV_EARLY in {"prod", "production"}:
+        for key in ("RATE_STORAGE_FALLBACK", "REDIS_URL", "REDIS_TLS_URL", "UPSTASH_REDIS_URL"):
+            candidate = os.environ.get(key)
+            if candidate:
+                return candidate
     return "memory://"
 
 
@@ -2418,12 +2443,9 @@ app.config["RATE_STORAGE_URL"] = RATE_STORAGE_URL
 # Backward compatibility for modules that still read RATE_STORAGE_URI.
 app.config["RATE_STORAGE_URI"] = RATE_STORAGE_URL
 
-# 本番で memory:// は共有されず危険なので禁止
-if _APP_ENV_EARLY in {"prod", "production"} and (
-    not RATE_STORAGE_URL or RATE_STORAGE_URL.startswith("memory://")
-):
-    raise RuntimeError(
-        "In production, set RATE_STORAGE_URL to a shared backend (e.g., redis://...)"
+if _APP_ENV_EARLY in {"prod", "production"} and RATE_STORAGE_URL.startswith("memory://"):
+    app.logger.warning(
+        "RATE_STORAGE_URL is using memory:// in production. Configure redis:// for shared limits."
     )
 
 if Limiter:
@@ -2602,7 +2624,7 @@ ADMIN_IP_ALLOWLIST = [
     s.strip() for s in os.getenv("ADMIN_IP_ALLOWLIST", "").replace("\n", ",").split(",")
     if s.strip()
 ]
-APP_ENV = os.getenv("APP_ENV", "dev").lower()
+APP_ENV = os.getenv("APP_ENV", "staging").lower()
 if APP_ENV in {"prod", "production"}:
     if not os.environ.get("FLASK_SECRET_KEY"):
         raise RuntimeError("FLASK_SECRET_KEY must be set in production")
@@ -4128,7 +4150,7 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
     if isinstance(text, str):
         text = _append_sources_if_text(text)
 
-    LINE_SAFE = globals().get("LINE_SAFE_CHARS", 3800)
+    LINE_SAFE = globals().get("LINE_SAFE_CHARS", 3000)
 
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
@@ -5110,7 +5132,7 @@ def _notice_paused_once(event, target_id: str):
 # （追記ここまで）
 
 # 1通原則＋長文だけ分割のための閾値（既に定義済みならそのままでOK）
-LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3800"))
+LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3000"))
 
 
 # ---- synonyms 進捗＆キュー（追記）----
@@ -5639,10 +5661,31 @@ def _bootstrap_files_and_admin():
                 ADMIN_INIT_USER,
             )
         else:
+            factory_password = secrets.token_urlsafe(16)
+            factory_user = ADMIN_INIT_USER or "admin"
+            users = [{
+                "user_id": factory_user,
+                "name": "工場出荷管理者",
+                "password_hash": generate_password_hash(factory_password),
+                "role": "admin",
+            }]
             with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f, ensure_ascii=False, indent=2)
+                json.dump(users, f, ensure_ascii=False, indent=2)
+            init_path = Path(USERS_FILE).with_suffix(Path(USERS_FILE).suffix + ".init")
+            init_payload = {
+                "user_id": factory_user,
+                "password": factory_password,
+                "note": "初回ログイン後にこのファイルを削除し、パスワードを変更してください。",
+            }
+            try:
+                init_path.write_text(json.dumps(init_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError:
+                app.logger.warning("failed to write factory credential hint to %s", init_path, exc_info=True)
             app.logger.warning(
-                "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
+                "users.json を新規作成し、工場出荷ユーザー '%s' を発行しました。初回ログイン用パスワードは %s です (credential: %s)",
+                factory_user,
+                factory_password,
+                init_path,
             )
 
 # 必須キーが未設定なら警告（起動は継続）
@@ -11395,7 +11438,7 @@ LINE_MAX_PER_REQUEST = 5  # 1リクエスト最大5メッセージ（※ LINE_SA
 def _split_for_messaging(text: str, chunk_size: int = None) -> List[str]:
     """長文を自然な区切り（段落→句点）で2〜複数通に分割。最低1通は返す。"""
     # 上位で定義済みの安全値を使う
-    lim = int(chunk_size) if chunk_size else int(globals().get("LINE_SAFE_CHARS", 3800))
+    lim = int(chunk_size) if chunk_size else int(globals().get("LINE_SAFE_CHARS", 3000))
     if not text:
         return [""]
     text = text.strip()
