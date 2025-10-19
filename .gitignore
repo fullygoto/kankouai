@@ -6,7 +6,8 @@
 !README.md
 !requirements.txt
 !app.py
-!antiflood.py
+!admin_pamphlets.py
+!admin_rollback.py
 !conversational_router.py
 !notices.json
 !shop_infos.json
@@ -18,9 +19,30 @@
 !templates/
 !templates/**
 
+# docs も許可
+!docs/
+!docs/**
+!ops/
+!ops/**
+
+# services パッケージを許可
+!services/
+!services/**
+!manage/
+!manage/**
+
 # tests も許可
 !tests/
 !tests/**
+!scripts/
+!scripts/**
+# responder skeleton
+!coreapp/
+!coreapp/**
+# GitHub workflow
+!.github/
+!.github/**
+!render.yaml
 
 # logs フォルダ自体は保持するが、ログ本体は無視
 !logs/

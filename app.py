@@ -14,11 +14,13 @@ import hmac, hashlib, base64
 import zipfile
 import io
 import tempfile
+import subprocess
 # 追加が必要な標準ライブラリ
 import shutil      # _has_free_space で disk_usage を使用
 import tarfile     # _stream_backup_targz で使用
 import queue       # ストリーミング用の内部キュー
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
@@ -31,13 +33,12 @@ import secrets          # ← これを追加
 from dotenv import load_dotenv
 load_dotenv()
 
-from antiflood import AntiFlood, make_event_key, make_key, make_push_key, make_text_key, normalize_text
-
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session,
     jsonify, send_file, abort, send_from_directory, render_template_string, Response,
     current_app as _flask_current_app,  # ← これを追加
 )
+from flask import current_app
 
 
 # --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
@@ -69,6 +70,39 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
 from watermark_ext import media_path_for
+from services import (
+    pamphlet_flow,
+    pamphlet_rag,
+    pamphlet_search,
+    pamphlet_summarize,
+    tourism_search,
+    input_normalizer,
+    dupe_guard,
+    line_handlers,
+    state as user_state,
+)
+from services.paths import get_data_base_dir, ensure_data_directories
+from coreapp import config as cfg
+from coreapp.intent import get_intent_detector, is_transport_query, is_weather_query
+from coreapp.search.entries_index import load_entries_index
+from coreapp.responders.entries import EntriesResponder
+from coreapp.responders.pamphlet import (
+    CITY_CHOICES as CORE_PAMPHLET_CITY_CHOICES,
+    PamphletResponder,
+)
+from coreapp.responders.priority import PriorityResponder, transport_reply_text, weather_reply_text
+from coreapp.search.query_limits import is_too_short, min_query_chars
+from coreapp.storage import (
+    BASE_DIR,
+    count_pamphlet_files,
+    count_pamphlets_by_city,
+    create_pamphlet_backup,
+    ensure_dirs,
+    migrate_from_legacy_paths,
+    seed_from_repo_if_empty,
+)
+from admin_pamphlets import bp as admin_pamphlets_bp
+from admin_rollback import bp as admin_rollback_bp
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
@@ -105,6 +139,16 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = Flask(__name__)
 
+ensure_dirs()
+_bootstrap_sentinel = Path(BASE_DIR / ".bootstrap.done")
+if not _bootstrap_sentinel.exists():
+    migrate_from_legacy_paths()
+    seed_from_repo_if_empty()
+    try:
+        _bootstrap_sentinel.write_text("ok", encoding="utf-8")
+    except OSError:
+        app.logger.warning("Failed to write bootstrap sentinel", exc_info=True)
+
 @app.template_global()
 def safe_url_for(endpoint, **values):
     try:
@@ -115,45 +159,29 @@ def safe_url_for(endpoint, **values):
 from config import get_config
 app.config.from_object(get_config())
 
+MEDIA_ROOT = os.getenv("MEDIA_ROOT") or app.config.get("MEDIA_ROOT") or MEDIA_ROOT
+IMAGES_DIR = os.getenv("IMAGES_DIR") or app.config.get("IMAGES_DIR") or MEDIA_ROOT
+MEDIA_ROOT = IMAGES_DIR
+app.config["MEDIA_ROOT"] = MEDIA_ROOT
+app.config["IMAGES_DIR"] = IMAGES_DIR
+app.config["MEDIA_DIR"] = os.getenv("MEDIA_DIR") or app.config.get("MEDIA_DIR") or MEDIA_ROOT
+MEDIA_DIR = Path(app.config["MEDIA_DIR"]).expanduser()
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
 # 以降のメッセージ等で使うため、上限MBを設定から参照
-MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 16)
+MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 64)
 
-ANTIFLOOD_TTL_SEC = int(os.getenv("ANTIFLOOD_TTL_SEC", "180"))
-REPLAY_GUARD_SEC = int(os.getenv("REPLAY_GUARD_SEC", "150"))
-ENABLE_PUSH = os.getenv("ENABLE_PUSH", "true").lower() in {"1", "true", "on", "yes"}
-RECENT_TEXT_TTL_SEC = int(
-    os.getenv("RECENT_TEXT_TTL_SEC", str(min(ANTIFLOOD_TTL_SEC, 60)))
-)
+# === Core responder singletons ============================================
+PRIORITY_INTENT = get_intent_detector()
+PRIORITY_RESPONDER = PriorityResponder()
 
-ANTIFLOOD = AntiFlood.from_env()
+_ENTRIES_RESPONDER: EntriesResponder | None = None
+_ENTRIES_RESPONDER_LOCK = threading.Lock()
+_ENTRIES_LAST_QUICK_REPLIES: list[dict[str, str]] | None = None
 
-
-def _event_timestamp_seconds(event) -> float | None:
-    ts = getattr(event, "timestamp", None)
-    if ts is None:
-        return None
-    try:
-        val = int(ts)
-    except (TypeError, ValueError):
-        return None
-    if val > 1_000_000_000_000:
-        return val / 1000.0
-    if val > 1_000_000_000:
-        return float(val)
-    return None
-
-
-def _is_replay_event(event, guard_sec: int) -> bool:
-    if guard_sec <= 0:
-        return False
-    ts = _event_timestamp_seconds(event)
-    if ts is None:
-        return False
-    try:
-        now = time.time()
-    except Exception:
-        return False
-    return (now - ts) > guard_sec
+_PAMPHLET_SUMMARY_RESPONDER: PamphletResponder | None = None
+_PAMPHLET_SUMMARY_LOCK = threading.Lock()
 
 @app.template_filter("b64encode")
 def jinja_b64encode(s):
@@ -479,8 +507,8 @@ def send_viewpoints_map(event):
         app.logger.info("[viewpoints] url=%s thumb=%s", viewpoints_map_url(), VIEWPOINTS_THUMB)
         flex = _flex_viewpoints_map()
         if flex:
-            line_bot_api.reply_message(
-                event.reply_token,
+            _safe_reply_or_push(
+                event,
                 FlexSendMessage(alt_text="展望所マップ", contents=flex)
             )
             return
@@ -533,6 +561,11 @@ def _pause_set_user(on: bool):
                         os.remove(p)
                 except Exception:
                     pass
+            if line_handlers.CONTROL_CMD_ENABLED:
+                try:
+                    user_state.resume_all()
+                except Exception:
+                    app.logger.exception("resume_all failed")
     except Exception:
         app.logger.exception("pause_set_user failed")
 
@@ -582,13 +615,21 @@ def _resolve_wm_kind(arg: str | None):
 # ==== 画像配信（署名 + 透かし対応）=============================
 # 依存: Pillow, safe_join, send_file, load_entries(), app など
 # 既存の設定が無い場合のデフォルト
-MEDIA_ROOT = os.getenv("MEDIA_ROOT", "media/img")
+_APP_ENV_MEDIA = (os.getenv("APP_ENV") or "staging").lower()
+_MEDIA_FALLBACK = (
+    os.getenv("MEDIA_ROOT")
+    or os.getenv("MEDIA_DIR")
+    or os.getenv("IMAGES_DIR")
+    or ("/var/data" if _APP_ENV_MEDIA in {"production", "prod", "staging", "stage"} else "media/img")
+)
+MEDIA_ROOT = _MEDIA_FALLBACK
 WATERMARK_ENABLE = os.getenv("WATERMARK_ENABLE", "1").lower() in {"1","true","on","yes"}
-IMAGE_PROTECT    = os.getenv("IMAGE_PROTECT",    "0").lower() in {"1","true","on","yes"}
+_IMAGE_PROTECT_DEFAULT = "1" if _APP_ENV_MEDIA in {"production", "prod"} else "0"
+IMAGE_PROTECT = os.getenv("IMAGE_PROTECT", _IMAGE_PROTECT_DEFAULT).lower() in {"1","true","on","yes"}
 
 # ==== 画像保存/配信のディレクトリ統一（互換アライメント） ====
 MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img")
-IMAGES_DIR = os.getenv("IMAGES_DIR") or MEDIA_ROOT
+IMAGES_DIR = os.getenv("IMAGES_DIR") or os.getenv("MEDIA_DIR") or MEDIA_ROOT
 MEDIA_ROOT = IMAGES_DIR  # ← 配信・保存とも同じ実体を指すように統一
 try:
     app.logger.info("[media] MEDIA_ROOT=%s  IMAGES_DIR=%s  URL_PREFIX=%s",
@@ -598,13 +639,9 @@ except Exception:
 
 
 # watermark_utils などから Flask 設定経由で参照できるようにする
+# （config.py の読み込み後に改めて上書きします）
 app.config["MEDIA_ROOT"] = MEDIA_ROOT
 app.config["IMAGES_DIR"] = IMAGES_DIR
-
-
-# === 保存ヘルパー（/media/img 配下に“確実に保存”＋mtimeで新しい順を保証） ===
-MEDIA_DIR = Path(MEDIA_ROOT).resolve()
-MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 def _wm_variant_name(base_filename: str, kind: str, *, out_ext: str | None=None) -> str:
     """kind: 'fullygoto' | 'gotocity' | 'src'"""
@@ -2208,6 +2245,19 @@ def _norm_entry(e: Dict[str, Any]) -> Dict[str, Any]:
     e["wm_external_choice"] = wm_choice
     e["wm"] = wm_choice          # ← 追加（新コードが参照するエイリアス）
 
+    # エリアチェック済みフラグ（未設定時は False）
+    raw_checked = e.get("area_checked")
+    if raw_checked is None:
+        raw_checked = (
+            e.get("area_verified")
+            or e.get("areas_checked")
+            or e.get("area_check")
+        )
+    if isinstance(raw_checked, str):
+        e["area_checked"] = _boolish(raw_checked)
+    else:
+        e["area_checked"] = bool(raw_checked)
+
     return e
 
 # Flask本体と MAX_CONTENT_LENGTH の設定のすぐ後に追加
@@ -2332,7 +2382,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 TRUSTED_PROXY_HOPS = int(os.getenv("TRUSTED_PROXY_HOPS", "2"))
 
 # 早期に APP_ENV を取得（このブロック内だけで使う）
-_APP_ENV_EARLY = os.getenv("APP_ENV", "dev").lower()
+_APP_ENV_EARLY = os.getenv("APP_ENV", "staging").lower()
 
 # 本番で ProxyHop が 0 以下は危険なのでブロック
 if _APP_ENV_EARLY in {"prod", "production"} and TRUSTED_PROXY_HOPS <= 0:
@@ -2355,18 +2405,52 @@ def _remote_ip():
     # ProxyFix 適用後は remote_addr が実クライアントIP
     return (request.remote_addr or "0.0.0.0").strip()
 
-# 文字列は「;」区切りで複数指定可（例: "20/minute;1000/day"）
-ASK_LIMITS = os.environ.get("ASK_LIMITS", "20/minute;1000/day")
-# 例: RATE_STORAGE_URI="redis://:pass@redis:6379/0"
-RATE_STORAGE_URI = os.environ.get("RATE_STORAGE_URI") or "memory://"
+# 文字列は「;」または「,」区切りで複数指定可（例: "10/minute,200/day"）
+_ASK_LIMITS_RAW = os.environ.get("ASK_LIMITS", "10/minute,200/day")
+ASK_LIMITS = ";".join(
+    part.strip()
+    for part in re.split(r"[;,]", _ASK_LIMITS_RAW)
+    if part.strip()
+)
 
-# 本番で memory:// は共有されず危険なので禁止
-if _APP_ENV_EARLY in {"prod", "production"} and (not RATE_STORAGE_URI or RATE_STORAGE_URI.startswith("memory://")):
-    raise RuntimeError("In production, set RATE_STORAGE_URI to a shared backend (e.g., redis://...)")
+
+def _resolve_rate_storage_url() -> str:
+    """Return the configured rate limit storage URL.
+
+    ``RATE_STORAGE_URL`` takes precedence over the legacy ``RATE_STORAGE_URI``
+    environment variable so that existing deployments can transition
+    gradually.  ``memory://`` is kept as the default for local development
+    but production environments will try to fall back to a Redis URL when
+    available.
+    """
+
+    primary = os.environ.get("RATE_STORAGE_URL")
+    if primary:
+        return primary
+    legacy = os.environ.get("RATE_STORAGE_URI")
+    if legacy:
+        return legacy
+    if _APP_ENV_EARLY in {"prod", "production"}:
+        for key in ("RATE_STORAGE_FALLBACK", "REDIS_URL", "REDIS_TLS_URL", "UPSTASH_REDIS_URL"):
+            candidate = os.environ.get(key)
+            if candidate:
+                return candidate
+    return "memory://"
+
+
+RATE_STORAGE_URL = _resolve_rate_storage_url()
+app.config["RATE_STORAGE_URL"] = RATE_STORAGE_URL
+# Backward compatibility for modules that still read RATE_STORAGE_URI.
+app.config["RATE_STORAGE_URI"] = RATE_STORAGE_URL
+
+if _APP_ENV_EARLY in {"prod", "production"} and RATE_STORAGE_URL.startswith("memory://"):
+    app.logger.warning(
+        "RATE_STORAGE_URL is using memory:// in production. Configure redis:// for shared limits."
+    )
 
 if Limiter:
     # ★一度だけ初期化し、必要なら後からデコレータで利用
-    limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URI)
+    limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URL)
     limiter.init_app(app)
     limit_deco = limiter.limit
 else:
@@ -2540,7 +2624,7 @@ ADMIN_IP_ALLOWLIST = [
     s.strip() for s in os.getenv("ADMIN_IP_ALLOWLIST", "").replace("\n", ",").split(",")
     if s.strip()
 ]
-APP_ENV = os.getenv("APP_ENV", "dev").lower()
+APP_ENV = os.getenv("APP_ENV", "staging").lower()
 if APP_ENV in {"prod", "production"}:
     if not os.environ.get("FLASK_SECRET_KEY"):
         raise RuntimeError("FLASK_SECRET_KEY must be set in production")
@@ -2818,6 +2902,8 @@ ENABLE_FOREIGN_LANG = os.environ.get("ENABLE_FOREIGN_LANG", "1").lower() in {"1"
 
 # OpenAI v1 クライアント
 client = OpenAI(timeout=15)
+pamphlet_summarize.configure(client)
+pamphlet_rag.configure(client)
 
 
 # --- OpenAIラッパ（モデル切替を一元管理：正規版） ---
@@ -2878,6 +2964,7 @@ if _line_enabled():
     _LAST = {
         "mode": {},       # user_id -> 'all' | 'tourism' | 'shop'
         "location": {},   # user_id -> (lat, lng, ts)
+        "pamphlet": {"city": {}, "pending": {}, "followup": {}},
     }
 
     # --- 送信の重複抑止 & リクエスト世代管理 -----------------------------------
@@ -2895,11 +2982,17 @@ if _line_enabled():
         return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
     def _was_sent_recent(target_id: str, text: str, *, mark: bool) -> bool:
-        key = make_text_key(target_id, normalize_text(text))
-        ttl = max(RECENT_TEXT_TTL_SEC, 1)
-        if mark:
-            return not ANTIFLOOD.acquire(key, ttl)
-        return ANTIFLOOD.contains(key)
+        """直近10分に同一本文を送っていれば True。mark=True なら今回送った扱いに記録。"""
+        now = time.time()
+        dq = _SENT_HISTORY[target_id]
+        # 期限切れを掃除
+        while dq and now - dq[0][1] > _SENT_TTL_SEC:
+            dq.popleft()
+        key = _text_key(text)
+        hit = any(k == key for k, _ in dq)
+        if mark and not hit:
+            dq.append((key, now))
+        return hit
 
     # 待ちメッセージ
     WAIT_MESSAGES = (
@@ -2914,6 +3007,103 @@ if _line_enabled():
             return "少しお待ちください…"
         idx = (abs(hash(seed)) if seed else 0) % len(WAIT_MESSAGES)
         return WAIT_MESSAGES[idx]
+
+    def _pamphlet_session_store() -> dict:
+        base = globals().setdefault("_LAST", {})
+        pam = base.setdefault("pamphlet", {"city": {}, "pending": {}, "followup": {}})
+        for key in ("city", "pending", "followup"):
+            pam.setdefault(key, {})
+        return base
+
+    def _pamphlet_should_handle_early(text: str) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        choice_texts = {choice["text"] for choice in pamphlet_search.city_choices()}
+        if stripped in choice_texts:
+            return True
+        return stripped.startswith("もっと詳しく")
+
+    def _pamphlet_handle_line(event, text: str) -> bool:
+        session_store = _pamphlet_session_store()
+        try:
+            user_id = _line_target_id(event)
+        except Exception:
+            user_id = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+
+        topk = int(app.config.get("PAMPHLET_TOPK", 3) or 3)
+        ttl = int(app.config.get("PAMPHLET_SESSION_TTL", 1800) or 1800)
+
+        def _search(city: str, query: str, limit: int):
+            return pamphlet_search.search(city, query, limit)
+
+        def _summarize(query: str, docs, detailed: bool = False):
+            return pamphlet_summarize.summarize_with_gpt_nano(query, docs, detailed=detailed)
+
+        result = pamphlet_flow.build_response(
+            text,
+            user_id=user_id,
+            session_store=session_store,
+            topk=topk,
+            ttl=ttl,
+            searcher=_search,
+            summarizer=_summarize,
+        )
+
+        if result.kind == "noop":
+            return False
+
+        if result.kind == "ask_city":
+            msg = TextSendMessage(text=result.message or pamphlet_flow.CITY_PROMPT)
+            if result.quick_choices:
+                items = [
+                    QuickReplyButton(action=MessageAction(label=choice["label"], text=choice["text"]))
+                    for choice in result.quick_choices
+                ]
+                msg.quick_reply = QuickReply(items=items)
+            _safe_reply_or_push(event, [msg])
+            return True
+
+        if result.kind == "answer":
+            body = result.message or ""
+            if result.sources_md and "### 出典" not in body:
+                body = f"{body}\n\n{result.sources_md}" if body else result.sources_md
+            parts = _split_for_line(body) or [body]
+            messages = []
+            quick_reply = None
+            if result.more_available:
+                quick_reply = QuickReply(
+                    items=[QuickReplyButton(action=MessageAction(label="もっと詳しく", text="もっと詳しく"))]
+                )
+            for idx, part in enumerate(parts):
+                tm = TextSendMessage(text=part)
+                if quick_reply and idx == len(parts) - 1:
+                    tm.quick_reply = quick_reply
+                messages.append(tm)
+            emit_response(event, messages)
+            app.logger.info("ROUTE=pamphlet text=%s", text)
+            if result.citations:
+                app.logger.info("CITATIONS=%s", result.citations)
+            try:
+                extra = {"kind": "pamphlet"}
+                if result.city:
+                    extra["city"] = result.city
+                if result.sources:
+                    extra["sources"] = result.sources
+                if result.citations:
+                    extra["citations"] = result.citations
+                if result.message_with_labels:
+                    extra["answer_with_labels"] = result.message_with_labels
+                save_qa_log(text, result.message, source="line", hit_db=False, extra=extra)
+            except Exception:
+                pass
+            return True
+
+        if result.kind == "error":
+            _reply_or_push(event, result.message)
+            return True
+
+        return False
 
     app.logger.info("LINE enabled")
 
@@ -3077,7 +3267,7 @@ if _line_enabled() and handler:
 
             flex = _nearby_flex(items)
             if flex:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+                _safe_reply_or_push(event, FlexSendMessage(alt_text="近くの候補", contents=flex))
             else:
                 _reply_or_push(event, "\n".join(
                     [f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i, d in enumerate(items)]
@@ -3104,7 +3294,7 @@ if _line_enabled() and handler:
             if not last:
                 # まずは位置情報をもらう
                 try:
-                    line_bot_api.reply_message(event.reply_token, _ask_location())
+                    _safe_reply_or_push(event, _ask_location())
                 except Exception:
                     _reply_or_push(event, "現在地を取得できませんでした。位置情報を送ってください。")
                 return True
@@ -3118,7 +3308,7 @@ if _line_enabled() and handler:
 
             flex = _nearby_flex(items)
             if flex:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="近くの候補", contents=flex))
+                _safe_reply_or_push(event, FlexSendMessage(alt_text="近くの候補", contents=flex))
             else:
                 _reply_or_push(event, "\n".join(
                     [f'{i+1}. {d["title"]}（{d["distance_m"]}m）' for i, d in enumerate(items)]
@@ -3137,41 +3327,92 @@ if _line_enabled() and handler:
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     try:
-        text = getattr(event.message, "text", "") or ""
+        raw_text = getattr(event.message, "text", "") or ""
     except Exception:
-        text = ""
+        raw_text = ""
+
+    text = input_normalizer.normalize_user_query(raw_text)
 
     try:
-        uid = _line_target_id(event)
+        line_user_id = _line_target_id(event)
     except Exception:
-        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+        line_user_id = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
-    if _is_replay_event(event, REPLAY_GUARD_SEC):
-        app.logger.info(
-            "[LINE] replay guard drop user=%s ts=%s", uid, getattr(event, "timestamp", None)
+    uid = line_user_id or "anon"
+    now_epoch = int(time.time())
+
+    try:
+        global_pause = _pause_state()
+    except Exception:
+        try:
+            paused = bool(_is_global_paused())
+        except Exception:
+            paused = False
+        global_pause = (paused, "admin" if paused else None)
+
+    try:
+        cmd_result = line_handlers.process_control_command(
+            raw_text,
+            user_id=uid,
+            event=event,
+            reply_func=_safe_reply_or_push,
+            logger=app.logger,
+            global_pause=global_pause,
+            now=now_epoch,
         )
+    except Exception:
+        cmd_result = None
+        app.logger.exception("control command handling failed")
+
+    if cmd_result:
+        action = cmd_result.get("action")
+        if action == "resume":
+            try:
+                _clear_pause_notice_cache(uid)
+            except Exception:
+                pass
+            try:
+                _set_muted_target(uid, False, who="control")
+            except Exception:
+                app.logger.exception("failed to clear legacy mute flag for %s", uid)
+        elif action == "pause":
+            try:
+                ttl_hint = cmd_result.get("ttl_sec")
+                _set_muted_target(uid, True, who=f"control:{ttl_hint}" if ttl_hint else "control")
+            except Exception:
+                app.logger.exception("failed to persist legacy mute flag for %s", uid)
         return
 
-    msg_id = getattr(getattr(event, "message", None), "id", None) or ""
-    norm_text = normalize_text(text)
-    if not norm_text:
-        app.logger.info("[LINE] ignore empty text from %s", uid)
-        return
-    if len(norm_text) <= 1:
-        app.logger.info("[LINE] ignore very short text from %s: %r", uid, text)
+    if line_handlers.control_is_paused(uid, now_epoch):
+        app.logger.debug("skip message for paused user: %s", uid)
         return
 
-    if ANTIFLOOD_TTL_SEC > 0:
-        event_key = make_event_key(uid, msg_id, norm_text)
-        if not ANTIFLOOD.acquire(event_key, ANTIFLOOD_TTL_SEC):
-            app.logger.info("[LINE] duplicate event suppressed user=%s msg=%s", uid, msg_id)
-            return
+    message_id = getattr(getattr(event, "message", None), "id", None)
+    event_ts_raw = getattr(event, "timestamp", None)
+    event_ts = None
+    if event_ts_raw is not None:
+        try:
+            event_ts = float(event_ts_raw) / 1000.0
+        except Exception:
+            event_ts = None
 
-    if RECENT_TEXT_TTL_SEC > 0:
-        recent_key = make_key("incoming-text", uid, norm_text)
-        if not ANTIFLOOD.acquire(recent_key, RECENT_TEXT_TTL_SEC):
-            app.logger.info("[LINE] repeated text suppressed user=%s", uid)
-            return
+    allow = dupe_guard.should_process_incoming(
+        user_id=uid or "anon",
+        message_id=message_id,
+        text=text or "",
+        event_ts=event_ts,
+        now=now_epoch,
+    )
+    key_digest = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:10]
+    flood_key = message_id or f"{uid}:{key_digest}"
+    app.logger.info("ANTIFLOOD key=%s hit=%s", flood_key, "true" if not allow else "false")
+    if not allow:
+        return
+
+    reason = dupe_guard.evaluate_utterance(line_user_id or "anon", text)
+    if reason:
+        app.logger.debug("[dupe_guard] suppress input %s: %s", line_user_id, reason)
+        return
 
     # --- ① ミュート/一時停止ゲート -------------------------
     try:
@@ -3180,14 +3421,17 @@ def handle_message(event):
     except Exception:
         app.logger.exception("_line_mute_gate failed")
 
+    # --- Pamphlet quick handling (city selection / more detail) ---
+    try:
+        if _pamphlet_should_handle_early(text) and _pamphlet_handle_line(event, text):
+            return
+    except Exception:
+        app.logger.exception("pamphlet quick handler failed")
+
     # --- ①.5 透かしコマンド（@Goto City / @fullyGOTO / なし） ----
     # ※ ここで検出したらユーザー設定に保存し、即時に切替メッセージを返して終了
     try:
-        uid = None
-        try:
-            uid = _line_target_id(event)  # 個チャ/グループ両対応
-        except Exception:
-            uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+        uid = line_user_id
 
         choice = parse_wm_command(text)  # 'gotocity' | 'fullygoto' | 'none' | None
         if choice is not None:
@@ -3197,8 +3441,8 @@ def handle_message(event):
                 _reply_or_push(event, f"透かしモードを「{label}」に切り替えました。")
             except Exception:
                 # 念のため直接replyもフォールバック
-                line_bot_api.reply_message(
-                    event.reply_token,
+                _safe_reply_or_push(
+                    event,
                     TextSendMessage(text=f"透かしモードを「{label}」に切り替えました。")
                 )
             try:
@@ -3243,7 +3487,7 @@ def handle_message(event):
             msgs.append(TextSendMessage(text=series_text))
 
             # 1回の reply でまとめて送信 → 終了
-            line_bot_api.reply_message(event.reply_token, msgs[:5])
+            _safe_reply_or_push(event, msgs[:5])
             return
     except Exception:
         app.logger.exception("[map series] handler failed")
@@ -3262,21 +3506,21 @@ def handle_message(event):
         t = (text or "").lower()
         if any(k in t for k in ["近く", "近場", "周辺", "現在地", "近い", "近所", "近くの観光地"]):
             mode = _classify_mode(text)
-            uid2 = _line_target_id(event)
+            uid2 = line_user_id
             if "_LAST" in globals():
                 _LAST["mode"][uid2] = mode
             # 位置情報のお願いを reply、失敗時は push でフォールバック（※ force_push は使わない）
             try:
-                line_bot_api.reply_message(
-                    event.reply_token,
+                _safe_reply_or_push(
+                    event,
                     _ask_location("現在地から近い順で探します。位置情報を送ってください。")
                 )
             except Exception:
                 try:
-                    safe_push_line(
-                        uid2,
+                    emit_response(
+                        event,
                         TextSendMessage(text="現在地から近い順で探します。位置情報を送ってください。"),
-                        label="ask-location",
+                        force_push=True,
                     )
                 except Exception:
                     pass
@@ -3286,19 +3530,25 @@ def handle_message(event):
 
     # --- ④ 即答リンク（天気・mobility・交通） -----------------
     try:
-        # ④-1 天気
-        w, ok = get_weather_reply(text)
-        app.logger.debug(f"[quick] weather_match={ok} text={text!r}")
-        if ok and w:
-            _reply_quick_no_dedupe(event, w)
-            save_qa_log(text, w, source="line", hit_db=False, extra={"kind":"weather"})
-            return
-        
+        priority_label = PRIORITY_INTENT.classify_priority(text)
+        if priority_label:
+            ans = PRIORITY_RESPONDER.answer(text, label=priority_label)
+            app.logger.debug("[quick] priority_label=%s text=%r", priority_label, text)
+            if ans and ans.message:
+                app.logger.info("ROUTE=special text=%s", text)
+                _reply_quick_no_dedupe(event, ans.message)
+                try:
+                    save_qa_log(text, ans.message, source="line", hit_db=False, extra={"kind": ans.kind})
+                except Exception:
+                    pass
+                return
+
         # ④-2 mobility（レンタカー／タクシー／バス／レンタサイクル）→ fullyGOTOリンク最優先
         try:
             mmsg, mok = get_mobility_reply(text)  # ← ここでリンク or 事業者詳細を決定
             app.logger.debug(f"[quick] mobility_match={mok} text={text!r}")
             if mok and mmsg:
+                app.logger.info("ROUTE=special text=%s", text)
                 _reply_quick_no_dedupe(event, mmsg)  # 長文分割/重複抑止の既存ユーティリティを活用
                 try:
                     save_qa_log(text, mmsg, source="line", hit_db=False,
@@ -3308,15 +3558,6 @@ def handle_message(event):
                 return
         except Exception as e:
             app.logger.exception(f"mobility link-first failed: {e}")
-
-
-        # ④-3 交通（運行状況：船・飛行機）
-        tmsg, ok = get_transport_reply(text)
-        app.logger.debug(f"[quick] transport_match={ok} text={text!r}")
-        if ok and tmsg:
-            _reply_quick_no_dedupe(event, tmsg)
-            save_qa_log(text, tmsg, source="line", hit_db=False, extra={"kind":"transport"})
-            return
     except Exception as e:
         app.logger.exception(f"quick link reply failed: {e}")
 
@@ -3333,11 +3574,7 @@ def handle_message(event):
     # --- ⑥ DB回答（画像→テキストを1回の reply にまとめる） ---
     try:
         # ★ ユーザーの透かし設定を取得して回答生成に渡す（新旧両対応）
-        uid3 = None
-        try:
-            uid3 = _line_target_id(event)
-        except Exception:
-            uid3 = getattr(getattr(event, "source", None), "user_id", None) or "anon"
+        uid3 = line_user_id
         wm_mode = _get_user_wm(uid3)  # 'none' | 'fullygoto' | 'gotocity'
 
         try:
@@ -3349,6 +3586,8 @@ def handle_message(event):
 
         # --- 画像URL（署名＆透かし適用） ---
         msgs = []
+        entries_quick = globals().get("_ENTRIES_LAST_QUICK_REPLIES") or []
+        globals()["_ENTRIES_LAST_QUICK_REPLIES"] = None
 
         def _line_img_pair_from_url(img_url_in: str, wm_mode_in: str | None):
             """
@@ -3470,11 +3709,37 @@ def handle_message(event):
                 if img_msg:
                     msgs.append(img_msg)
 
-        # 本文は安全分割して複数通に
-        for p in _split_for_line(ans):
-            msgs.append(TextSendMessage(text=p))
+        if not hit:
+            try:
+                if _pamphlet_handle_line(event, text):
+                    return
+            except Exception:
+                app.logger.exception("pamphlet fallback failed")
 
-        line_bot_api.reply_message(event.reply_token, msgs)
+        # 本文は安全分割して複数通に
+        parts = _split_for_line(ans)
+        if not parts:
+            parts = [ans]
+
+        quick_reply_obj = None
+        if entries_quick:
+            items = []
+            for item in entries_quick[:5]:
+                label = (item.get("label") or item.get("value") or "").strip()
+                payload = (item.get("payload") or item.get("value") or "").strip()
+                if label and payload:
+                    items.append(QuickReplyButton(action=MessageAction(label=label[:20], text=payload)))
+            if items:
+                quick_reply_obj = QuickReply(items=items)
+
+        for idx, part in enumerate(parts):
+            tm = TextSendMessage(text=part)
+            if quick_reply_obj and idx == len(parts) - 1:
+                tm.quick_reply = quick_reply_obj
+            msgs.append(tm)
+
+        _safe_reply_or_push(event, msgs)
+        app.logger.info("ROUTE=%s text=%s", "tourism" if hit else "no_answer", text)
 
         joined = ("\n---\n".join(getattr(m, "text", "(image)") for m in msgs)) or "(no-text)"
         save_qa_log(text, joined, source="line", hit_db=hit)
@@ -3499,21 +3764,6 @@ def on_follow(event):
     ※公式の「あいさつメッセージ」をONにしている場合は二重送信になるので、
       基本は公式側OFF＋このWebhookで送る運用を推奨。
     """
-    try:
-        uid = _line_target_id(event)
-    except Exception:
-        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
-
-    if _is_replay_event(event, REPLAY_GUARD_SEC):
-        app.logger.info("[LINE] follow replay drop user=%s", uid)
-        return
-
-    if ANTIFLOOD_TTL_SEC > 0:
-        follow_key = make_key("follow", uid, getattr(event, "reply_token", ""), getattr(event, "timestamp", ""))
-        if not ANTIFLOOD.acquire(follow_key, ANTIFLOOD_TTL_SEC):
-            app.logger.info("[LINE] duplicate follow suppressed user=%s", uid)
-            return
-
     # 表示名の取得（失敗しても続行）
     display_name = ""
     try:
@@ -3549,7 +3799,7 @@ def on_follow(event):
     except Exception:
         # フォールバック（直接SDKで返信）
         try:
-            line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=greet)])
+            _safe_reply_or_push(event, [TextSendMessage(text=greet)])
         except Exception as e:
             app.logger.error(f"[follow] reply failed: {e}")
 
@@ -3565,37 +3815,16 @@ def on_location(event):
 
     try:
         uid = _line_target_id(event)
-    except Exception:
-        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
-
-    if _is_replay_event(event, REPLAY_GUARD_SEC):
-        app.logger.info("[LINE] location replay drop user=%s", uid)
-        return
-
-    try:
         lat = float(event.message.latitude)
         lng = float(event.message.longitude)
-    except Exception:
-        app.logger.exception("on_location failed to parse lat/lng")
-        return
 
-    if ANTIFLOOD_TTL_SEC > 0:
-        loc_key = make_event_key(
-            uid,
-            getattr(getattr(event, "message", None), "id", "") or "",
-            f"{lat:.6f}:{lng:.6f}",
-        )
-        if not ANTIFLOOD.acquire(loc_key, ANTIFLOOD_TTL_SEC):
-            app.logger.info("[LINE] duplicate location suppressed user=%s", uid)
-            return
+        # 1) 直近位置を覚える（後半の機能）
+        try:
+            if "_LAST" in globals() and isinstance(_LAST, dict):
+                _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
+        except Exception:
+            pass
 
-    try:
-        if "_LAST" in globals() and isinstance(_LAST, dict):
-            _LAST.setdefault("location", {})[uid] = (lat, lng, time.time())
-    except Exception:
-        pass
-
-    try:
         # 2) ユーザーモード→カテゴリ
         mode = (globals().get("_LAST", {}).get("mode", {}).get(uid)) or "all"
         cats = _mode_to_cats(mode)
@@ -3614,8 +3843,8 @@ def on_location(event):
         if not rows:
             # 5) 結果なし：reply → 失敗時は push
             try:
-                line_bot_api.reply_message(
-                    event.reply_token,
+                _safe_reply_or_push(
+                    event,
                     TextSendMessage(text="近くの候補が見つかりませんでした（半径を広げる/別のキーワードをお試しください）。")
                 )
             except Exception:
@@ -3629,8 +3858,8 @@ def on_location(event):
         # 6) Flex返信（失敗時はテキストにフォールバック）
         flex = _nearby_flex(rows)
         try:
-            line_bot_api.reply_message(
-                event.reply_token,
+            _safe_reply_or_push(
+                event,
                 FlexSendMessage(alt_text="近くのスポット", contents=flex)
             )
         except Exception:
@@ -3670,28 +3899,8 @@ def on_postback(event):
         app.logger.exception("_line_mute_gate failed in postback")
 
     try:
-        uid = _line_target_id(event)
-    except Exception:
-        uid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
-
-    if _is_replay_event(event, REPLAY_GUARD_SEC):
-        app.logger.info("[LINE] postback replay drop user=%s", uid)
-        return
-
-    try:
         data = (getattr(getattr(event, "postback", None), "data", "") or "").strip()
         low  = data.lower()
-
-        if ANTIFLOOD_TTL_SEC > 0:
-            pb_key = make_key(
-                "postback",
-                uid,
-                normalize_text(data),
-                getattr(event, "reply_token", ""),
-            )
-            if not ANTIFLOOD.acquire(pb_key, ANTIFLOOD_TTL_SEC):
-                app.logger.info("[LINE] duplicate postback suppressed user=%s", uid)
-                return
 
         # 1) 代表的キーを正規化（ボタン側の実装差を吸収）
         canon = low
@@ -3748,110 +3957,206 @@ def on_postback(event):
         _reply_quick_no_dedupe(event, "うまく処理できませんでした。もう一度お試しください。")
 
 
-def safe_push_line(target_id: str, messages, *, label: str = "", ttl: int | None = None) -> bool:
-    if not target_id:
-        return False
-    if not ENABLE_PUSH:
-        app.logger.info("[LINE push disabled] would send to %s", target_id)
-        return False
-    if not _line_enabled() or not line_bot_api:
-        app.logger.info("[LINE disabled] would push to %s", target_id)
-        return False
-
-    if messages is None:
-        return False
-    if isinstance(messages, (list, tuple)):
-        items = list(messages)
-    else:
-        items = [messages]
-
-    prepared = []
-    payload_parts: list[str] = []
-    for item in items:
-        if item is None:
-            continue
-        if isinstance(item, TextSendMessage):
-            prepared.append(item)
-            payload_parts.append(normalize_text(item.text or ""))
-        elif isinstance(item, str):
-            prepared.append(TextSendMessage(text=item))
-            payload_parts.append(normalize_text(item))
-        else:
-            prepared.append(item)
-            try:
-                payload = json.dumps(item.as_json_dict(), sort_keys=True, ensure_ascii=False)
-            except Exception:
-                payload = repr(item)
-            payload_parts.append(payload)
-
-    if not prepared:
-        return False
-
-    payload_key = "||".join([p for p in payload_parts if p]) or "empty"
-    ttl_val = ANTIFLOOD_TTL_SEC if ttl is None else ttl
-    key_material = f"{label}:{payload_key}" if label else payload_key
-    if ttl_val > 0 and not ANTIFLOOD.acquire(make_push_key(target_id, key_material), ttl_val):
-        app.logger.info("[LINE] skip duplicate push target=%s label=%s", target_id, label or "")
-        return False
-
-    max_per = int(globals().get("LINE_MAX_PER_REQUEST", 5))
-    try:
-        for i in range(0, len(prepared), max_per):
-            line_bot_api.push_message(target_id, prepared[i : i + max_per])
-        return True
-    except LineBotApiError as e:
-        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"] = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE push failed: %s", e)
-        if globals().get("LINE_RETHROW_ON_SEND_ERROR"):
-            raise
-    except Exception as e:  # pragma: no cover - unexpected path
-        globals()["SEND_FAIL_COUNT"] = globals().get("SEND_FAIL_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"] = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE push failed (unexpected)")
-        if globals().get("LINE_RETHROW_ON_SEND_ERROR"):
-            raise
-    return False
-
-
 def _reply_quick_no_dedupe(event, text: str):
     """重複抑止に引っかけず、とにかく1通返す（reply優先・失敗時push）。"""
     if not text:
         return
     try:
-        if getattr(event, "reply_token", None):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=text))
-        else:
-            tid = _line_target_id(event)
-            if tid:
-                safe_push_line(tid, TextSendMessage(text=text), label="quick")
+        emit_response(event, TextSendMessage(text=text))
     except Exception:
-        # 片方で失敗した時の保険
-        try:
-            tid = _line_target_id(event)
-            if tid:
-                safe_push_line(tid, TextSendMessage(text=text), label="quick-fallback")
-        except Exception:
-            pass
+        _line_logger().exception("LINE quick reply unexpected error")
 
-# === LINE 返信ユーティリティ（未定義だったので追加） ===
-# === LINE 返信ユーティリティ（安全送信 + エラー計測 + force_push互換） ===
+
+def _line_logger():
+    try:
+        return current_app.logger
+    except Exception:
+        try:
+            return app.logger
+        except Exception:
+            return logging.getLogger(__name__)
+
+
+def _to_id_from_source(source):
+    if not source:
+        return None
+    return getattr(source, "user_id", None) or \
+           getattr(source, "group_id", None) or \
+           getattr(source, "room_id", None)
+
+
+def _is_dummy_reply_token(token: str | None) -> bool:
+    return bool(token) and str(token).startswith("000000000000000000000000")
+
+
+def _event_elapsed_seconds(event) -> float | None:
+    ts = getattr(event, "timestamp", None)
+    if ts is None:
+        return None
+    try:
+        ts_val = float(ts)
+    except (TypeError, ValueError):
+        return None
+    if ts_val > 1_000_000_000_000:  # ms
+        ts_val /= 1000.0
+    try:
+        elapsed = time.time() - ts_val
+    except Exception:
+        return None
+    return elapsed if elapsed >= 0 else 0.0
+
+
+def _normalize_line_messages(messages):
+    if messages is None:
+        return []
+    if isinstance(messages, str):
+        return [TextSendMessage(text=messages)]
+    if isinstance(messages, TextSendMessage) or hasattr(messages, "as_json_dict"):
+        return [messages]
+    try:
+        seq = list(messages)
+    except TypeError:
+        if isinstance(messages, str):
+            return [TextSendMessage(text=messages)]
+        if hasattr(messages, "as_json_dict"):
+            return [messages]
+        return [messages]
+    normalized = []
+    for m in seq:
+        if m is None:
+            continue
+        if isinstance(m, str):
+            normalized.append(TextSendMessage(text=m))
+        else:
+            normalized.append(m)
+    return normalized
+
+
+_SENT_EVENTS: dict[str, float] = {}
+
+
+def _event_key(event) -> str:
+    if event is None:
+        return f"anon:{uuid.uuid4().hex}"
+    cached = getattr(event, "_dedupe_key", None)
+    if cached:
+        return cached
+    message = getattr(event, "message", None)
+    msg_id = getattr(message, "id", None)
+    token = getattr(event, "reply_token", None)
+    src_id = _to_id_from_source(getattr(event, "source", None)) or "anon"
+    raw = msg_id or token or getattr(event, "timestamp", None) or getattr(event, "type", None)
+    if not raw:
+        raw = uuid.uuid4().hex
+    key = f"{src_id}:{raw}"
+    setattr(event, "_dedupe_key", key)
+    return key
+
+
+def _mark_sent(key: str) -> bool:
+    now = time.time()
+    for k, ts in list(_SENT_EVENTS.items()):
+        if now - ts > 120:
+            _SENT_EVENTS.pop(k, None)
+    if key in _SENT_EVENTS:
+        return False
+    _SENT_EVENTS[key] = now
+    return True
+
+
+def _make_push_event(target_id: str):
+    source = SimpleNamespace(user_id=target_id, group_id=None, room_id=None)
+    event = SimpleNamespace(reply_token=None, source=source, message=None, type="push")
+    setattr(event, "_dedupe_key", f"push:{target_id}:{uuid.uuid4().hex}")
+    return event
+
+
+def emit_response(event, messages, *, force_push: bool = False):
+    logger = _line_logger()
+    norm_messages = _normalize_line_messages(messages)
+    if not norm_messages:
+        return "skipped"
+
+    if not globals().get("line_bot_api"):
+        logger.info(
+            "[LINE disabled] would send: %s",
+            [getattr(m, "text", "(non-text)") for m in norm_messages],
+        )
+        return "disabled"
+
+    payload = "\n".join(str(getattr(m, "text", "")).strip() for m in norm_messages if getattr(m, "text", ""))
+    if isinstance(event, str):
+        event = _make_push_event(event)
+
+    key = _event_key(event)
+    request_id = getattr(event, "reply_token", None) or key
+    if dupe_guard.should_suppress_response(request_id, payload):
+        logger.info("Skip send (antiflood response): %s", request_id)
+        return "skipped"
+
+    if key and not _mark_sent(key):
+        logger.info("Skip send (dup): %s", key)
+        return "skipped"
+
+    token = getattr(event, "reply_token", None)
+    should_reply = bool(not force_push and token and not _is_dummy_reply_token(token))
+    invalid_token = False
+
+    try:
+        if should_reply:
+            line_bot_api.reply_message(token, norm_messages)
+            logger.info("Replied: %s", key)
+            return "replied"
+    except LineBotApiError as e:
+        if getattr(e, "status_code", None) == 400 and "Invalid reply token" in str(e):
+            invalid_token = True
+            elapsed = _event_elapsed_seconds(event)
+            if elapsed is not None:
+                logger.warning("Reply token invalid: %s (elapsed=%.1fs)", key, elapsed)
+            else:
+                logger.warning("Reply token invalid: %s", key)
+        else:
+            if key:
+                _SENT_EVENTS.pop(key, None)
+            raise
+
+    to_id = _to_id_from_source(getattr(event, "source", None)) or _line_target_id(event)
+    if to_id:
+        try:
+            line_bot_api.push_message(to_id, norm_messages)
+        except Exception:
+            if key:
+                _SENT_EVENTS.pop(key, None)
+            raise
+        if invalid_token:
+            elapsed = _event_elapsed_seconds(event)
+            if elapsed is not None:
+                logger.info("Pushed: %s -> %s (elapsed=%.1fs)", key, to_id, elapsed)
+            else:
+                logger.info("Pushed: %s -> %s", key, to_id)
+        else:
+            logger.info("Pushed: %s -> %s", key, to_id)
+        return "pushed"
+
+    logger.error("No destination for push: %s", key)
+    return "skipped"
+
+
+def _safe_reply_or_push(event, messages):
+    return emit_response(event, messages)
+
+
 def _reply_or_push(event, text: str, *, force_push: bool = False):
     if isinstance(text, str):
-        text = _append_sources_if_text(text)    
-    """
-    長文は自動分割して返信。5通/呼び出し上限を厳守。
-    force_push=True のときは reply_token があっても push のみで送る。
-    送信失敗は SEND_ERROR_COUNT / SEND_FAIL_COUNT と LAST_SEND_ERROR に記録。
-    """
-    LINE_SAFE = globals().get("LINE_SAFE_CHARS", 3800)
+        text = _append_sources_if_text(text)
+
+    LINE_SAFE = globals().get("LINE_SAFE_CHARS", 3000)
 
     if not _line_enabled() or not line_bot_api:
         app.logger.info("[LINE disabled] would send: %r", text)
         return
 
     def _compress_to(parts, lim):
-        """分割済みpartsを、1通あたりlim文字以内でできるだけ結合して個数を減らす"""
         out, buf = [], ""
         for p in parts:
             if not buf:
@@ -3870,73 +4175,74 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
     parts = _split_for_line(text, lim) or [""]
     parts = _compress_to(parts, lim)
 
-    MAX_PER_CALL = 5  # reply/push とも5通/呼び出し
+    MAX_PER_CALL = 5
+    if len(parts) > MAX_PER_CALL:
+        head = parts[:MAX_PER_CALL - 1]
+        tail = "\n\n".join(parts[MAX_PER_CALL - 1:])
+        parts = head + [tail]
 
-    def _do_reply(msgs):
-        line_bot_api.reply_message(event.reply_token, [TextSendMessage(text=m) for m in msgs])
-
-    def _do_push(tid, msgs, *, label: str):
-        safe_push_line(tid, [TextSendMessage(text=m) for m in msgs], label=label)
-
-    try:
-        reply_token = getattr(event, "reply_token", None)
-
-        # force_push 指定 or reply_token が無い場合は push 送信のみ
-        if force_push or not reply_token:
-            tid = _line_target_id(event)
-            if tid:
-                for i in range(0, len(parts), MAX_PER_CALL):
-                    _do_push(tid, parts[i:i + MAX_PER_CALL], label="force-push")
-            return
-
-        # まず reply で5通まで
-        head = parts[:MAX_PER_CALL]
-        _do_reply(head)
-        rest = parts[MAX_PER_CALL:]
-
-        # 余りは push で後送（ベストエフォート）
-        if rest:
-            tid = _line_target_id(event)
-            if tid:
-                for i in range(0, len(rest), MAX_PER_CALL):
-                    _do_push(tid, rest[i:i + MAX_PER_CALL], label="reply-overflow")
-
-    except LineBotApiError as e:
-        globals()["SEND_ERROR_COUNT"] = globals().get("SEND_ERROR_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE send failed")
-
-    except Exception as e:
-        globals()["SEND_FAIL_COUNT"]  = globals().get("SEND_FAIL_COUNT", 0) + 1
-        globals()["LAST_SEND_ERROR"]  = f"{type(e).__name__}: {e}"
-        app.logger.exception("LINE send failed (unexpected)")
+    messages = [TextSendMessage(text=m) for m in parts]
+    emit_response(event, messages, force_push=force_push)
 
 
 # データ格納先
-BASE_DIR       = os.environ.get("DATA_BASE_DIR", ".")  # 例: /var/data
-ENTRIES_FILE   = os.path.join(BASE_DIR, "entries.json")
-DATA_DIR       = os.path.join(BASE_DIR, "data")
-LOG_DIR        = os.path.join(BASE_DIR, "logs")
-LOG_FILE       = os.path.join(LOG_DIR, "questions_log.jsonl")
-SYNONYM_FILE   = os.path.join(BASE_DIR, "synonyms.json")
-USERS_FILE     = os.path.join(BASE_DIR, "users.json")
-NOTICES_FILE   = os.path.join(BASE_DIR, "notices.json")
-SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
+BASE_DIR: str = ""
+ENTRIES_FILE: str = ""
+DATA_DIR: str = ""
+LOG_DIR: str = ""
+LOG_FILE: str = ""
+SYNONYM_FILE: str = ""
+USERS_FILE: str = ""
+NOTICES_FILE: str = ""
+SHOP_INFO_FILE: str = ""
+PAUSED_NOTICE_FILE: str = ""
+SEND_LOG_FILE: str = ""
+_DATA_PATHS_INITIALIZED = False
+_APP_BOOTSTRAPPED = False
+
+
+def _configure_data_paths(flask_app: Flask) -> None:
+    global _DATA_PATHS_INITIALIZED
+    if _DATA_PATHS_INITIALIZED:
+        return
+    global BASE_DIR, ENTRIES_FILE, DATA_DIR, LOG_DIR, LOG_FILE
+    global SYNONYM_FILE, USERS_FILE, NOTICES_FILE, SHOP_INFO_FILE
+    global PAUSED_NOTICE_FILE, SEND_LOG_FILE
+
+    base_path = get_data_base_dir(flask_app.config)
+    BASE_DIR = str(base_path)
+    flask_app.config["DATA_BASE_DIR"] = BASE_DIR
+    ENTRIES_FILE = os.path.join(BASE_DIR, "entries.json")
+    DATA_DIR = os.path.join(BASE_DIR, "data")
+    LOG_DIR = os.path.join(BASE_DIR, "logs")
+    LOG_FILE = os.path.join(LOG_DIR, "questions_log.jsonl")
+    SYNONYM_FILE = os.path.join(BASE_DIR, "synonyms.json")
+    USERS_FILE = os.path.join(BASE_DIR, "users.json")
+    NOTICES_FILE = os.path.join(BASE_DIR, "notices.json")
+    SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
+    PAUSED_NOTICE_FILE = os.path.join(BASE_DIR, "paused_notice.json")
+    SEND_LOG_FILE = os.path.join(LOG_DIR, "send_log.jsonl")
+    global IMAGES_DIR
+    IMAGES_DIR = os.path.join(DATA_DIR, "images")
+
+    ensure_data_directories(
+        Path(BASE_DIR),
+        pamphlet_dir=flask_app.config.get("PAMPHLET_BASE_DIR"),
+    )
+    _DATA_PATHS_INITIALIZED = True
+
 
 # ★ 一度だけ案内フラグの保存先 & TTL（秒）
-PAUSED_NOTICE_FILE    = os.path.join(BASE_DIR, "paused_notice.json")  # もしくは DATA_DIR に置いても可
 PAUSED_NOTICE_TTL_SEC = int(os.getenv("PAUSED_NOTICE_TTL_SEC", "86400"))  # 既定: 24時間
 
 # 送信確定ログ（JSON Lines）
-SEND_LOG_FILE   = os.path.join(LOG_DIR, "send_log.jsonl")
 # ログのサンプリング（1.0=全件、0.0=無効）
 SEND_LOG_SAMPLE = float(os.environ.get("SEND_LOG_SAMPLE", "1.0"))
 
 
 # === Images: config + route + normalized save (唯一の正) ===
 MEDIA_URL_PREFIX = "/media/img"  # 画像URLの先頭
-IMAGES_DIR = os.path.join(DATA_DIR, "images")
-os.makedirs(IMAGES_DIR, exist_ok=True)
+IMAGES_DIR: str = ""
 
 # 入力として受け付ける拡張子（出力は常に .jpg）
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -4826,7 +5132,7 @@ def _notice_paused_once(event, target_id: str):
 # （追記ここまで）
 
 # 1通原則＋長文だけ分割のための閾値（既に定義済みならそのままでOK）
-LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3800"))
+LINE_SAFE_CHARS = int(os.getenv("LINE_SAFE_CHARS", "3000"))
 
 
 # ---- synonyms 進捗＆キュー（追記）----
@@ -4865,10 +5171,6 @@ def _save_syn_queue(data):
     """
     _atomic_json_dump(PENDING_SYNONYMS_FILE, data)
 
-
-# 必要フォルダ作成
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
 
 # 便利関数: JSONをアトミックに保存
 def _atomic_json_dump(path, obj, *, create_backup: bool = False):
@@ -5204,6 +5506,39 @@ def _line_mute_gate(event, text: str) -> bool:
     except Exception:
         tid = getattr(getattr(event, "source", None), "user_id", None) or "anon"
 
+    if line_handlers.CONTROL_CMD_ENABLED:
+        now_epoch = int(time.time())
+
+        if paused and by == "admin":
+            if t:
+                try:
+                    _reply_quick_no_dedupe(event, "現在、管理者によって応答が停止されています。管理画面から再開されるまでお待ちください。")
+                except Exception:
+                    pass
+            return True
+
+        if tid and line_handlers.control_is_paused(tid, now_epoch):
+            return True
+
+        if paused and by == "user":
+            try:
+                _reply_quick_no_dedupe(event, "（現在、応答を一時停止しています。「解除」と送ると再開します）")
+            except Exception:
+                pass
+            return True
+
+        try:
+            if "_is_muted_target" in globals() and _is_muted_target(tid):
+                try:
+                    _reply_quick_no_dedupe(event, "（この会話はミュート中です。「解除」と送ると再開します）")
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+
+        return False
+
     # 1) 管理者停止中は常にミュート（ユーザーの再開も無効・案内のみ）
     if paused and by == "admin":
         if _is_pause_cmd(t) or _is_resume_cmd(t):
@@ -5326,13 +5661,32 @@ def _bootstrap_files_and_admin():
                 ADMIN_INIT_USER,
             )
         else:
+            factory_password = secrets.token_urlsafe(16)
+            factory_user = ADMIN_INIT_USER or "admin"
+            users = [{
+                "user_id": factory_user,
+                "name": "工場出荷管理者",
+                "password_hash": generate_password_hash(factory_password),
+                "role": "admin",
+            }]
             with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f, ensure_ascii=False, indent=2)
+                json.dump(users, f, ensure_ascii=False, indent=2)
+            init_path = Path(USERS_FILE).with_suffix(Path(USERS_FILE).suffix + ".init")
+            init_payload = {
+                "user_id": factory_user,
+                "password": factory_password,
+                "note": "初回ログイン後にこのファイルを削除し、パスワードを変更してください。",
+            }
+            try:
+                init_path.write_text(json.dumps(init_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            except OSError:
+                app.logger.warning("failed to write factory credential hint to %s", init_path, exc_info=True)
             app.logger.warning(
-                "users.json を作成しましたが管理者は未作成です。ADMIN_INIT_PASSWORD を設定して再デプロイするか、手動で users.json を用意してください。"
+                "users.json を新規作成し、工場出荷ユーザー '%s' を発行しました。初回ログイン用パスワードは %s です (credential: %s)",
+                factory_user,
+                factory_password,
+                init_path,
             )
-
-_bootstrap_files_and_admin()
 
 # 必須キーが未設定なら警告（起動は継続）
 if not OPENAI_API_KEY:
@@ -5900,6 +6254,72 @@ def load_entries():
     return [_norm_entry(e) for e in raw if isinstance(e, dict)]
 
 
+def _get_entries_responder(refresh: bool = False) -> EntriesResponder:
+    global _ENTRIES_RESPONDER
+    with _ENTRIES_RESPONDER_LOCK:
+        if refresh or _ENTRIES_RESPONDER is None:
+            try:
+                entries = load_entries()
+            except Exception:
+                entries = []
+            _ENTRIES_RESPONDER = EntriesResponder(entries=entries)
+        return _ENTRIES_RESPONDER
+
+
+def _load_pamphlet_summaries() -> list[dict[str, str]]:
+    base_dir_raw = app.config.get("PAMPHLET_BASE_DIR")
+    if not base_dir_raw:
+        return []
+
+    base_dir = Path(base_dir_raw)
+    if not base_dir.exists():
+        return []
+
+    entries: list[dict[str, str]] = []
+    seen_files: set[Path] = set()
+    for choice in CORE_PAMPHLET_CITY_CHOICES:
+        label = choice.get("label") or ""
+        key = choice.get("key") or ""
+        for folder_name in {label, key}:
+            if not folder_name:
+                continue
+            city_dir = base_dir / folder_name
+            if not city_dir.exists() or not city_dir.is_dir():
+                continue
+            for pattern in ("*.txt", "*.md"):
+                for file_path in sorted(city_dir.glob(pattern)):
+                    if file_path in seen_files:
+                        continue
+                    try:
+                        text = file_path.read_text(encoding="utf-8")
+                    except UnicodeDecodeError:
+                        text = file_path.read_text(encoding="utf-8", errors="ignore")
+                    except OSError:
+                        continue
+                    seen_files.add(file_path)
+                    entries.append(
+                        {
+                            "city": label or key,
+                            "source": file_path.name,
+                            "text": text,
+                        }
+                    )
+    return entries
+
+
+def _get_pamphlet_summary_responder(refresh: bool = False) -> PamphletResponder | None:
+    global _PAMPHLET_SUMMARY_RESPONDER
+    with _PAMPHLET_SUMMARY_LOCK:
+        if refresh or _PAMPHLET_SUMMARY_RESPONDER is None:
+            dataset = _load_pamphlet_summaries()
+            if not dataset:
+                _PAMPHLET_SUMMARY_RESPONDER = None
+            else:
+                _PAMPHLET_SUMMARY_RESPONDER = PamphletResponder(pamphlets=dataset)
+        return _PAMPHLET_SUMMARY_RESPONDER
+
+
+
 def _validate_entries_payload(entries, *, allow_empty: bool = False) -> list[dict]:
     """entries.json 向けデータの最小検証と正規化を行う"""
     if not isinstance(entries, list):
@@ -5950,6 +6370,10 @@ def save_entries(entries):
         except Exception:
             app.logger.exception("[dedupe] failed")
     _atomic_json_dump(ENTRIES_FILE, items, create_backup=True)
+    try:
+        _get_entries_responder(refresh=True)
+    except Exception:
+        app.logger.exception("entries responder refresh failed")
 
 
 def load_synonyms():
@@ -8226,6 +8650,26 @@ def internal_backup():
     return jsonify({"ok": True, "saved": path})
 
 
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+
+@app.route("/ops/backup/pamphlets", methods=["POST"])
+@login_required
+def ops_backup_pamphlets():
+    """Create and return a tarball backup of the pamphlet texts."""
+
+    if ADMIN_TOKEN and request.headers.get("X-Admin-Token") != ADMIN_TOKEN:
+        return jsonify({"error": "forbidden"}), 403
+
+    archive = create_pamphlet_backup()
+    return send_file(
+        archive,
+        as_attachment=True,
+        download_name=archive.name,
+        mimetype="application/gzip",
+    )
+
+
 # === 管理者ボタン：最優先で停止/再開 ==========================================
 @app.post("/admin/line/pause")
 def admin_line_pause():  # 既存の endpoint 名が admin_line_pause ならそちらに合わせて
@@ -8703,10 +9147,8 @@ def admin_line_test_push():
     try:
         parts = _split_for_line(text, LINE_SAFE_CHARS)
         msgs = [TextSendMessage(text=p) for p in parts]
-        if safe_push_line(to, msgs, label="admin-test"):
-            flash("push 送信を実行しました")
-        else:
-            flash("push をスキップしました（重複または無効です）")
+        emit_response(to, msgs, force_push=True)
+        flash("push 送信を実行しました")
     except LineBotApiError as e:
         global LAST_SEND_ERROR, SEND_ERROR_COUNT
         SEND_ERROR_COUNT += 1
@@ -8721,6 +9163,8 @@ def admin_line_test_push():
 # --- 最低限のDB回答（ヒット/複数/未ヒット） ---
 # 1) まず _answer_from_entries_min を修正
 def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_id: str | None = None):
+    global _ENTRIES_LAST_QUICK_REPLIES
+    _ENTRIES_LAST_QUICK_REPLIES = None
     import unicodedata, re
     from datetime import datetime, timedelta
 
@@ -8803,6 +9247,46 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
                 break
         return out
 
+    def _short_description(entry: dict) -> str:
+        desc = (entry.get("desc") or "").strip()
+        if not desc:
+            return ""
+        clean = re.sub(r"\s+", " ", desc)
+        if len(clean) > 120:
+            clipped = clean[:120]
+            clipped = re.sub(r"[、。\.,;:・\s]+$", "", clipped)
+            clean = clipped if clipped else clean[:120]
+        return clean
+
+    def _format_entry_block(entry: dict, *, map_url: str | None = None) -> List[str]:
+        lines: List[str] = []
+        title = (entry.get("title") or "").strip()
+        if title:
+            lines.append(title)
+        desc_line = _short_description(entry)
+        if desc_line:
+            lines.append(desc_line)
+
+        def add(label: str, value) -> None:
+            if isinstance(value, list):
+                joined = " / ".join(str(v).strip() for v in value if str(v).strip())
+                text = joined
+            else:
+                text = (value or "").strip()
+            if text:
+                lines.append(f"{label}：{text}")
+
+        add("住所", entry.get("address"))
+        add("電話", entry.get("tel"))
+        add("営業", entry.get("open_hours"))
+        add("休み", entry.get("holiday"))
+        add("駐車", entry.get("parking"))
+        add("支払", entry.get("payment") or [])
+        add("地図URL", map_url or entry.get("map"))
+        add("カテゴリ", entry.get("category"))
+        add("エリア", entry.get("areas") or [])
+        return lines
+
     # ====== セッション状態（関数内だけで完結）======
     #   user_id が無い場合はセッションを使わず“従来表示”にフォールバック
     gf = globals().setdefault("_GUIDED_FLOW", {})   # {user_id: {stage, cand_titles, ...}}
@@ -8839,483 +9323,181 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
         st0 = _flow_get(user_id) if user_id else None
     except Exception:
         st0 = None
-    if not st0:
-        m0, ok0 = get_transport_reply(q)
-        if ok0:
-            return m0, False, ""  # 画像なし/即答扱い
+    choice_texts = {choice["text"] for choice in pamphlet_search.city_choices()}
 
-    # ========= 1) 継続フローの処理（user_id がある場合のみ）=========
-    if user_id:
-        # 明示リセット
-        if _is_reset_cmd(q):
-            _flow_clear(user_id)
-            return "フローをリセットしました。知りたいスポット名やキーワードを送ってください。", True, ""
+    if user_id and _is_reset_cmd(q):
+        _flow_clear(user_id)
+        return "フローをリセットしました。知りたいスポット名やキーワードを送ってください。", True, ""
 
-        st = _flow_get(user_id)
-        if st:
-            # いまの候補を再構築（常に最新エントリから）
-            es_all = [ _norm_entry(e) for e in load_entries() ]
-            cand = [e for e in es_all if (e.get("title") or "") in (st.get("cand_titles") or [])]
-            if not cand:
-                _flow_clear(user_id)
-                # 続行できないので通常検索にフォールバック
-            else:
-                s = q.strip()
-                idx = _first_int_in_text(s)
+    def _pamphlet_summary_route(text_input: str) -> tuple[str, bool, str]:
+        global _ENTRIES_LAST_QUICK_REPLIES
+        responder = _get_pamphlet_summary_responder()
+        if responder is None:
+            return "", False, ""
 
-                # ---- AREA ----
-                if st["stage"] == "area":
-                    areas = st.get("areas") or _areas_from(cand) or ["五島市","新上五島町","小値賀町","宇久町"]
-                    picked = None
-                    if idx and 1 <= idx <= len(areas):
-                        picked = areas[idx-1]
-                    elif s in areas:
-                        picked = s
-                    if not picked:
-                        return _format_choose_lines("まずエリアを選んでください：", areas), True, ""
+        state_context: dict[str, Any] | None = None
+        if user_id and state_holder is not None:
+            state_context = state_holder.setdefault("pamphlet_summary", {})
 
-                    cand2 = [e for e in cand if picked in (e.get("areas") or [])] or cand
-                    if len(cand2) == 1:
-                        _flow_clear(user_id)
-                        e = cand2[0]
-                        # ---- 最終1件の組み立て（既存の仕様を踏襲）----
-                        record_source_from_entry(e)
-                        urls = _build_image_urls_for_entry(e)
-                        img_url = urls.get("image") or urls.get("thumb") or ""
-                        lat, lng = _entry_latlng(e)
-                        murl = entry_open_map_url(e, lat=lat, lng=lng)
-                        lines = []
-                        title = (e.get("title","") or "").strip()
-                        desc  = (e.get("desc","")  or "").strip()
-                        if title: lines.append(title)
-                        if desc:  lines.append(desc)
-                        def add(label, val):
-                            if isinstance(val, list):
-                                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                            else:
-                                v = (val or "").strip()
-                            if v:
-                                lines.append(f"{label}：{v}")
-                        add("住所", e.get("address"))
-                        add("電話", e.get("tel"))
-                        add("地図", murl or e.get("map"))
-                        add("エリア", e.get("areas") or [])
-                        add("休み", e.get("holiday"))
-                        add("営業時間", e.get("open_hours"))
-                        add("駐車場", e.get("parking"))
-                        add("支払方法", e.get("payment") or [])
-                        add("備考", e.get("remark"))
-                        add("リンク", e.get("links") or [])
-                        add("カテゴリー", e.get("category"))
-                        return "\n".join(lines), True, img_url
+        context = state_context if state_context is not None else {}
+        result = responder.respond(text_input, context=context)
 
-                    # 次=カテゴリー
-                    cats = _categories_from(cand2) or ["観光","飲食","宿泊"]
-                    _flow_set(user_id, {"stage":"category", "cand_titles":[(e.get("title") or "") for e in cand2], "cats": cats})
-                    return _format_choose_lines("次にカテゴリーを選んでください：", cats), True, ""
+        if result.kind == "noop":
+            return "", False, ""
 
-                # ---- CATEGORY ----
-                if st["stage"] == "category":
-                    cats = st.get("cats") or _categories_from(cand)
-                    picked = None
-                    if idx and 1 <= idx <= len(cats):
-                        picked = cats[idx-1]
-                    elif q.strip() in cats:
-                        picked = q.strip()
-                    else:
-                        # エイリアス（表記ゆれ）吸収
-                        ALIASES = {
-                            "観光": ["観光","観光地"],
-                            "飲食": ["飲食","食事","グルメ","食べる・呑む"],
-                            "宿泊": ["宿泊","ホテル","旅館","民宿","泊まる"],
-                        }
-                        for k, vs in ALIASES.items():
-                            if q.strip() == k or q.strip() in vs:
-                                picked = k; break
-                    if not picked:
-                        return _format_choose_lines("次にカテゴリーを選んでください：", cats), True, ""
+        if state_holder is not None:
+            state_holder["pamphlet_summary"] = context
 
-                    cand2 = [e for e in cand if e.get("category") == picked] or cand
-                    if len(cand2) == 1:
-                        _flow_clear(user_id)
-                        e = cand2[0]
-                        record_source_from_entry(e)
-                        urls = _build_image_urls_for_entry(e)
-                        img_url = urls.get("image") or urls.get("thumb") or ""
-                        lat, lng = _entry_latlng(e)
-                        murl = entry_open_map_url(e, lat=lat, lng=lng)
-                        lines = []
-                        title = (e.get("title","") or "").strip()
-                        desc  = (e.get("desc","")  or "").strip()
-                        if title: lines.append(title)
-                        if desc:  lines.append(desc)
-                        def add(label, val):
-                            if isinstance(val, list):
-                                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                            else:
-                                v = (val or "").strip()
-                            if v:
-                                lines.append(f"{label}：{v}")
-                        add("住所", e.get("address"))
-                        add("電話", e.get("tel"))
-                        add("地図", murl or e.get("map"))
-                        add("エリア", e.get("areas") or [])
-                        add("休み", e.get("holiday"))
-                        add("営業時間", e.get("open_hours"))
-                        add("駐車場", e.get("parking"))
-                        add("支払方法", e.get("payment") or [])
-                        add("備考", e.get("remark"))
-                        add("リンク", e.get("links") or [])
-                        add("カテゴリー", e.get("category"))
-                        return "\n".join(lines), True, img_url
+        if result.kind == "ask_city":
+            quick = result.quick_replies or []
+            if quick:
+                _ENTRIES_LAST_QUICK_REPLIES = quick
+            return result.message, True, ""
 
-                    # 次=タグ
-                    tags = _discriminative_tags(cand2)
-                    if not tags:
-                        # そのまま番号選択へ
-                        titles = [(e.get("title") or "") for e in cand2][:8]
-                        _flow_set(user_id, {"stage":"pick", "cand_titles":[(e.get("title") or "") for e in cand2], "titles": titles})
-                        return _format_choose_lines("候補が複数あります。番号で選んでください：", titles), True, ""
-                    _flow_set(user_id, {"stage":"tag", "cand_titles":[(e.get("title") or "") for e in cand2], "tags": tags})
-                    return _format_choose_lines("最後にタグで絞り込みましょう：", tags), True, ""
+        if result.kind == "summary":
+            return result.message, True, ""
 
-                # ---- TAG ----
-                if st["stage"] == "tag":
-                    # 表示用タグ（クォート除去済み）
-                    tags = st.get("tags") or _discriminative_tags(cand)
-                    # ユーザー入力 → 正規化
-                    s_norm = _tag_norm(q)
-                    picked = None
+        if result.kind == "no_hit":
+            return result.message, True, ""
 
-                    # 1) 番号選択
-                    if idx and 1 <= idx <= len(tags):
-                        picked = tags[idx-1]
-                    # 2) 名称選択（正規化一致）
-                    elif s_norm:
-                        for opt in tags:
-                            if _tag_norm(opt) == s_norm:
-                                picked = opt
-                                break
+        return "", False, ""
 
-                    if not picked:
-                        return _format_choose_lines("最後にタグで絞り込みましょう：", tags or []), True, ""
-
-                    # タグでフィルタ（エントリ側のタグも正規化して比較）
-                    def _has_tag(e) -> bool:
-                        for t in (e.get("tags") or []):
-                            if _tag_norm(t) == _tag_norm(picked):
-                                return True
-                        return False
-
-                    cand2 = [e for e in cand if _has_tag(e)] or cand
-                    if len(cand2) == 1:
-                        _flow_clear(user_id)
-                        e = cand2[0]
-                        record_source_from_entry(e)
-                        urls = _build_image_urls_for_entry(e)
-                        img_url = urls.get("image") or urls.get("thumb") or ""
-                        lat, lng = _entry_latlng(e)
-                        murl = entry_open_map_url(e, lat=lat, lng=lng)
-                        lines = []
-                        title = (e.get("title","") or "").strip()
-                        desc  = (e.get("desc","")  or "").strip()
-                        if title: lines.append(title)
-                        if desc:  lines.append(desc)
-                        def add(label, val):
-                            if isinstance(val, list):
-                                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                            else:
-                                v = (val or "").strip()
-                            if v:
-                                lines.append(f"{label}：{v}")
-                        add("住所", e.get("address"))
-                        add("電話", e.get("tel"))
-                        add("地図", murl or e.get("map"))
-                        add("エリア", e.get("areas") or [])
-                        add("休み", e.get("holiday"))
-                        add("営業時間", e.get("open_hours"))
-                        add("駐車場", e.get("parking"))
-                        add("支払方法", e.get("payment") or [])
-                        add("備考", e.get("remark"))
-                        add("リンク", e.get("links") or [])
-                        add("カテゴリー", e.get("category"))
-                        return "\n".join(lines), True, img_url
-
-                    # まだ複数 → 番号選択へ
-                    titles = [(e.get("title") or "") for e in cand2][:8]
-                    _flow_set(user_id, {"stage":"pick", "cand_titles":[(e.get("title") or "") for e in cand2], "titles": titles})
-                    return _format_choose_lines("まだ複数あります。番号で選んでください：", titles), True, ""
-
-                # ---- PICK ----
-                if st["stage"] == "pick":
-                    titles = st.get("titles") or [(e.get("title") or "") for e in cand][:8]
-                    idx = _first_int_in_text(q)
-                    picked_title = None
-                    if idx and 1 <= idx <= len(titles):
-                        picked_title = titles[idx-1]
-                    elif q.strip() in titles:
-                        picked_title = q.strip()
-                    if not picked_title:
-                        return _format_choose_lines("番号で選んでください：", titles), True, ""
-                    e = next((x for x in cand if (x.get("title") or "") == picked_title), None)
-                    _flow_clear(user_id)
-                    if not e:
-                        return "すみません、選択肢が見つかりませんでした。キーワードからやり直してください。", True, ""
-                    record_source_from_entry(e)
-                    urls = _build_image_urls_for_entry(e)
-                    img_url = urls.get("image") or urls.get("thumb") or ""
-                    lat, lng = _entry_latlng(e)
-                    murl = entry_open_map_url(e, lat=lat, lng=lng)
-                    lines = []
-                    title = (e.get("title","") or "").strip()
-                    desc  = (e.get("desc","")  or "").strip()
-                    if title: lines.append(title)
-                    if desc:  lines.append(desc)
-                    def add(label, val):
-                        if isinstance(val, list):
-                            v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                        else:
-                            v = (val or "").strip()
-                        if v:
-                            lines.append(f"{label}：{v}")
-                    add("住所", e.get("address"))
-                    add("電話", e.get("tel"))
-                    add("地図", murl or e.get("map"))
-                    add("エリア", e.get("areas") or [])
-                    add("休み", e.get("holiday"))
-                    add("営業時間", e.get("open_hours"))
-                    add("駐車場", e.get("parking"))
-                    add("支払方法", e.get("payment") or [])
-                    add("備考", e.get("remark"))
-                    add("リンク", e.get("links") or [])
-                    add("カテゴリー", e.get("category"))
-                    return "\n".join(lines), True, img_url
-
-                # 不明状態 → クリアして通常に戻す
-                _flow_clear(user_id)
-
-    # ========= 2) 通常検索（新規開始 or user_id無し or フローが無い）=========
-    qn = _n_local(q)
-    es = [ _norm_entry(e) for e in load_entries() ]  # 念のため正規化
-
-    # --- タイトル最優先のスコアリング ---
-    ranked = []  # (score, tie_breaker, entry)
-    for e in es:
-        title = e.get("title", "")
-        desc  = e.get("desc", "")
-        addr  = e.get("address", "")
-        tags  = e.get("tags", []) or []
-        areas = e.get("areas", []) or []
-
-        tn = _n_local(title)
-        dn = _n_local(desc)
-        an = _n_local(addr)
-
-        score = None
-        # 優先度：タイトル完全一致＞タイトル部分一致＞説明＞住所＞タグ・エリア
-        if qn and qn == tn:
-            score = 100
-        elif qn and qn in tn:
-            score = 80
-        elif qn and qn in dn:
-            score = 60
-        elif qn and qn in an:
-            score = 50
-        elif any(qn in _n_local(t) for t in tags):
-            score = 40
-        elif any(qn in _n_local(a) for a in areas):
-            score = 30
-
-        if score is not None:
-            # 近いタイトル長を優先（同点時の並び安定化）
-            tie = abs(len(tn) - len(qn))
-            ranked.append((score, tie, e))
-
-    if not ranked:
-        # 即返し（天気 / 交通）
-        m, ok = get_weather_reply(q)
-        if ok:
-            return m, False, ""
-        m, ok = get_transport_reply(q)
-        if ok:
-            return m, False, ""
-        refine, _meta = build_refine_suggestions(q)
-        return "該当が見つかりませんでした。\n" + refine, False, ""
-
-    # スコア降順 → タイトル長の近さ昇順
-    ranked.sort(key=lambda t: (-t[0], t[1]))
-    hits = [e for _, __, e in ranked]
-
-    # タイトル一致（完全 or 部分）の最上位が単独なら、それを即採用
-    top_score = ranked[0][0]
-    same_top_count = sum(1 for s, _, __ in ranked if s == top_score)
-    if same_top_count == 1:
-        hits = [hits[0]]
-
-    # ---- 1件 → 既存の最終出力 ----
-    if len(hits) == 1:
-        e = hits[0]
-
-        # ★ 出典（フォームの「出典」テキストがあればのみ付与）
-        record_source_from_entry(e)
-
-        # ★ 画像URL（wm_external_choice を尊重）
-        urls = _build_image_urls_for_entry(e)
-        img_url = urls.get("image") or urls.get("thumb") or ""
-
-        # ★ 地図URL（place_id/共有URL優先 → 無ければ緯度経度/名称から生成）
-        lat, lng = _entry_latlng(e)
-        murl = entry_open_map_url(e, lat=lat, lng=lng)
-
-        # 本文は「タイトル1行＋説明1行」→以降に項目
-        lines = []
-        title = (e.get("title","") or "").strip()
-        desc  = (e.get("desc","")  or "").strip()
-        if title: lines.append(title)
-        if desc:  lines.append(desc)
-
-        def add(label, val):
-            if isinstance(val, list):
-                v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-            else:
-                v = (val or "").strip()
-            if v:
-                lines.append(f"{label}：{v}")
-
-        add("住所", e.get("address"))
-        add("電話", e.get("tel"))
-        if murl:
-            add("地図", murl)  # ← map文字列ではなく最適URL
+    def _pamphlet_route(text_input: str) -> tuple[str, bool, str]:
+        store_factory = globals().get("_pamphlet_session_store")
+        if callable(store_factory):
+            session_store = store_factory()
         else:
-            add("地図", e.get("map"))
-        add("エリア", e.get("areas") or [])
-        add("休み", e.get("holiday"))
-        add("営業時間", e.get("open_hours"))
-        add("駐車場", e.get("parking"))
-        add("支払方法", e.get("payment") or [])
-        add("備考", e.get("remark"))
-        add("リンク", e.get("links") or [])
-        add("カテゴリー", e.get("category"))
+            session_store = globals().setdefault("_PAMPHLET_SESSION_FALLBACK", {})
+            session_store.setdefault("pamphlet", {"city": {}, "pending": {}, "followup": {}})
+            session_store.setdefault("pamphlet_city", {})
+            session_store.setdefault("pamphlet_pending", {})
+            session_store.setdefault("pamphlet_followup", {})
 
-        # タグは返信に入れない（現状維持）
-        return "\n".join(lines), True, img_url
+        topk = int(app.config.get("PAMPHLET_TOPK", 3) or 3)
+        ttl = int(app.config.get("PAMPHLET_SESSION_TTL", 1800) or 1800)
 
-    # ---- 2件以上 → 段階的フロー開始（user_id がある場合）----
-    if user_id:
-        # 自動前進（エリア/カテゴリーが1種類しかないなら先に進める）
-        cand = hits[:]
-        # エリア自動決定
-        areas = _areas_from(cand)
-        stage = "area"
-        if len(areas) == 1:
-            picked = areas[0]
-            cand = [e for e in cand if picked in (e.get("areas") or [])] or cand
-            if len(cand) == 1:
-                # 1件に確定
-                e = cand[0]
-                record_source_from_entry(e)
-                urls = _build_image_urls_for_entry(e)
-                img_url = urls.get("image") or urls.get("thumb") or ""
-                lat, lng = _entry_latlng(e)
-                murl = entry_open_map_url(e, lat=lat, lng=lng)
-                lines = []
-                title = (e.get("title","") or "").strip()
-                desc  = (e.get("desc","")  or "").strip()
-                if title: lines.append(title)
-                if desc:  lines.append(desc)
-                def add(label, val):
-                    if isinstance(val, list):
-                        v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                    else:
-                        v = (val or "").strip()
-                    if v:
-                        lines.append(f"{label}：{v}")
-                add("住所", e.get("address"))
-                add("電話", e.get("tel"))
-                add("地図", murl or e.get("map"))
-                add("エリア", e.get("areas") or [])
-                add("休み", e.get("holiday"))
-                add("営業時間", e.get("open_hours"))
-                add("駐車場", e.get("parking"))
-                add("支払方法", e.get("payment") or [])
-                add("備考", e.get("remark"))
-                add("リンク", e.get("links") or [])
-                add("カテゴリー", e.get("category"))
-                return "\n".join(lines), True, img_url
-            stage = "category"
-            # カテゴリー自動決定
-            cats = _categories_from(cand)
-            if len(cats) == 1:
-                picked = cats[0]
-                cand = [e for e in cand if e.get("category") == picked] or cand
-                if len(cand) == 1:
-                    e = cand[0]
-                    record_source_from_entry(e)
-                    urls = _build_image_urls_for_entry(e)
-                    img_url = urls.get("image") or urls.get("thumb") or ""
-                    lat, lng = _entry_latlng(e)
-                    murl = entry_open_map_url(e, lat=lat, lng=lng)
-                    lines = []
-                    title = (e.get("title","") or "").strip()
-                    desc  = (e.get("desc","")  or "").strip()
-                    if title: lines.append(title)
-                    if desc:  lines.append(desc)
-                    def add(label, val):
-                        if isinstance(val, list):
-                            v = " / ".join([str(x).strip() for x in val if str(x).strip()])
-                        else:
-                            v = (val or "").strip()
-                        if v:
-                            lines.append(f"{label}：{v}")
-                    add("住所", e.get("address"))
-                    add("電話", e.get("tel"))
-                    add("地図", murl or e.get("map"))
-                    add("エリア", e.get("areas") or [])
-                    add("休み", e.get("holiday"))
-                    add("営業時間", e.get("open_hours"))
-                    add("駐車場", e.get("parking"))
-                    add("支払方法", e.get("payment") or [])
-                    add("備考", e.get("remark"))
-                    add("リンク", e.get("links") or [])
-                    add("カテゴリー", e.get("category"))
-                    return "\n".join(lines), True, img_url
-                stage = "tag"
+        def _search(city: str, query: str, limit: int):
+            return pamphlet_search.search(city, query, limit)
 
-        # 状態を保存して最初の質問を返す
-        _flow_set(user_id, {
-            "stage": "area" if stage == "area" else ("category" if stage == "category" else "tag"),
-            "cand_titles": [(e.get("title") or "") for e in cand],
-            "areas": _areas_from(cand) if stage == "area" else None,
-            "cats": _categories_from(cand) if stage == "category" else None,
-            "tags": _discriminative_tags(cand) if stage == "tag" else None,
-        })
-        if stage == "area":
-            areas = _areas_from(cand) or ["五島市","新上五島町","小値賀町","宇久町"]
-            return _format_choose_lines("まずエリアを選んでください：", areas), True, ""
-        if stage == "category":
-            cats = _categories_from(cand) or ["観光","飲食","宿泊"]
-            return _format_choose_lines("次にカテゴリーを選んでください：", cats), True, ""
-        # stage == "tag"
-        tags = _discriminative_tags(cand)
-        if tags:
-            return _format_choose_lines("最後にタグで絞り込みましょう：", tags), True, ""
-        # タグが無ければ番号選択へ
-        titles = [(e.get("title") or "") for e in cand][:8]
-        _flow_set(user_id, {"stage":"pick", "cand_titles":[(e.get("title") or "") for e in cand], "titles": titles})
-        return _format_choose_lines("候補が複数あります。番号で選んでください：", titles), True, ""
+        def _summarize(query: str, docs, detailed: bool = False):
+            return pamphlet_summarize.summarize_with_gpt_nano(query, docs, detailed=detailed)
 
-    # ---- user_id が無い場合は従来の一覧表示（互換モード）----
-    lines = ["候補が複数見つかりました。気になるものはありますか？"]
-    for i, e in enumerate(hits[:8], 1):
-        area_list = e.get("areas", []) or []
-        area = " / ".join(area_list) if area_list else ""
-        suffix = f"（{area}）" if area else ""
-        lines.append(f"{i}. {e.get('title','')}{suffix}")
-    if len(hits) > 8:
-        lines.append(f"…ほか {len(hits)-8} 件")
+        result = pamphlet_flow.build_response(
+            text_input,
+            user_id=user_id or "anon",
+            session_store=session_store,
+            topk=topk,
+            ttl=ttl,
+            searcher=_search,
+            summarizer=_summarize,
+        )
 
-    refine, _meta = build_refine_suggestions(q)
-    return "\n".join(lines) + "\n\n" + refine, True, ""
+        if result.kind == "noop":
+            return "", False, ""
+
+        if result.kind == "ask_city":
+            return result.message or pamphlet_flow.CITY_PROMPT, True, ""
+
+        if result.kind == "answer":
+            message = result.message or ""
+            if result.sources_md and "### 出典" not in message:
+                message = f"{message}\n\n{result.sources_md}" if message else result.sources_md
+            return message, True, ""
+
+        return (result.message or "資料に該当する記述が見当たりません。もう少し条件（市町/施設名/時期等）を教えてください。"), True, ""
+
+    if q in choice_texts or q.startswith("もっと詳しく"):
+        return _pamphlet_route(q)
+
+    weather_reply, weather_hit = get_weather_reply(q)
+    if weather_hit:
+        return weather_reply, False, ""
+
+    if not st0:
+        transport_reply, transport_hit = get_transport_reply(q)
+        if transport_hit:
+            return transport_reply, False, ""
+
+    es = [_norm_entry(e) for e in load_entries()]
+    ranked_results = tourism_search.search(es, q, limit=3)
+
+    if ranked_results and ranked_results[0].score >= tourism_search.MATCH_THRESHOLD:
+        top_entry = ranked_results[0].entry
+    else:
+        responder_state: dict[str, Any] = {}
+        state_holder: dict[str, Any] | None = None
+        if user_id:
+            state_holder = st0 or {}
+            responder_state = state_holder.setdefault("entries_flow", {})
+        response = None
+        try:
+            response = _get_entries_responder().respond(q, context=responder_state)
+        except Exception:
+            app.logger.exception("entries responder failed")
+            response = None
+
+        if response and response.kind == "detail":
+            if user_id and state_holder is not None:
+                state_holder.pop("entries_flow", None)
+                if state_holder:
+                    _flow_set(user_id, state_holder)
+                else:
+                    _flow_clear(user_id)
+            _ENTRIES_LAST_QUICK_REPLIES = response.quick_replies or []
+            return response.message, True, response.image_url or ""
+
+        if response and response.kind == "choices":
+            if user_id and state_holder is not None:
+                state_holder["entries_flow"] = responder_state
+                _flow_set(user_id, state_holder)
+            _ENTRIES_LAST_QUICK_REPLIES = response.quick_replies or []
+            return response.message, True, ""
+
+        if response and response.kind == "no_hit":
+            if user_id and state_holder is not None:
+                state_holder.pop("entries_flow", None)
+                if state_holder:
+                    _flow_set(user_id, state_holder)
+                else:
+                    _flow_clear(user_id)
+            if response.quick_replies:
+                _ENTRIES_LAST_QUICK_REPLIES = response.quick_replies
+            summary_msg, handled_summary, _ = _pamphlet_summary_route(q)
+            if handled_summary:
+                return summary_msg, True, ""
+            return _pamphlet_route(q)
+
+        summary_msg, handled_summary, _ = _pamphlet_summary_route(q)
+        if handled_summary:
+            return summary_msg, True, ""
+
+        return _pamphlet_route(q)
+    record_source_from_entry(top_entry)
+    urls = _build_image_urls_for_entry(top_entry)
+    img_url = urls.get("image") or urls.get("thumb") or ""
+    lat, lng = _entry_latlng(top_entry)
+    map_url = entry_open_map_url(top_entry, lat=lat, lng=lng)
+
+    lines = _format_entry_block(top_entry, map_url=map_url)
+
+    if len(ranked_results) > 1:
+        lines.append("")
+        lines.append("その他の候補：")
+        for alt in ranked_results[1:3]:
+            entry_alt = alt.entry
+            title_alt = (entry_alt.get("title") or "").strip()
+            area_alt = " / ".join(entry_alt.get("areas") or [])
+            suffix = f"（{area_alt}）" if area_alt else ""
+            snippet = _short_description(entry_alt)
+            if snippet:
+                snippet = snippet[:60]
+            if snippet:
+                lines.append(f"- {title_alt}{suffix}：{snippet}")
+            else:
+                lines.append(f"- {title_alt}{suffix}")
+
+    message = "\n".join(lines)
+    return message, True, img_url
 
 #  即返し（天気 / 運行状況） - 保証版
 # =========================
@@ -9335,66 +9517,18 @@ def _is_mobility_text(s: str) -> bool:
     return any(w in t for w in MOBILITY_TRIGGERS)
 
 def get_weather_reply(text: str):
-    """
-    「天気/天候/予報/weather」を含めば即リンクを返す
-    """
-    t = _norm_text_jp(text)
-    if not any(k in t for k in ["天気", "天候", "予報", "weather"]):
-        return "", False
+    """Return weather reply text and flag if the query matches."""
 
-    msg = (
-        "【五島列島の主な天気情報リンク】\n"
-        "五島市: https://weathernews.jp/onebox/tenki/nagasaki/42211/\n"
-        "新上五島町: https://weathernews.jp/onebox/tenki/nagasaki/42411/\n"
-        "小値賀町: https://tenki.jp/forecast/9/45/8440/42383/\n"
-        "宇久町: https://weathernews.jp/onebox/33.262381/129.131027/q=%E9%95%B7%E5%B4%8E%E7%9C%8C%E4%BD%90%E4%B8%96%E4%BF%9D%E5%B8%82%E5%AE%87%E4%B9%85%E7%94%BA&v=da56215a2617fc2203c6cae4306d5fd8c92e3e26c724245d91160a4b3597570a&lang=ja&type=week"
-    )
-    return msg, True
+    if not is_weather_query(text):
+        return "", False
+    return weather_reply_text(), True
 
 def get_transport_reply(text: str):
-    """
-    「運行/運航/運休/欠航/状況/情報/status」か、乗り物語（船/フェリー/…/空港 等）の
-    どちらかでも含まれていれば即リンクを返す。
-    片方しか特定できなければ、その片方だけ返す。
-    戻り値: (message:str, ok:bool)
-    """
-    t = _norm_text_jp(text)
+    """Return transport reply text and flag if the query matches."""
 
-    # ② 状態語を少し拡充（任意）
-    state_hit = any(k in t for k in ["運行", "運航", "運休", "欠航", "遅延", "見合わせ", "運転見合わせ", "状況", "情報", "status"])
-
-    # ① ORC を追加
-    vehicle_hit = any(k in t for k in [
-        "船","フェリー","ジェットフォイル","高速船","太古",
-        "飛行機","空港","福江空港","五島つばき空港","ana","jal","orc","オリエンタルエアブリッジ"
-    ])
-    if not (state_hit or vehicle_hit):
+    if not is_transport_query(text):
         return "", False
-
-    wants_ship = any(k in t for k in ["船","フェリー","ジェットフォイル","高速船","太古","九州商船","産業汽船"])
-    # ① ORC を追加
-    wants_fly  = any(k in t for k in ["飛行機","空港","フライト","福江空港","五島つばき空港","ana","jal","orc","オリエンタルエアブリッジ"])
-
-    ship_section = (
-        "【長崎ー五島航路 運行状況】\n"
-        "・野母商船「フェリー太古」運航情報  \n"
-        "  http://www.norimono-info.com/frame_set.php?usri=&disp=group&type=ship\n"
-        "・九州商船「フェリー・ジェットフォイル」運航情報  \n"
-        "  https://kyusho.co.jp/status\n"
-        "・五島産業汽船「フェリー」運航情報  \n"
-        "  https://www.goto-sangyo.co.jp/\n"
-        "その他の航路や詳細は各リンクをご覧ください。"
-    )
-    fly_section = (
-        "五島つばき空港の最新の運行状況は、公式Webサイトでご確認いただけます。\n"
-        "▶ https://www.fukuekuko.jp/"
-    )
-
-    if wants_ship and not wants_fly:
-        return ship_section, True
-    if wants_fly and not wants_ship:
-        return fly_section, True
-    return ship_section + "\n\n" + fly_section, True
+    return transport_reply_text(text), True
 
 
 # エリア -> ページURL（そのまま流用）
@@ -9865,53 +9999,230 @@ def _debug_test_weather():
 
 @app.route("/healthz", methods=["GET", "HEAD"])
 def healthz():
-    # 必要なら軽い自己診断をここに追加可
-    return ("ok", 200, {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-store",
-    })
+    """Lightweight liveness probe used by staging/production."""
+
+    response = jsonify({"ok": True})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+def _git_metadata_for_readyz() -> dict:
+    info: dict[str, object] = {}
+
+    commit_env = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT")
+    branch_env = os.getenv("RENDER_GIT_BRANCH") or os.getenv("GIT_BRANCH")
+    if commit_env:
+        info["commit"] = commit_env
+    if branch_env:
+        info["branch"] = branch_env
+
+    env_name = app.config.get("ENV_NAME")
+    if env_name:
+        info["env"] = env_name
+
+    try:
+        here = Path(__file__).resolve().parent
+        repo_root = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=here,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+
+        if "commit" not in info:
+            commit = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=repo_root,
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+            if commit:
+                info["commit"] = commit
+
+        if "branch" not in info:
+            branch = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=repo_root,
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+            if branch:
+                info["branch"] = branch
+
+        dirty = subprocess.check_output(
+            ["git", "status", "--short"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        info["dirty"] = bool(dirty)
+    except Exception:
+        pass
+
+    if "dirty" not in info:
+        info["dirty"] = None
+
+    return info
+
+
+def _probe_writable(dirpath: Path) -> bool:
+    try:
+        dirpath.mkdir(parents=True, exist_ok=True)
+        probe = dirpath / ".readyz_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def _describe_mount(path: Path) -> dict[str, object]:
+    """Return mount information for ``path`` based on ``/proc/mounts``."""
+
+    info: dict[str, object] = {"path": str(path)}
+    try:
+        info["resolved_path"] = str(path.resolve())
+    except OSError:
+        info["resolved_path"] = str(path)
+
+    try:
+        mount_path = os.path.realpath(str(path))
+        best: tuple[str, str, str, str] | None = None
+        with open("/proc/mounts", "r", encoding="utf-8") as mounts:
+            for line in mounts:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                device, mount_point, fs_type, options = parts[:4]
+                mount_point_clean = mount_point.replace("\\040", " ")
+                if not mount_path.startswith(mount_point_clean.rstrip("/")) and mount_path != mount_point_clean:
+                    continue
+                if best is None or len(mount_point_clean) > len(best[1]):
+                    best = (device, mount_point_clean, fs_type, options)
+        if best:
+            device, mount_point_clean, fs_type, options = best
+            info.update(
+                {
+                    "device": device,
+                    "mount_point": mount_point_clean,
+                    "fs_type": fs_type,
+                    "options": options.split(",") if options else [],
+                }
+            )
+    except OSError:
+        pass
+
+    return info
+
 
 @app.route("/readyz", methods=["GET"])
 def readyz():
-    problems = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    details: dict[str, object] = {}
 
-    # Redis（レート制限などで使用している場合）
+    base_dir = Path(app.config.get("DATA_BASE_DIR", "/var/data"))
+    details["data_base_dir"] = str(base_dir)
+
+    if not base_dir.exists():
+        errors.append("data_base_dir:not_found")
+    elif not base_dir.is_dir():
+        errors.append("data_base_dir:not_directory")
+    elif not _probe_writable(base_dir):
+        errors.append("data_base_dir:not_writable")
+
+    pamphlet_dir = Path(
+        app.config.get("PAMPHLET_BASE_DIR", str(base_dir / "pamphlets"))
+    )
+    details["pamphlet_base_dir"] = str(pamphlet_dir)
+    pamphlet_count = 0
+    if not pamphlet_dir.exists():
+        warnings.append("pamphlet_base_dir:missing")
+    else:
+        try:
+            pamphlet_count = count_pamphlet_files()
+        except Exception as ex:  # pragma: no cover - defensive guard
+            warnings.append(f"pamphlet_scan:{ex}")
+        if pamphlet_count == 0:
+            warnings.append("pamphlet_base_dir:empty")
+    details["pamphlet_count"] = pamphlet_count
+    details["pamphlet_count_by_city"] = count_pamphlets_by_city()
+    details["fs_mount"] = _describe_mount(base_dir)
+
     try:
-        uri = app.config.get("RATE_STORAGE_URI")
+        uri = app.config.get("RATE_STORAGE_URL") or app.config.get("RATE_STORAGE_URI")
         if uri and uri not in ("memory://",):
             import redis  # pip install redis
+
             r = redis.from_url(uri)
             r.ping()
     except Exception as ex:
-        problems.append(f"redis:{ex}")
+        errors.append(f"redis:{ex}")
 
-    # DB（SQLAlchemyを使っている場合のみ）
     try:
         db = globals().get("db")
         if db:
-            # SQLAlchemy 2.x でも通るように text を使う
             try:
                 from sqlalchemy import text as _sql_text
+
                 db.session.execute(_sql_text("SELECT 1"))
             except Exception:
-                # SQLAlchemyを使っていない・未インストールでもここは素通り
                 db.session.execute("SELECT 1")
     except Exception as ex:
-        problems.append(f"db:{ex}")
+        errors.append(f"db:{ex}")
 
-    # mediaディレクトリに書き込めるか
-    import os, tempfile
     try:
-        mdir = app.config.get("MEDIA_DIR", ".")
-        os.makedirs(mdir, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=mdir, delete=True) as _:
+        media_dir = app.config.get("MEDIA_DIR", ".")
+        os.makedirs(media_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=media_dir, delete=True):
             pass
     except Exception as ex:
-        problems.append(f"media:{ex}")
+        errors.append(f"media:{ex}")
 
-    if problems:
-        return {"status": "degraded", "errors": problems}, 503
-    return {"status": "ready"}, 200
+    pamphlet_state = pamphlet_search.overall_state()
+    if pamphlet_state == "error":
+        errors.append("pamphlet_index:error")
+
+    flags: dict[str, object] = {}
+    flags["DATA_BASE_DIR"] = str(app.config.get("DATA_BASE_DIR", base_dir))
+    flags["PAMPHLET_BASE_DIR"] = str(app.config.get("PAMPHLET_BASE_DIR", pamphlet_dir))
+    flags["MIN_QUERY_CHARS"] = getattr(cfg, "MIN_QUERY_CHARS", None)
+    if hasattr(cfg, "ENABLE_ENTRIES_2CHAR"):
+        flags["ENABLE_ENTRIES_2CHAR"] = getattr(cfg, "ENABLE_ENTRIES_2CHAR")
+    try:
+        flags["EFFECTIVE_MIN_QUERY_CHARS"] = min_query_chars()
+    except Exception:
+        flags["EFFECTIVE_MIN_QUERY_CHARS"] = flags.get("MIN_QUERY_CHARS")
+
+    for key in ("ENABLE_MODEL_SWITCH", "ENABLE_PAMPHLET", "SAFE_MODE"):
+        if key in os.environ:
+            flags[key] = os.environ[key]
+        elif hasattr(cfg, key):
+            flags[key] = getattr(cfg, key)
+
+    status = "ok" if not errors else "error"
+    code = 200 if status == "ok" else 503
+
+    body = {
+        "ok": not errors,
+        "status": status,
+        "errors": errors,
+        "warnings": warnings,
+        "details": details,
+    }
+    details["pamphlet_index"] = pamphlet_state
+    details["flags"] = flags
+    response = jsonify(body)
+    response.status_code = code
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 
@@ -10368,6 +10679,19 @@ def _answer_from_data_txt(question: str) -> str:
         return ""
 
 # ② 例外を握ってログ＋フラッシュにして 500 を防ぐ
+@app.route("/admin/pamphlet-reindex", methods=["GET"])
+@login_required
+def admin_pamphlet_reindex():
+    if session.get("role") != "admin":
+        abort(403)
+    result = pamphlet_search.reindex_all()
+    return jsonify({
+        "status": "ok",
+        "result": result,
+        "pamphlet_index": pamphlet_search.overall_state(),
+    })
+
+
 @app.route("/admin/data_files", methods=["GET"])
 @login_required
 def admin_data_files():
@@ -10654,6 +10978,9 @@ def clean_query_for_search(question):
     return q.strip()
 
 def find_entry_info(question):
+    if is_too_short(question):
+        return []
+
     entries = load_entries()
     synonyms = load_synonyms()
     areas_master = ["五島市", "新上五島町", "宇久町", "小値賀町"]
@@ -10934,9 +11261,24 @@ def smart_search_answer_with_hitflag(question):
 @limit_deco(ASK_LIMITS)
 def ask():
     data = request.get_json(silent=True) or {}
-    question = data.get("question", "")
+    raw_question = data.get("question", "")
+    question = input_normalizer.normalize_user_query(raw_question)
     user_lat = data.get("lat")   # 追加（任意）
     user_lng = data.get("lng")   # 追加（任意）
+
+    guard_user = session.get("user_id") or request.remote_addr or "anon"
+    guard_reason = dupe_guard.evaluate_utterance(str(guard_user), question)
+    if guard_reason:
+        return jsonify({"answer": "", "hit_db": False, "meta": {"skipped": guard_reason}}), 202
+
+    if question:
+        dedupe_user = session.get("user_id") or request.remote_addr or "anon"
+        dedupe_key = f"web:{dedupe_user}:{question}"
+        if dupe_guard.seen_recent(dedupe_key):
+            return (
+                jsonify({"answer": "", "hit_db": False, "meta": {"duplicate": True}}),
+                202,
+            )
 
     # ① 天気
     weather_reply, weather_hit = get_weather_reply(question)
@@ -11008,19 +11350,8 @@ def _send_messages(event, messages):
 
     status = "noop"
     try:
-        rt = getattr(event, "reply_token", None)
-        if rt:
-            line_bot_api.reply_message(rt, messages)
-            status = "replied"
-        else:
-            tid = _line_target_id(event)
-            if tid:
-                if safe_push_line(tid, messages, label="send-messages"):
-                    status = "pushed"
-                else:
-                    status = "skipped"
-            else:
-                status = "noop"
+        result = emit_response(event, messages)
+        status = result if result in {"replied", "pushed", "disabled"} else "noop"
     except LineBotApiError as e:
         global LAST_SEND_ERROR, SEND_ERROR_COUNT
         SEND_ERROR_COUNT += 1
@@ -11107,7 +11438,7 @@ LINE_MAX_PER_REQUEST = 5  # 1リクエスト最大5メッセージ（※ LINE_SA
 def _split_for_messaging(text: str, chunk_size: int = None) -> List[str]:
     """長文を自然な区切り（段落→句点）で2〜複数通に分割。最低1通は返す。"""
     # 上位で定義済みの安全値を使う
-    lim = int(chunk_size) if chunk_size else int(globals().get("LINE_SAFE_CHARS", 3800))
+    lim = int(chunk_size) if chunk_size else int(globals().get("LINE_SAFE_CHARS", 3000))
     if not text:
         return [""]
     text = text.strip()
@@ -11149,10 +11480,11 @@ def _push_multi_by_id(target_id: str, texts, *, reqgen: int | None = None):
             if _was_sent_recent(target_id, ch, mark=False):
                 app.logger.info("skip dup push uid=%s", target_id)
                 continue
-            if safe_push_line(target_id, TextSendMessage(text=ch), label="async"):
+            try:
+                emit_response(target_id, TextSendMessage(text=ch), force_push=True)
                 _was_sent_recent(target_id, ch, mark=True)
-            else:
-                app.logger.info("skip push via safe_push_line uid=%s", target_id)
+            except LineBotApiError as e:
+                app.logger.warning("push error: %s", e)
                 return
             time.sleep(0.1)
 
@@ -11178,10 +11510,10 @@ def _compute_and_push_async(event, user_message: str, reqgen=None):
     except Exception as e:
         app.logger.exception("compute/push failed: %s", e)
         try:
-            safe_push_line(
+            emit_response(
                 target_id,
                 TextSendMessage(text="検索中にエラーが発生しました。もう一度お試しください。"),
-                label="async-error",
+                force_push=True,
             )
         except Exception:
             pass
@@ -11440,6 +11772,27 @@ def admin_unhit_save_text():
     # 返却（フロントでトースト表示などに利用）
     return jsonify({"ok": True, "filename": fname})
 # ===== ここまで ==============================================================
+
+
+def create_app() -> Flask:
+    global _APP_BOOTSTRAPPED
+    if not _APP_BOOTSTRAPPED:
+        _configure_data_paths(app)
+        if "admin_pamphlets" not in app.blueprints:
+            app.register_blueprint(admin_pamphlets_bp)
+        if "admin_rollback" not in app.blueprints:
+            app.register_blueprint(admin_rollback_bp)
+        pamphlet_search.configure(app.config)
+        try:
+            pamphlet_search.load_all()
+        except Exception:
+            app.logger.exception("[pamphlet] initial load failed")
+        _bootstrap_files_and_admin()
+        _APP_BOOTSTRAPPED = True
+    return app
+
+
+create_app()
 
 
 # メイン起動（重複禁止：これ1つだけ残す）

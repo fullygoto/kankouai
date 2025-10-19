@@ -2,8 +2,8 @@
 
 ## 概要
 
-五島列島の観光・生活情報をAIがLINEやWebで自動回答する、地域特化型のFAQ・サポートシステムです。
-登録された観光データやパンフレット情報、タグ・エリア指定で高精度な回答ができます。
+五島列島の観光・生活情報をAIがLINEやWebで自動回答する、地域特化型のFAQ・サポートシステムです。  
+登録された観光データやパンフレット情報、タグ・エリア指定で高精度な回答ができます。  
 管理画面からデータ登録・誤答補強・バックアップ・未ヒット抽出・類義語管理までノーコード運用可能！
 
 ---
@@ -15,9 +15,15 @@
 - 管理画面から観光DB登録・FAQ化・タグ・エリア・類義語追加OK
 - 未ヒット質問/頻出レポートでAIの回答精度をどんどん進化
 - 全体バックアップ＆ZIP復元、Dropboxバックアップ連携も対応可
+- Render 本番向けロールバック基盤（/var/data・DB・アプリコードの瞬時復元）
 - Github＋Render（無料枠）でノーコスト運用可能
 
+
 ---
+
+## ドキュメント
+
+- [応答仕様 v1.0 差分メモ](docs/response-spec-v1-notes.md)
 
 ## セットアップ
 
@@ -27,40 +33,203 @@
 pip install -r requirements.txt
 ```
 
-### 2. 主な環境変数（.env）
+### 2. パンフレット検索フォールバックの準備
 
-| 環境変数 | 既定値 | 説明 |
-| --- | --- | --- |
-| `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_CHANNEL_SECRET` | なし | LINE公式アカウントのチャネル情報。必須。 |
-| `DATA_BASE_DIR` | `.` | `entries.json` や AntiFlood SQLite を配置するルートディレクトリ。Render では `/var/data` 等を指定。 |
-| `ANTIFLOOD_TTL_SEC` | `180` | 「ユーザーID + メッセージID + 正規化テキスト」をキーにしたAntiFloodのTTL。再送イベントはTTL内なら自動で無視されます。 |
-| `REPLAY_GUARD_SEC` | `150` | この秒数より古いイベントを再生ガードとして破棄。遅延再送・リトライの暴走を防ぎます。 |
-| `RECENT_TEXT_TTL_SEC` | `min(ANTIFLOOD_TTL_SEC, 60)` | 同一本文の短時間連投を抑止するTTL。 |
-| `ENABLE_PUSH` | `true` | `false` の場合は push 送信を完全停止し、reply のみで運用します。 |
-| `ANTIFLOOD_REDIS_URL` / `REDIS_URL` | なし | Redis を使う場合は指定すると AntiFlood が Redis バックエンドを利用します。未設定時は `DATA_BASE_DIR/system/antiflood.sqlite` が使われます。 |
+市町別パンフレットを以下のディレクトリ構成で配置します（既定パスは`/var/data/pamphlets`）。
 
-> **メモ:** SQLite バックエンドは `DATA_BASE_DIR` 配下に `system/antiflood.sqlite` を自動生成します。Render では永続ボリューム上にこのディレクトリを置くことで、再起動後も冪等キーが保持されます。
-
-### 3. テスト実行
-
-AntiFlood や webhook の冪等性を検証する Pytest を同梱しています。デプロイ前に必ず実行してください。
-
-```bash
-pytest
+```
+{PAMPHLET_BASE_DIR}/
+  goto/         # 五島市
+  shinkamigoto/ # 新上五島町
+  ojika/        # 小値賀町
+  uku/          # 宇久町
 ```
 
-### 4. Render へのデプロイ手順
+各フォルダに UTF-8 のテキストファイル（1ファイル=1パンフレット）を配置してください。例：`history_guide_2025.txt`、`festivals.txt`。
 
-1. Render ダッシュボードで `DATA_BASE_DIR=/var/data` など永続ボリューム上のディレクトリを設定します。
-2. `ANTIFLOOD_TTL_SEC`・`REPLAY_GUARD_SEC`・`ENABLE_PUSH` を本番と同じ値で登録し、Redis を使う場合は `ANTIFLOOD_REDIS_URL` も追加します。
-3. Web サービスは 1 ワーカー運用が推奨です。APScheduler などを追加する場合も `scheduler.start()` は 1 度だけ呼び出す構成にしてください。
-4. デプロイ後に Render のログで `/callback` が即時 200 を返していること、重複 push が出ていないことを確認します。
-5. ステージング / 本番それぞれで LINE の開発者ツールを使い、同一メッセージ再送や遅延再送が無視されることを実機で確認します。
+### 3. 環境変数
 
-### 5. ロールバック方法
+主要な環境変数（パンフレット関連を含む）は次のとおりです。
 
-環境変数のみで制御できるため、緊急時は以下の手順で旧挙動に戻せます。
+| 変数名 | 既定値 | 説明 |
+| ------ | ------ | ---- |
+| `DATA_BASE_DIR` | `/var/data` | 永続ディスクのルートディレクトリ |
+| `PAMPHLET_BASE_DIR` | `/var/data/pamphlets` | パンフレットテキストの格納ルート |
+| `SEED_PAMPHLET_DIR` | `<repo>/seeds/pamphlets` | 初回起動時にコピーするシードデータ（任意） |
+| `ADMIN_TOKEN` | （空文字） | `/ops/backup/pamphlets` への保護用トークン。設定時は `X-Admin-Token` ヘッダで送信 |
+| `PAMPHLET_TOPK` | `3` | 要約に渡す上位チャンク数 |
+| `PAMPHLET_CHUNK_SIZE` | `1500` | チャンク長（文字数） |
+| `PAMPHLET_CHUNK_OVERLAP` | `200` | チャンク重複幅（文字数） |
+| `PAMPHLET_SESSION_TTL` | `1800` | 市町選択の保持時間（秒） |
+| `MAX_UPLOAD_MB` | `64` | アップロード可能なファイル上限（Flask `MAX_CONTENT_LENGTH` に反映） |
+| `PAMPHLET_EDIT_MAX_MB` | `2` | 管理画面でのテキスト編集時の保存上限（MB） |
+| `CITATION_MIN_CHARS` | `80` | 1ドキュメントに紐づく引用テキストの最小合計文字数。未満なら出典から除外 |
+| `CITATION_MIN_SCORE` | `0.15` | 検索スコア合算の下限。`CITATION_MIN_CHARS` を満たさなくてもスコアが基準を超えれば出典採用 |
+| `ANTIFLOOD_TTL_SEC` | `120` | 入力・出力の短時間重複を抑止するTTL（秒） |
+| `REPLAY_GUARD_SEC` | `150` | LINE webhook の遅延イベントを無視するしきい値（秒） |
+| `SUMMARY_STYLE` | `polite_long` | パンフレット要約の文体（`SUMMARY_MODE`=legacy用）。|
+| `SUMMARY_MIN_CHARS` | `550` | 通常コンテキスト時の要約下限文字数 |
+| `SUMMARY_MAX_CHARS` | `800` | 要約の上限文字数（句点で丸める） |
+| `SUMMARY_MIN_FALLBACK` | `300` | コンテキストが少ない場合の最低文字数 |
+| `SUMMARY_MODE` | `adaptive` | 回答長の自動調整モード。`adaptive`/`terse`/`long` を選択 |
+| `CONTROL_CMD_ENABLED` | `true` | 「停止」「解除」コマンドの有効/無効 |
+| `ENABLE_EVIDENCE_TOGGLE` | `true` | Web UI で根拠付き本文のトグルを表示するかどうか |
 
-1. `ENABLE_PUSH=false` にすると push 送信が全停止し、reply のみになります。
-2. `ANTIFLOOD_TTL_SEC=0` と `REPLAY_GUARD_SEC=0` を設定すると AntiFlood / 再生ガードが無効化されます（再試行時は重複応答が発生する点に注意）。
-3. 変更後に Render を再デプロイすると即座に反映されます。
+staging（Render ステージング）と production（本番）の差分既定値は以下の通りです。特に `DATABASE_URL`、レート制限ストレージ、画像保護の既定を本番向けに調整しています。
+
+| 変数名 | staging 既定 | production 既定 | 説明 |
+| ------ | ------------ | ---------------- | ---- |
+| `APP_ENV` | `staging` | `production` | Render サービスごとに指定。CI では staging でテストします。 |
+| `DATABASE_URL` | `sqlite:////var/data/kankouai_stg.db` | `sqlite:////var/data/kankouai.db` | `/var/data` の永続ディスク上に SQLite ファイルを作成します。 |
+| `MEDIA_ROOT` / `MEDIA_DIR` / `IMAGES_DIR` | `/var/data` | `/var/data` | 画像やアップロード資産を永続ディスク直下に保存します。 |
+| `PAMPHLET_BASE_DIR` | `/var/data/pamphlets` | `/var/data/pamphlets` | 初回起動時に自動でディレクトリを作成します。 |
+| `USERS_FILE` | `/var/data/users.json` | `/var/data/users.json` | 管理者アカウント情報の保存先。未存在時は自動生成されます。 |
+| `IMAGE_PROTECT` | `0` | `1` | 本番では署名付き URL + 透かしを既定で有効化します。 |
+| `LINE_SIGNATURE_CHECK` | `1` | `1` | LINE webhook の署名検証を常に有効化します。 |
+| `LINE_SAFE_CHARS` | `3000` | `3000` | 1 メッセージあたりの安全な文字数上限。 |
+| `LINE_SINGLE_REPLY` | `1` | `1` | 応答を 1 通にまとめる運用に合わせた既定値。 |
+| `LINE_ASK_AREA_FIRST` | `1` | `1` | エリア特定を優先するクイックリプライを既定有効化。 |
+| `ASK_LIMITS` | `10/minute,200/day` | `10/minute,200/day` | 逗点・セミコロン区切りで複数レート制限を指定可能です（`.env` ではクォート推奨）。 |
+| `RATE_STORAGE_URI` | `memory://` | `redis://...`（`RATE_STORAGE_URL`/`REDIS_URL` が設定されていれば自動採用、未設定時は `memory://` + 警告） | レート制限の共有ストレージ。 |
+| `SESSION_COOKIE_SECURE` | `1` | `1` | HTTPS 前提でセキュアクッキーを強制します。 |
+| `TRUSTED_PROXY_HOPS` | `2` | `2` | Render のリバースプロキシ段数に合わせた既定値。 |
+
+アップロードは 64MB まで受け付けますが、ブラウザからの編集保存は軽量テキスト運用を想定して 2MB で上限判定します。
+
+- `/var/data/pamphlets` が空の場合は `seeds/pamphlets` 配下の初期データを自動コピーします。既存の `pamphlets/`、`data/pamphlets/`、`static/pamphlets/` にある `.txt` は初回起動時に `/var/data/pamphlets` へ移行されます。
+- `/var/data` および `/var/data/pamphlets` は起動時に自動作成され、Render の Persistent Disk にマウントしておけば再デプロイ後も保持されます。
+- `users.json` が存在しない場合は `ADMIN_INIT_PASSWORD` で指定したパスワードの管理者を作成します。環境変数が未設定でもランダムな「工場出荷」アカウントを生成し、初期認証情報を `<users.json>.init` に出力するため、必ず管理 UI にログインできます。
+
+### 5. 出典ラベル付きRAG応答
+
+- RAGの自動要約は、利用した文脈ごとに `[[1]]` のようなラベルを本文各文末に付与します。
+- 表示時はラベルを除去した本文と、トグルで確認できるラベル付き本文を同時に生成します。
+- 出典欄には実際に本文で参照したドキュメントだけが並び、`CITATION_MIN_CHARS` / `CITATION_MIN_SCORE` の閾値で自動的にフィルタリングされます。
+- しきい値を下げると出典が増え、上げるとノイズを抑えられます。運用環境に合わせて `.env` で調整してください。
+- LLMがラベルを生成できなかった場合は本文末尾に注意書きが自動で追加され、出典表示は非表示になります。
+- `SUMMARY_MODE=adaptive` にすると質問意図から short/medium/long を自動選択し、2〜4文から最大800字まで出し分けます。
+
+---
+
+## ロールバック / バックアップ運用
+
+Render の本番環境で "失敗したら即時復元" を実現するための自動スナップショットとロールバック機構を搭載しています。詳細な手順・SLA は `docs/runbook.md` を参照してください。ここではサマリのみ記載します。
+
+### コマンドライン
+
+- 事前バックアップ: `scripts/backup_all.sh --notes "deploy YYYYMMDD"`
+- 最新スナップショットへ復元: `scripts/restore_all.sh --reason manual`
+- カナリアヘルスチェック: `python -m manage.rollback canary --snapshot <ID>`
+
+### 管理UI
+
+`/admin/rollback`（管理IP + ログイン必須）に復元ボタンと履歴一覧を追加しました。二段階確認とCSRF対策を兼ね備えています。
+
+### API / CLI
+
+- CLI: `python -m manage.rollback restore --snapshot <ID>`
+- API: `POST /admin/rollback/api/restore {"snapshot_id": "..."}`
+
+### 主要環境変数
+
+| 変数名 | 既定値 | 説明 |
+| ------ | ------ | ---- |
+| `DATA_BASE_DIR` | `/var/data` | ユーザーデータ領域（tar.gz でスナップショット） |
+| `BACKUP_DIR` | `/var/tmp/backup` | スナップショットの保存先 |
+| `BACKUP_RETENTION` | `14` | 保存世代数。超過分は自動削除 |
+| `ROLLBACK_READY_TIMEOUT_SEC` | `90` | カナリア監視のタイムアウト |
+| `ROLLBACK_READY_INTERVAL_SEC` | `10` | ヘルスチェックのポーリング間隔 |
+| `ROLLBACK_CANARY_ENABLED` | `true` | カナリア自動実行の有効/無効 |
+| `ALLOW_ADMIN_ROLLBACK_IPS` | `` | 管理UI/APIにアクセスできるCIDR（カンマ区切り） |
+
+Render のデプロイ前にはバックアップを取得し、デプロイ後はカナリアが `/readyz` を監視します。NG の場合は自動で直前スナップショットへ巻き戻します。
+
+### 6. 入力ガードと自動返信抑止
+
+- `ANTIFLOOD_TTL_SEC` で指定した期間は、同一ユーザーの空入力・極端に短い入力・直前と同一内容を自動的に無視します。
+- 送信済み応答のハッシュも同じTTLでキャッシュし、障害時の重複送信や無限ループを抑止します。
+- `/tests/smoke/rag_demo.py` を実行すると、ラベル付き要約から出典抽出までの一連の流れをダミーデータで確認できます。
+
+### 4. インデックス再構築
+
+パンフレットを追加・更新した際は、管理画面から `GET /admin/pamphlet-reindex` を呼び出すと全市町分のインデックスを再構築します。レスポンスには各市町のビルド結果が含まれます。 `/readyz` でも `pamphlet_index` の状態（`ready`/`empty`/`error` など）を確認できます。
+
+### 5. 管理画面でのパンフレット運用
+
+- `/admin/pamphlets` から市町ごとのテキストファイルを一覧・削除・アップロードできます（`.txt` のみ）。
+- 「再インデックス」ボタンを押すと `/admin/pamphlet-reindex` が呼び出され、結果がトースト表示されます。
+- Render 運用では Persistent Disk（例: 10GB）を `/var/data` にマウントし、環境変数 `PAMPHLET_BASE_DIR=/var/data/pamphlets` を指定してください。`pamphlets` フォルダ配下に各市町フォルダが自動作成されます。デプロイ手順は `docs/release_checklist.md` も参照してください。
+
+### 7. ヘルスチェックエンドポイント
+
+- `/readyz` では次の JSON を返します。CI で green のコミットが本番に反映されているかを確認する際に使用してください。
+
+```json
+{
+  "status": "ready",
+  "pamphlet_index": "ready",
+  "pamphlet_index_status": {"goto": {"state": "ready"}, ...},
+  "build": {
+    "commit": "<Git SHA>",
+    "branch": "develop",
+    "env": "production"
+  }
+}
+```
+
+- `commit` / `branch` は Render の `RENDER_GIT_*` 環境変数または Git リポジトリから自動取得されます。`status` が `degraded` の場合は `errors` 配列に原因が格納されます。
+
+### 6. LINE 応答での挙動
+
+- 市町が特定できない質問には一度だけ次のクイックリプライを提示します。
+  - 「五島市」「新上五島町」「小値賀町」「宇久町」
+- 回答末尾には「出典（パンフレット名）」が付与されます。
+- 追加情報が必要な場合は、ユーザーが「もっと詳しく」を選ぶと詳細要約を再提示します。
+- LINE 停止/再開コマンド（「停止」「停止 60分」「解除」「再開」など）は SQLite でユーザー単位に永続化されます。
+  - 既定の保存先は `/var/data/system/user_state.sqlite` です。存在しない場合は自動作成されます。
+  - コントロールの既定 TTL は `PAUSE_DEFAULT_TTL_SEC=86400`（24時間）で、メッセージ内の `60分`、`2h`、`1日` といった表記で上書きできます。
+  - 環境変数 `CONTROL_CMD_ENABLED=true` のときに有効化されます。無効化すると旧挙動（ファイルフラグ）のみで動作します。
+  - 管理者が `/admin/line/resume` を実行すると、保存済みの停止状態が全ユーザー分クリアされます。
+- テストで制御コマンドの挙動を確認する場合は `pytest tests/test_control_commands.py tests/test_control_flow.py -q` を実行してください。
+- ログには制御コマンドの状態遷移が `CTRL action=...`、状態確認が `STATE uid=...` 形式で出力されます。`解除` 直後に `STATE ... is_paused=False` が記録されているかで即時復帰を確認できます。
+
+### 8. ルーティングとロギング
+
+- ルーティングは `special → tourism → pamphlet → no_answer` の優先順で判定され、決定後のフォールバック実行は行いません。
+- 特殊ハンドラ（天気・運行状況など）がヒットした場合は `ROUTE=special` がログに出力されます。観光DBヒット時は `ROUTE=tourism`、パンフレット回答時は `ROUTE=pamphlet`、いずれも未ヒットの場合は `ROUTE=no_answer` で記録されます。
+- パンフレット回答では `CITATIONS=[{doc_id,title}]` が INFO ログに出力され、利用した出典のみが列挙されます。
+- AntiFlood の判定結果は `ANTIFLOOD key=<...> hit=<true|false>` としてログに残るため、意図しない抑止が発生していないか確認できます。
+
+## テスト
+
+開発中は最低限下記の Pytest を通してください。パンフレットまわりは OpenAI API キーなしでもフォールバックで動作します。
+
+```bash
+pytest tests/test_routing_priority.py \
+       tests/test_citations_guard.py \
+       tests/test_summary_length.py \
+       tests/test_controls_antiflood.py \
+       tests/test_admin_smoke.py
+```
+
+管理画面や既存の制御コマンドの回帰を一括で確認したい場合は `pytest` を無引数で実行してください。
+
+## デプロイ手順（ステージング→本番）
+
+1. ステージング環境で `pytest` を全件実行し緑化する。
+2. ステージングの Render サービスをデプロイし、以下の手動スモークを実施する。
+   - `/healthz` と `/readyz` が 200/`ready` を返すこと。
+   - LINE 実機で「停止 2分 → 解除 → 通常発話」が即時復帰すること。
+   - 「今日の天気」「〇〇（観光地名）」で special/tourism が優先されること。
+   - 「もっと詳しく」でパンフレット要約が 300〜800 字で返り、出典が利用分のみ表示されること。
+   - 管理画面で観光データ CRUD、パンフレット登録/更新/検索、バックアップ ZIP/URL 復元、設定画面、ログ/未ヒット一覧が正常に動作すること。
+3. `develop` を `main` にマージし、本番 Render をカナリア（ワーカー1）でデプロイする。
+4. カナリアで上記スモークを再実施し、15分程度ログの `ROUTE`/`CTRL`/`CITATIONS`/`ANTIFLOOD` を監視する。
+5. 問題なければワーカー数を通常値に戻し本番リリース完了。
+6. 安定稼働を確認したら `release/YYYYmmdd-HHMM` 形式でタグを作成し、`main` の対象コミットに push してください（例: `git tag release/20250318-1200 && git push origin release/20250318-1200`）。
+
+### ロールバック
+
+- Render の直前リリース（前バージョン）へ即時ロールバックできるよう、デプロイ履歴と Git コミットを事前確認しておきます。
+- DB スキーマ変更を行う場合は後方互換を維持するか、ダウングレード手順を本 README に追記してください。
+- LINE 公式アカウントの応答設定（あいさつ／自動返信 OFF）や `.env` のキー差異も、本番反映前に確認します。

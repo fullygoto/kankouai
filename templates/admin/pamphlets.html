@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>パンフレットテキスト管理</title>
+  <style>
+    :root{
+      --bg:#f6faf9; --panel:#fff; --muted:#64748b; --line:#e5e7eb; --brand:#2a8ed8;
+      --danger:#dc2626;
+    }
+    *{box-sizing:border-box}
+    body{font-family:'Segoe UI','メイリオ',sans-serif;background:var(--bg);margin:0}
+    .container{background:#fff;padding:26px 28px;margin:38px auto;max-width:1180px;border-radius:17px;box-shadow:0 4px 20px #b7d3e04d}
+    h1{margin:0 0 18px;font-size:22px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px 10px;border-bottom:1px solid var(--line);font-size:14px}
+    th{text-align:left;background:#f2f5fb}
+    td.actions{text-align:center;white-space:nowrap}
+    .nav{margin-bottom:18px}
+    .nav a{margin-right:16px;font-size:1em;color:var(--brand);text-decoration:none;font-weight:500}
+    .nav a:hover{text-decoration:underline}
+    form.inline{display:inline}
+    .grid{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+    .panel{flex:1 1 520px;background:#fff}
+    .panel h2{font-size:18px;margin:16px 0 12px}
+    .panel-body{padding:0 6px 20px}
+    .panel-actions{margin-top:24px;padding-top:6px;border-top:1px solid var(--line)}
+    .btn{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 12px;border-radius:6px;border:1px solid var(--line);background:#fff;cursor:pointer;font-size:13px}
+    .btn:hover{background:#f9fafb}
+    .btn.danger{color:#fff;background:var(--danger);border-color:var(--danger)}
+    .btn.primary{background:var(--brand);color:#fff;border-color:var(--brand)}
+    .form-grid{display:grid;gap:8px}
+    label{font-weight:600;margin-right:8px}
+    select{height:32px;border-radius:6px;border:1px solid var(--line);padding:0 8px}
+    input[type="file"]{font-size:14px}
+    .monospace{font-family:'SFMono-Regular','Consolas','Menlo','Courier New',monospace}
+    .file-link{color:inherit;text-decoration:none}
+    .file-link:hover{text-decoration:underline;color:var(--brand)}
+    tr.is-active{background:#eef6ff}
+    tr.is-active td{border-bottom-color:#d0e6ff}
+    .preview-card{padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:#f9fbfe}
+    #preview-info{font-size:14px;color:#0f172a}
+    #preview-info strong{display:block;font-size:16px;margin-bottom:6px;word-break:break-all}
+    #preview-text{white-space:pre-wrap;word-break:break-word;max-height:480px;overflow:auto;margin:12px 0 0;padding:12px;border:1px solid var(--line);border-radius:8px;background:#fff}
+    #preview-status{color:var(--muted);font-size:13px;margin-top:8px}
+    .muted{color:var(--muted)}
+    .actions .btn{margin:0 2px}
+    @media (max-width: 880px){
+      .panel{flex:1 1 100%}
+      #preview-text{max-height:360px}
+    }
+    @media (max-width: 720px){
+      .container{margin:18px auto;padding:20px 16px}
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    {% include '_back_to_data.html' %}
+    {% include '_admin_nav.html' %}
+    <h1>パンフレットテキスト管理</h1>
+
+    <form method="get" action="{{ url_for('pamphlets_admin.pamphlets_index') }}" style="margin-bottom:16px;">
+      <label for="pamphlet-city">市町</label>
+      <select id="pamphlet-city" name="city" onchange="this.form.submit()">
+        {% for slug, label in cities.items() %}
+          <option value="{{ slug }}" {% if slug == city %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </form>
+
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-body">
+          <h2>ファイル一覧（{{ cities[city] }}）</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>名前</th>
+                <th style="text-align:right;">サイズ</th>
+                <th>更新日時</th>
+                <th style="text-align:center;">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for f in files %}
+              <tr data-name="{{ f.name }}">
+                <td>
+                  <a href="#" class="file-link" data-name="{{ f.name }}">{{ f.name }}</a>
+                </td>
+                <td style="text-align:right;">{{ (f.size / 1024)|round(1) }} KB</td>
+                <td>{{ f.mtime.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td class="actions">
+                  <a class="btn" href="{{ url_for('pamphlets_admin.pamphlets_edit', city=city, name=f.name) }}">編集</a>
+                  <form method="post" action="{{ url_for('pamphlets_admin.pamphlets_delete') }}" class="inline" style="display:inline-block;">
+                    <input type="hidden" name="city" value="{{ city }}">
+                    <input type="hidden" name="name" value="{{ f.name }}">
+                    <button type="submit" class="btn danger">削除</button>
+                  </form>
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="4" style="text-align:center;">ファイルがありません</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+
+          <div class="panel-actions">
+            <h2>アップロード</h2>
+            <form method="post" enctype="multipart/form-data" action="{{ url_for('pamphlets_admin.pamphlets_upload') }}" class="form-grid">
+              <input type="hidden" name="city" value="{{ city }}">
+              <input type="file" name="file" accept=".txt" required>
+              <button type="submit" class="btn">アップロード</button>
+            </form>
+
+            <h2>インデックス</h2>
+            <form method="post" action="{{ url_for('pamphlets_admin.pamphlets_reindex') }}">
+              <input type="hidden" name="city" value="{{ city }}">
+              <button type="submit" class="btn">実行</button>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" style="flex:1 1 380px;">
+        <div class="panel-body">
+          <h2>プレビュー</h2>
+          <div class="preview-card">
+            <div id="preview-info" class="muted">ファイルを選択してください。</div>
+            <div id="preview-actions" style="margin-top:12px;display:none;gap:8px;align-items:center;">
+              <a id="preview-edit" class="btn primary" href="#">全文を開く（編集）</a>
+            </div>
+            <pre id="preview-text" class="monospace muted">(ここにプレビューが表示されます)</pre>
+            <div id="preview-status"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script>
+    const city = {{ city|tojson }};
+    const viewUrl = {{ url_for('pamphlets_admin.pamphlets_view')|tojson }};
+    const editBase = {{ url_for('pamphlets_admin.pamphlets_edit')|tojson }};
+    const previewText = document.getElementById('preview-text');
+    const previewInfo = document.getElementById('preview-info');
+    const previewStatus = document.getElementById('preview-status');
+    const previewEdit = document.getElementById('preview-edit');
+    const previewActions = document.getElementById('preview-actions');
+    const rows = document.querySelectorAll('tbody tr[data-name]');
+
+    function setActiveRow(name) {
+      rows.forEach((row) => {
+        if (row.dataset.name === name) {
+          row.classList.add('is-active');
+        } else {
+          row.classList.remove('is-active');
+        }
+      });
+    }
+
+    function formatBytes(bytes) {
+      if (bytes < 1024) {
+        return bytes + ' B';
+      }
+      const kb = bytes / 1024;
+      if (kb < 1024) {
+        return kb.toFixed(1) + ' KB';
+      }
+      const mb = kb / 1024;
+      return mb.toFixed(2) + ' MB';
+    }
+
+    function showLoading(name) {
+      setActiveRow(name);
+      previewInfo.innerHTML = '<strong>' + name + '</strong><span class="muted">読み込み中...</span>';
+      previewText.textContent = '';
+      previewText.classList.add('muted');
+      previewStatus.textContent = '';
+      previewActions.style.display = 'none';
+    }
+
+    function showError(message) {
+      previewInfo.innerHTML = '<span class="muted">エラーが発生しました。</span>';
+      previewText.textContent = '';
+      previewText.classList.add('muted');
+      previewStatus.textContent = message;
+      previewActions.style.display = 'none';
+    }
+
+    function updatePreview(data) {
+      previewInfo.innerHTML = '<strong>' + data.name + '</strong>' +
+        '<span class="muted">' + formatBytes(data.size) + ' ／ 更新: ' +
+        new Date(data.mtime * 1000).toLocaleString('ja-JP') + '</span>';
+      previewText.textContent = data.text;
+      previewText.classList.remove('muted');
+      previewStatus.textContent = data.truncated ? '200KB までを表示しています。全文は「編集」で確認してください。' : '';
+      if (data.truncated) {
+        previewActions.style.display = 'flex';
+        previewEdit.href = editBase + '?city=' + encodeURIComponent(city) + '&name=' + encodeURIComponent(data.name);
+      } else {
+        previewActions.style.display = 'none';
+      }
+    }
+
+    function loadPreview(name) {
+      if (!name) return;
+      showLoading(name);
+      fetch(viewUrl + '?city=' + encodeURIComponent(city) + '&name=' + encodeURIComponent(name), {
+        headers: {'Accept': 'application/json'}
+      })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('プレビューの取得に失敗しました。');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          if (data.error) {
+            throw new Error(data.error);
+          }
+          updatePreview(data);
+        })
+        .catch((error) => {
+          showError(error.message);
+        });
+    }
+
+    document.querySelectorAll('.file-link').forEach((link) => {
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        loadPreview(link.dataset.name);
+      });
+    });
+  </script>
+</body>
+</html>
