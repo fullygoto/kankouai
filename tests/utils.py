@@ -1,9 +1,9 @@
 import contextlib
-import contextlib
 import importlib.util
 import sys
 import types
 import uuid
+from functools import wraps
 from pathlib import Path
 
 
@@ -14,10 +14,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def load_test_app(monkeypatch, tmp_path, extra_env=None):
     env = {
         "DATA_BASE_DIR": str(tmp_path),
+        "MEDIA_ROOT": str(tmp_path / "media"),
+        "MEDIA_DIR": str(tmp_path / "media"),
+        "IMAGES_DIR": str(tmp_path / "media"),
+        "WATERMARK_DIR": str(tmp_path / "watermarks"),
         "DEDUPE_ON_SAVE": "0",
         "DEDUPE_USE_AI": "0",
         "ADMIN_IP_ENFORCE": "0",
         "CSRF_STRICT": "0",
+        "APP_ENV": "staging",
     }
     if extra_env:
         for key, value in extra_env.items():
@@ -38,6 +43,20 @@ def load_test_app(monkeypatch, tmp_path, extra_env=None):
                 pass
 
         sys.modules["openai"] = types.SimpleNamespace(OpenAI=_StubOpenAI)
+
+    # Flask-Login を常にスタブ化してテスト内で簡易ログイン制御できるようにする
+    from flask import abort, session  # type: ignore
+
+    def _login_required_stub(view_func):
+        @wraps(view_func)
+        def _wrapped(*args, **kwargs):
+            if not session.get("role"):
+                return abort(403)
+            return view_func(*args, **kwargs)
+
+        return _wrapped
+
+    sys.modules["flask_login"] = types.SimpleNamespace(login_required=_login_required_stub)
 
     if "linebot" not in sys.modules:
         linebot_module = types.ModuleType("linebot")

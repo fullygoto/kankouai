@@ -15,8 +15,10 @@ def _normalize_path(value: str | os.PathLike[str]) -> Path:
 
 
 def default_data_base_dir(app_env: str | None) -> Path:
+    """Return the default persistent data directory for the environment."""
+
     env = (app_env or os.environ.get("APP_ENV") or "").lower()
-    if env == "production":
+    if env in {"production", "prod", "staging", "stage"}:
         return Path("/var/data")
     return Path("./data")
 

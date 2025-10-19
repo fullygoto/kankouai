@@ -49,7 +49,7 @@ pip install -r requirements.txt
 
 ### 3. 環境変数
 
-パンフレット検索に関する主な環境変数は次のとおりです。
+主要な環境変数（パンフレット関連を含む）は次のとおりです。
 
 | 変数名 | 既定値 | 説明 |
 | ------ | ------ | ---- |
@@ -75,9 +75,30 @@ pip install -r requirements.txt
 | `CONTROL_CMD_ENABLED` | `true` | 「停止」「解除」コマンドの有効/無効 |
 | `ENABLE_EVIDENCE_TOGGLE` | `true` | Web UI で根拠付き本文のトグルを表示するかどうか |
 
+staging（Render ステージング）と production（本番）の差分既定値は以下の通りです。特に `DATABASE_URL`、レート制限ストレージ、画像保護の既定を本番向けに調整しています。
+
+| 変数名 | staging 既定 | production 既定 | 説明 |
+| ------ | ------------ | ---------------- | ---- |
+| `APP_ENV` | `staging` | `production` | Render サービスごとに指定。CI では staging でテストします。 |
+| `DATABASE_URL` | `sqlite:////var/data/kankouai_stg.db` | `sqlite:////var/data/kankouai.db` | `/var/data` の永続ディスク上に SQLite ファイルを作成します。 |
+| `MEDIA_ROOT` / `MEDIA_DIR` / `IMAGES_DIR` | `/var/data` | `/var/data` | 画像やアップロード資産を永続ディスク直下に保存します。 |
+| `PAMPHLET_BASE_DIR` | `/var/data/pamphlets` | `/var/data/pamphlets` | 初回起動時に自動でディレクトリを作成します。 |
+| `USERS_FILE` | `/var/data/users.json` | `/var/data/users.json` | 管理者アカウント情報の保存先。未存在時は自動生成されます。 |
+| `IMAGE_PROTECT` | `0` | `1` | 本番では署名付き URL + 透かしを既定で有効化します。 |
+| `LINE_SIGNATURE_CHECK` | `1` | `1` | LINE webhook の署名検証を常に有効化します。 |
+| `LINE_SAFE_CHARS` | `3000` | `3000` | 1 メッセージあたりの安全な文字数上限。 |
+| `LINE_SINGLE_REPLY` | `1` | `1` | 応答を 1 通にまとめる運用に合わせた既定値。 |
+| `LINE_ASK_AREA_FIRST` | `1` | `1` | エリア特定を優先するクイックリプライを既定有効化。 |
+| `ASK_LIMITS` | `10/minute,200/day` | `10/minute,200/day` | 逗点・セミコロン区切りで複数レート制限を指定可能です（`.env` ではクォート推奨）。 |
+| `RATE_STORAGE_URI` | `memory://` | `redis://...`（`RATE_STORAGE_URL`/`REDIS_URL` が設定されていれば自動採用、未設定時は `memory://` + 警告） | レート制限の共有ストレージ。 |
+| `SESSION_COOKIE_SECURE` | `1` | `1` | HTTPS 前提でセキュアクッキーを強制します。 |
+| `TRUSTED_PROXY_HOPS` | `2` | `2` | Render のリバースプロキシ段数に合わせた既定値。 |
+
 アップロードは 64MB まで受け付けますが、ブラウザからの編集保存は軽量テキスト運用を想定して 2MB で上限判定します。
 
 - `/var/data/pamphlets` が空の場合は `seeds/pamphlets` 配下の初期データを自動コピーします。既存の `pamphlets/`、`data/pamphlets/`、`static/pamphlets/` にある `.txt` は初回起動時に `/var/data/pamphlets` へ移行されます。
+- `/var/data` および `/var/data/pamphlets` は起動時に自動作成され、Render の Persistent Disk にマウントしておけば再デプロイ後も保持されます。
+- `users.json` が存在しない場合は `ADMIN_INIT_PASSWORD` で指定したパスワードの管理者を作成します。環境変数が未設定でもランダムな「工場出荷」アカウントを生成し、初期認証情報を `<users.json>.init` に出力するため、必ず管理 UI にログインできます。
 
 ### 5. 出典ラベル付きRAG応答
 
