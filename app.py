@@ -7698,6 +7698,35 @@ def admin_entries_edit():
         getl = request.form.getlist
         allow_empty = (request.form.get("allow_empty") == "1")
 
+        allowed_keys = {
+            "row_id[]",
+            "category[]",
+            "title[]",
+            "desc[]",
+            "address[]",
+            "map[]",
+            "tags[]",
+            "areas[]",
+            "tel[]",
+            "holiday[]",
+            "open_hours[]",
+            "parking[]",
+            "parking_num[]",
+            "payment[]",
+            "remark[]",
+            "links[]",
+            "allow_empty",
+            "deleted_row_ids[]",
+        }
+        unexpected_keys = sorted({k for k in request.form.keys() if k not in allowed_keys})
+        if unexpected_keys:
+            flash("未対応のフィールドが含まれています: " + ", ".join(unexpected_keys))
+            return _render_page(422)
+
+        if not request.form:
+            flash("保存対象データが送信されませんでした")
+            return _render_page(422)
+
         row_ids       = getl("row_id[]")            # ★ hidden（未導入なら空配列）
         cats          = getl("category[]")
         titles        = getl("title[]")
@@ -7714,64 +7743,173 @@ def admin_entries_edit():
         payments      = getl("payment[]")
         remarks       = getl("remark[]")
         links_list    = getl("links[]")            # テンプレに無ければ空で来るのでOK
+        deleted_raw   = getl("deleted_row_ids[]")
+
+        has_stable_row_ids = any((rid or "").strip() for rid in row_ids)
 
         def _safe(lst, i):  # インデックス安全取得
             return lst[i] if i < len(lst) else ""
 
-        # いずれかの最大長で回す（テンプレ列ズレの保険）
-        n = max(len(titles), len(descs), len(cats), len(addresses), len(areas_list))
+        delete_indices: set[int] = set()
+        invalid_delete: list[str] = []
+        for raw in deleted_raw:
+            rid = (raw or "").strip()
+            if not rid:
+                continue
+            if not rid.isdigit():
+                invalid_delete.append(rid)
+                continue
+            idx = int(rid)
+            if not (0 <= idx < len(old_entries)):
+                invalid_delete.append(rid)
+                continue
+            delete_indices.add(idx)
+        if invalid_delete:
+            flash("削除対象IDが不正です: " + ", ".join(sorted(set(invalid_delete))))
+            return _render_page(422)
 
-        new_entries = []
+        lengths = [
+            len(row_ids), len(cats), len(titles), len(descs), len(addresses), len(maps),
+            len(tags_list), len(areas_list), len(tels), len(holidays), len(opens),
+            len(parkings), len(parking_nums), len(payments), len(remarks), len(links_list),
+        ]
+        n = max(lengths) if lengths else 0
+
+        updates: dict[int, dict] = {}
+        touched_indices: set[int] = set()
+        created_entries: list[dict] = []
+        row_errors: list[str] = []
+
         for i in range(n):
+            rid_raw = (_safe(row_ids, i) or "").strip()
+            existing_idx: int | None = None
+            base: dict[str, Any] = {}
+
+            if rid_raw:
+                if rid_raw.isdigit():
+                    j = int(rid_raw)
+                    if 0 <= j < len(old_entries):
+                        existing_idx = j
+                        base = dict(old_entries[j])  # 未表示フィールド保持
+                    else:
+                        row_errors.append(f"row_id {rid_raw} が既存データの範囲外です")
+                        continue
+                else:
+                    row_errors.append(f"row_id '{rid_raw}' が数値ではありません")
+                    continue
+            elif (not has_stable_row_ids) and i < len(old_entries):
+                existing_idx = i
+                base = dict(old_entries[i])
+
+            if existing_idx is not None:
+                if existing_idx in delete_indices:
+                    row_errors.append(f"row_id {existing_idx} は削除指定と衝突しています")
+                    continue
+                if existing_idx in touched_indices:
+                    row_errors.append(f"row_id {existing_idx} が重複しています")
+                    continue
+                touched_indices.add(existing_idx)
+            else:
+                base = {}
+
             title = (_safe(titles, i) or "").strip()
             desc  = (_safe(descs,  i) or "").strip()
+            address_raw = _safe(addresses, i)
+            map_raw = _safe(maps, i)
+            tags = _split_lines_commas(_safe(tags_list,  i))
+            areas = _split_lines_commas(_safe(areas_list, i))
+            links = _split_lines_commas(_safe(links_list,  i))
+            payments_row = _split_lines_commas(_safe(payments,   i))
+            tel_raw = _safe(tels, i)
+            holiday_raw = _safe(holidays, i)
+            open_raw = _safe(opens, i)
+            parking_raw = _safe(parkings, i)
+            parking_num_raw = _safe(parking_nums, i)
+            remark_raw = _safe(remarks, i)
 
-            # 完全空行はスキップ（従来互換）
-            if not title and not desc:
+            def _has_text(value: str | None) -> bool:
+                return bool((value or "").strip())
+
+            has_any_value = any([
+                title,
+                desc,
+                _has_text(address_raw),
+                _has_text(map_raw),
+                bool(tags),
+                bool(areas),
+                _has_text(tel_raw),
+                _has_text(holiday_raw),
+                _has_text(open_raw),
+                _has_text(parking_raw),
+                _has_text(parking_num_raw),
+                bool(payments_row),
+                _has_text(remark_raw),
+                bool(links),
+            ])
+
+            if not has_any_value:
+                if existing_idx is not None:
+                    row_errors.append(
+                        f"row_id {existing_idx} の行が空です。削除する場合は削除ボタンを使用してください。"
+                    )
                 continue
-
-            # 既存行にマッピング：row_id が数字ならそれを優先
-            base = {}
-            rid = (_safe(row_ids, i) or "").strip()
-            if rid.isdigit():
-                j = int(rid)
-                if 0 <= j < len(old_entries):
-                    base = dict(old_entries[j])   # ← 未表示フィールドを保持
-            elif i < len(old_entries):
-                # row_id 未導入テンプレ互換：同じインデックスをベースに（後方互換）
-                base = dict(old_entries[i])
 
             # フォーム値で上書き（空文字は“クリア”として反映）
             base["category"]     = (_safe(cats, i) or "観光").strip() or "観光"
             base["title"]        = title
             base["desc"]         = desc
-            base["address"]      = _safe(addresses, i)
-            base["map"]          = _safe(maps, i)
+            base["address"]      = address_raw
+            base["map"]          = map_raw
 
             # 配列系はユーティリティで正規化
-            base["tags"]         = _split_lines_commas(_safe(tags_list,  i))
-            base["areas"]        = _split_lines_commas(_safe(areas_list, i))
-            base["links"]        = _split_lines_commas(_safe(links_list,  i))
-            base["payment"]      = _split_lines_commas(_safe(payments,   i))
+            base["tags"]         = tags
+            base["areas"]        = areas
+            base["links"]        = links
+            base["payment"]      = payments_row
 
-            base["tel"]          = _safe(tels, i)
-            base["holiday"]      = _safe(holidays, i)
-            base["open_hours"]   = _safe(opens, i)
-            base["parking"]      = _safe(parkings, i)
-            base["parking_num"]  = _safe(parking_nums, i)
-            base["remark"]       = _safe(remarks, i)
-
-            # ★ 触らない＝保持：images/image/thumb/wm_external_choice/lat/lng/place_id/gmaps_share_url/extras 等
+            base["tel"]          = tel_raw
+            base["holiday"]      = holiday_raw
+            base["open_hours"]   = open_raw
+            base["parking"]      = parking_raw
+            base["parking_num"]  = parking_num_raw
+            base["remark"]       = remark_raw
 
             e = _norm_entry(base)
 
-            new_entries.append(e)
+            if existing_idx is not None:
+                updates[existing_idx] = e
+            else:
+                created_entries.append(e)
+
+        if row_errors:
+            flash("/".join(row_errors))
+            return _render_page(422)
+
+        final_entries: list[dict] = []
+        for idx, existing in enumerate(old_entries):
+            if idx in delete_indices:
+                continue
+            if idx in updates:
+                final_entries.append(updates[idx])
+            else:
+                final_entries.append(existing)
+        final_entries.extend(created_entries)
 
         try:
-            new_entries = _validate_entries_payload(new_entries, allow_empty=allow_empty)
+            validated_entries = _validate_entries_payload(final_entries, allow_empty=allow_empty)
         except ValueError as exc:
             flash(str(exc))
             return _render_page(422)
+
+        requested_rows = n
+        app.logger.info(
+            "[admin_entries_edit] ui bulk edit: requested_rows=%s updates=%s creates=%s deletes=%s final_total=%s",
+            requested_rows,
+            len(updates),
+            len(created_entries),
+            len(delete_indices),
+            len(validated_entries),
+        )
 
         # 保存前に自動バックアップ（復元用）
         try:
@@ -7793,8 +7931,10 @@ def admin_entries_edit():
             except Exception as ex:
                 app.logger.warning(f"[admin_entries_edit] snapshot(on save) failed: {ex}")
 
-        save_entries(new_entries)
-        flash(f"{len(new_entries)} 件保存しました（未表示フィールドは保持）")
+        save_entries(validated_entries)
+        flash(
+            f"{len(validated_entries)} 件保存しました（更新 {len(updates)} 件 / 新規 {len(created_entries)} 件 / 削除 {len(delete_indices)} 件）"
+        )
         return redirect(url_for("admin_entries_edit"))
 
     # GET（またはPOSTエラー後の再表示）
