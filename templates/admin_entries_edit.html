@@ -60,6 +60,16 @@ function addRow(){
 }
 function removeRow(btn){
   const tr = btn.closest('tr');
+  if(!tr){
+    return;
+  }
+  const rowId = tr.querySelector('input[name="row_id[]"]');
+  if(rowId && rowId.value){
+    markRowDeleted(rowId.value);
+  }else if(rowId && rowId.value === '' && typeof markRowDeletedFallback === 'function'){
+    // 旧テンプレート互換: 行番号で削除対象を記録する拡張ポイント
+    markRowDeletedFallback(tr);
+  }
   tr.parentNode.removeChild(tr);
 }
 function onCategoryChange(sel){
@@ -150,6 +160,18 @@ function guardUiSubmit(form){
   }
   markAllowEmpty(form, false);
   return false;
+}
+
+function markRowDeleted(value){
+  const container = document.getElementById('deleted-rows');
+  if(!container || !value){
+    return;
+  }
+  const hidden = document.createElement('input');
+  hidden.type = 'hidden';
+  hidden.name = 'deleted_row_ids[]';
+  hidden.value = value;
+  container.appendChild(hidden);
 }
 
 function guardRawSubmit(form){
@@ -281,6 +303,7 @@ function guardRawSubmit(form){
   </details>
 
   <form id="entries-ui-form" method="post" action="{{ url_for('admin_entries_edit') }}">
+    <div id="deleted-rows"></div>
     <input type="hidden" name="allow_empty" value="">
     <div class="table-wrap">
       <table>
