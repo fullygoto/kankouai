@@ -11,6 +11,7 @@ import ipaddress
 import logging
 import uuid
 import hmac, hashlib, base64
+import unicodedata
 import zipfile
 import io
 import tempfile
@@ -179,6 +180,22 @@ PRIORITY_RESPONDER = PriorityResponder()
 _ENTRIES_RESPONDER: EntriesResponder | None = None
 _ENTRIES_RESPONDER_LOCK = threading.Lock()
 _ENTRIES_LAST_QUICK_REPLIES: list[dict[str, str]] | None = None
+
+RENTACAR_REPLY = """交通機関のエリアをお選びください（リンクをタップ）：
+- 五島市 交通機関一覧：https://www.fullygoto.com/kotsuu/
+- 新上五島町 交通機関一覧：https://www.fullygoto.com/kamigotokotuu/
+- 小値賀町 交通機関一覧：https://www.fullygoto.com/odikakotuu/
+- 宇久町 交通機関一覧：https://www.fullygoto.com/ukukotsuu/
+
+例：「五島市 レンタカー」「上五島 タクシー」「小値賀 バス」「宇久 レンタサイクル」などでもOK。
+"""
+
+RENTACAR_KEYWORDS = ("レンタカー",)
+
+
+def is_rentacar_query(text: str) -> bool:
+    norm = unicodedata.normalize("NFKC", text or "")
+    return any(keyword in norm for keyword in RENTACAR_KEYWORDS)
 
 _PAMPHLET_SUMMARY_RESPONDER: PamphletResponder | None = None
 _PAMPHLET_SUMMARY_LOCK = threading.Lock()
@@ -3332,6 +3349,10 @@ def handle_message(event):
         raw_text = ""
 
     text = input_normalizer.normalize_user_query(raw_text)
+
+    if is_rentacar_query(raw_text):
+        _safe_reply_or_push(event, TextSendMessage(text=RENTACAR_REPLY))
+        return
 
     try:
         line_user_id = _line_target_id(event)
