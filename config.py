@@ -13,6 +13,10 @@ def _truthy(value: str | None) -> bool:
     return value.strip().lower() in {"1", "true", "on", "yes"}
 
 
+class ConfigValidationError(RuntimeError):
+    """Raised when required configuration is missing or unsafe."""
+
+
 _APP_ENV = (os.getenv("APP_ENV") or "staging").lower()
 _DEFAULT_BASE_DIR = Path(os.getenv("DATA_BASE_DIR") or default_data_base_dir(_APP_ENV))
 _DEFAULT_MEDIA_ROOT = Path(
@@ -33,6 +37,47 @@ def _default_database_url(env: str) -> str:
     else:
         db_name = "kankouai_stg.db"
     return f"sqlite:///{base_dir.joinpath(db_name)}"
+
+
+def _validate_required_env() -> None:
+    """Fail fast when required environment variables are missing or unsafe.
+
+    Local development remains lenient, but staging/production/CI must provide
+    non-empty values so deployments do not silently start with insecure defaults.
+    """
+
+    env = _APP_ENV
+    if env not in {"development", "staging", "production"}:
+        raise ConfigValidationError(f"Unsupported APP_ENV value: {env!r}")
+
+    if env == "development":
+        return
+
+    errors: list[str] = []
+
+    def require(key: str, *, unsafe_values: set[str] | None = None) -> None:
+        value = os.getenv(key, "").strip()
+        if not value:
+            errors.append(f"{key} is required in {env} environments")
+            return
+        if unsafe_values and value in unsafe_values:
+            errors.append(f"{key} must not use an unsafe default value ({value})")
+
+    require("SECRET_KEY", unsafe_values={"dev-secret"})
+    require("OPENAI_API_KEY")
+    require("LINE_CHANNEL_SECRET")
+    require("LINE_CHANNEL_ACCESS_TOKEN")
+
+    data_base_dir = Path(os.getenv("DATA_BASE_DIR") or _DEFAULT_BASE_DIR)
+    if not data_base_dir.is_absolute():
+        errors.append("DATA_BASE_DIR must be an absolute path")
+
+    backup_dir = Path(os.getenv("BACKUP_DIR", "/var/tmp/backup"))
+    if not backup_dir.is_absolute():
+        errors.append("BACKUP_DIR must be an absolute path")
+
+    if errors:
+        raise ConfigValidationError("Configuration validation failed:\n - " + "\n - ".join(errors))
 
 
 PAMPHLET_BASE_DIR = str(_DEFAULT_PAMPHLET_DIR)
@@ -97,6 +142,9 @@ class StagingConfig(BaseConfig):
 class ProductionConfig(BaseConfig):
     DEBUG = False
     APP_ENV = "production"
+
+
+_validate_required_env()
 
 
 def get_config():

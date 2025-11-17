@@ -184,6 +184,33 @@ class RollbackManager:
         LOGGER.info("rollback complete txn=%s", txn_id)
         return entry
 
+    def validate_snapshot(self, snapshot_id: Optional[str]) -> SnapshotEntry:
+        entry = self.manifest.get(snapshot_id) if snapshot_id else self.manifest.latest()
+        if not entry:
+            raise RollbackError("no backups available to validate")
+
+        LOGGER.info("validating snapshot id=%s", entry.snapshot_id)
+
+        data_archive = Path(entry.data_path)
+        db_archive = Path(entry.db_path)
+
+        if not data_archive.exists():
+            raise RollbackError(f"data archive missing: {data_archive}")
+        if not db_archive.exists():
+            raise RollbackError(f"db archive missing: {db_archive}")
+
+        self._assert_checksum(data_archive, entry.data_sha256, label="data")
+        self._assert_checksum(db_archive, entry.db_sha256, label="db")
+
+        with tempfile.TemporaryDirectory(prefix=f"validate-{entry.snapshot_id}-") as temp_dir:
+            extract_root = Path(temp_dir)
+            with tarfile.open(data_archive, "r:gz") as tar:
+                tar.extractall(path=extract_root)
+            self._validate_db_archive(db_archive, extract_root)
+
+        LOGGER.info("snapshot %s validated successfully", entry.snapshot_id)
+        return entry
+
     def _restore_data(self, entry: SnapshotEntry, txn_id: str) -> None:
         base = self.settings.data_base_dir
         archive = Path(entry.data_path)
@@ -293,6 +320,32 @@ class RollbackManager:
         if url.startswith("sqlite://"):
             return Path(url.replace("sqlite://", "", 1)).resolve()
         raise RollbackError(f"Invalid sqlite URL: {url}")
+
+    def _validate_db_archive(self, archive: Path, temp_dir: Path) -> None:
+        db_url = os.getenv("DATABASE_URL", os.getenv("DB_URL", ""))
+        if db_url.startswith("sqlite"):
+            target_path = temp_dir / "validate.db"
+            shutil.copy2(archive, target_path)
+            try:
+                subprocess.run(
+                    ["sqlite3", str(target_path), "PRAGMA integrity_check;"],
+                    check=True,
+                    capture_output=True,
+                )
+            except FileNotFoundError:  # pragma: no cover - sqlite3 cli may be absent
+                LOGGER.warning("sqlite3 command not available; integrity check skipped")
+        elif db_url.startswith("postgres"):  # pragma: no cover - pg_restore optional
+            try:
+                subprocess.run(["pg_restore", "--list", str(archive)], check=True, capture_output=True)
+            except FileNotFoundError:
+                LOGGER.warning("pg_restore not available; archive listing skipped")
+        else:
+            raise RollbackError(f"Unsupported DATABASE_URL: {db_url}")
+
+    def _assert_checksum(self, path: Path, expected: str, *, label: str) -> None:
+        actual = self._sha256_file(path)
+        if actual != expected:
+            raise RollbackError(f"{label} checksum mismatch: expected {expected}, got {actual}")
 
     def _current_git_revision(self) -> str:
         try:
