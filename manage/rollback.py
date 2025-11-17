@@ -45,6 +45,25 @@ def canary(snapshot_id: str | None) -> None:
         raise SystemExit(1)
 
 
+@cli.command("verify")
+@click.option("--snapshot", "snapshot_id", default=None, help="Snapshot ID to validate")
+@click.option(
+    "--create-backup/--no-create-backup",
+    default=True,
+    help="Create a fresh backup before validation",
+)
+@click.option("--notes", default="restore-verify", help="Optional notes for the validation backup")
+def verify(snapshot_id: str | None, create_backup: bool, notes: str) -> None:
+    """Validate backup archives without mutating live data directories."""
+
+    manager = RollbackManager()
+    if create_backup:
+        entry = manager.create_backup(notes=notes)
+        snapshot_id = entry.snapshot_id
+    entry = manager.validate_snapshot(snapshot_id)
+    click.echo(json.dumps({"snapshot_id": entry.snapshot_id, "status": "ok"}, indent=2))
+
+
 if __name__ == "__main__":
     try:
         cli()
