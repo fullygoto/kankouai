@@ -194,7 +194,10 @@ RENTACAR_KEYWORDS = ("レンタカー",)
 
 
 def is_rentacar_query(text: str | None) -> bool:
-    norm = unicodedata.normalize("NFKC", text or "")
+    try:
+        norm = unicodedata.normalize("NFKC", text or "")
+    except Exception:
+        norm = str(text or "")
     return any(keyword in norm for keyword in RENTACAR_KEYWORDS)
 
 _PAMPHLET_SUMMARY_RESPONDER: PamphletResponder | None = None
