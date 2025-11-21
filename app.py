@@ -135,6 +135,8 @@ from linebot.models import (
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
+# NOTE: 開発フロー確認用のテストコメント（動作には影響しません）
+
 # =========================
 #  Flask / 設定
 # =========================
