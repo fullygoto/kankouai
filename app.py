@@ -17,17 +17,17 @@ import io
 import tempfile
 import subprocess
 # 追加が必要な標準ライブラリ
-import shutil      # _has_free_space で disk_usage を使用
-import tarfile     # _stream_backup_targz で使用
-import queue       # ストリーミング用の内部キュー
+import shutil      # Used in _has_free_space for disk_usage
+import tarfile     # Used in _stream_backup_targz
+import queue       # Used for internal streaming queue
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
-import urllib.parse as _u  # ← _extract_wm_flags などで使用
-from difflib import get_close_matches  # ★追加
-import secrets          # ← これを追加
+import urllib.parse as _u  # Used in helpers such as _extract_wm_flags
+from difflib import get_close_matches  # Used for fuzzy matching
+import secrets          # Used for token generation
 
 
 # === Third-Party ===
