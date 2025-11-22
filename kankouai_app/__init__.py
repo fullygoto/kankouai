@@ -25,11 +25,15 @@ from services.paths import ensure_data_directories, get_data_base_dir
 
 load_dotenv()
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+
 MEDIA_ROOT: str | None = None
 IMAGES_DIR: str | None = None
 MEDIA_DIR: Path | None = None
 MAX_UPLOAD_MB: int = 64
-BASE_DIR: str = ""
+DATA_BASE_DIR: str = ""
 ENTRIES_FILE: str = ""
 DATA_DIR: str = ""
 LOG_DIR: str = ""
@@ -48,29 +52,29 @@ def _configure_data_paths(flask_app: Flask) -> None:
     global _DATA_PATHS_INITIALIZED
     if _DATA_PATHS_INITIALIZED:
         return
-    global BASE_DIR, ENTRIES_FILE, DATA_DIR, LOG_DIR, LOG_FILE
+    global DATA_BASE_DIR, ENTRIES_FILE, DATA_DIR, LOG_DIR, LOG_FILE
     global SYNONYM_FILE, USERS_FILE, NOTICES_FILE, SHOP_INFO_FILE
     global PAUSED_NOTICE_FILE, SEND_LOG_FILE
 
     base_path = get_data_base_dir(flask_app.config)
-    BASE_DIR = str(base_path)
-    flask_app.config["DATA_BASE_DIR"] = BASE_DIR
-    ENTRIES_FILE = os.path.join(BASE_DIR, "entries.json")
-    DATA_DIR = os.path.join(BASE_DIR, "data")
-    LOG_DIR = os.path.join(BASE_DIR, "logs")
+    DATA_BASE_DIR = str(base_path)
+    flask_app.config["DATA_BASE_DIR"] = DATA_BASE_DIR
+    ENTRIES_FILE = os.path.join(DATA_BASE_DIR, "entries.json")
+    DATA_DIR = os.path.join(DATA_BASE_DIR, "data")
+    LOG_DIR = os.path.join(DATA_BASE_DIR, "logs")
     LOG_FILE = os.path.join(LOG_DIR, "questions_log.jsonl")
-    SYNONYM_FILE = os.path.join(BASE_DIR, "synonyms.json")
-    USERS_FILE = os.path.join(BASE_DIR, "users.json")
-    NOTICES_FILE = os.path.join(BASE_DIR, "notices.json")
-    SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
-    PAUSED_NOTICE_FILE = os.path.join(BASE_DIR, "paused_notice.json")
+    SYNONYM_FILE = os.path.join(DATA_BASE_DIR, "synonyms.json")
+    USERS_FILE = os.path.join(DATA_BASE_DIR, "users.json")
+    NOTICES_FILE = os.path.join(DATA_BASE_DIR, "notices.json")
+    SHOP_INFO_FILE = os.path.join(DATA_BASE_DIR, "shop_infos.json")
+    PAUSED_NOTICE_FILE = os.path.join(DATA_BASE_DIR, "paused_notice.json")
     SEND_LOG_FILE = os.path.join(LOG_DIR, "send_log.jsonl")
     global IMAGES_DIR
     IMAGES_DIR = os.path.join(DATA_DIR, "images")
     flask_app.config["IMAGES_DIR"] = IMAGES_DIR
 
     ensure_data_directories(
-        Path(BASE_DIR),
+        Path(DATA_BASE_DIR),
         pamphlet_dir=flask_app.config.get("PAMPHLET_BASE_DIR"),
     )
 
@@ -88,7 +92,7 @@ ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")
 
 
 def _bootstrap_files_and_admin(app: Flask) -> None:
-    app.logger.info(f"[boot] BASE_DIR={BASE_DIR}")
+    app.logger.info(f"[boot] DATA_BASE_DIR={DATA_BASE_DIR}")
     app.logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
 
     _ensure_json(ENTRIES_FILE, [])
@@ -153,7 +157,11 @@ def _bootstrap_files_and_admin(app: Flask) -> None:
 def create_app() -> Flask:
     global MEDIA_ROOT, IMAGES_DIR, MEDIA_DIR, MAX_UPLOAD_MB, _APP_BOOTSTRAPPED
 
-    app = Flask(__name__)
+    app = Flask(
+        __name__,
+        template_folder=str(TEMPLATES_DIR),
+        static_folder=str(STATIC_DIR),
+    )
 
     ensure_dirs()
     _bootstrap_sentinel = Path(STORAGE_BASE_DIR / ".bootstrap.done")
