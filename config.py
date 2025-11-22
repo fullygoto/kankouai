@@ -40,6 +40,7 @@ def _default_database_url(env: str) -> str:
 
 
 def _validate_required_env() -> None:
+    # 本番・ステージングでの安全な起動を保証するための事前検証
     """Fail fast when required environment variables are missing or unsafe.
 
     Local development remains lenient, but staging/production/CI must provide
