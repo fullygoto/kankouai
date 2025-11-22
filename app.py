@@ -154,6 +154,7 @@ if not _bootstrap_sentinel.exists():
 
 @app.template_global()
 def safe_url_for(endpoint, **values):
+    """Return a URL for the endpoint or an empty string when the endpoint is missing to avoid errors in templates."""
     try:
         return url_for(endpoint, **values)
     except BuildError:
@@ -211,10 +212,7 @@ def jinja_b64encode(s):
     return base64.b64encode(s).decode("ascii")
 
 def _ensure_csrf_token():
-    """
-    テンプレから呼ぶ csrf_token()。なければ作ってセッションに入れる。
-    既存の独自CSRF（Referer/Originガード）と共存可。
-    """
+    """Generate or reuse a session-scoped CSRF token so templates can safely embed it alongside the existing Referer/Origin checks."""
     tok = session.get("_csrf_token")
     if not tok:
         tok = secrets.token_urlsafe(32)
