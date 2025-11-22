@@ -28,6 +28,8 @@
 # services パッケージを許可
 !services/
 !services/**
+!kankouai_app/
+!kankouai_app/**
 !manage/
 !manage/**
 
