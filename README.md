@@ -125,6 +125,8 @@ Render の本番環境で "失敗したら即時復元" を実現するための
 
 `/admin/rollback`（管理IP + ログイン必須）に復元ボタンと履歴一覧を追加しました。二段階確認とCSRF対策を兼ね備えています。
 
+観光データ一括編集のフィールド仕様や差分保存の挙動については、`docs/admin_bulk_edit.md` にまとめています。フォーム改修や運用前に必ず参照してください。
+
 ### API / CLI
 
 - CLI: `python -m manage.rollback restore --snapshot <ID>`

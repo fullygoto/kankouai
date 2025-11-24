@@ -11,28 +11,26 @@ import ipaddress
 import logging
 import uuid
 import hmac, hashlib, base64
+import unicodedata
 import zipfile
 import io
 import tempfile
 import subprocess
 # 追加が必要な標準ライブラリ
-import shutil      # _has_free_space で disk_usage を使用
-import tarfile     # _stream_backup_targz で使用
-import queue       # ストリーミング用の内部キュー
+import shutil      # Used in _has_free_space for disk_usage
+import tarfile     # Used in _stream_backup_targz
+import queue       # Used for internal streaming queue
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from functools import wraps
 from collections import Counter
 from typing import Any, Dict, List
-import urllib.parse as _u  # ← _extract_wm_flags などで使用
-from difflib import get_close_matches  # ★追加
-import secrets          # ← これを追加
+import urllib.parse as _u  # Used in helpers such as _extract_wm_flags
+from difflib import get_close_matches  # Used for fuzzy matching
+import secrets          # Used for token generation
 
 
 # === Third-Party ===
-from dotenv import load_dotenv
-load_dotenv()
-
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session,
     jsonify, send_file, abort, send_from_directory, render_template_string, Response,
@@ -70,6 +68,8 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 from PIL import ImageFile, UnidentifiedImageError
 
 from watermark_ext import media_path_for
+
+import kankouai_app
 from services import (
     pamphlet_flow,
     pamphlet_rag,
@@ -81,7 +81,15 @@ from services import (
     line_handlers,
     state as user_state,
 )
-from services.paths import get_data_base_dir, ensure_data_directories
+from services.utils.text import (
+    _first_int_in_text,
+    _norm_text_jp,
+    _split_for_line,
+    _split_for_messaging,
+    _split_lines_commas,
+    is_rentacar_query,
+    parse_latlng_any,
+)
 from coreapp import config as cfg
 from coreapp.intent import get_intent_detector, is_transport_query, is_weather_query
 from coreapp.search.entries_index import load_entries_index
@@ -101,8 +109,6 @@ from coreapp.storage import (
     migrate_from_legacy_paths,
     seed_from_repo_if_empty,
 )
-from admin_pamphlets import bp as admin_pamphlets_bp
-from admin_rollback import bp as admin_rollback_bp
 
 # Pillowのバージョン差を吸収したリサンプリング定数
 try:
@@ -134,43 +140,31 @@ from linebot.models import (
 )
 from linebot.exceptions import LineBotApiError, InvalidSignatureError
 
+# NOTE: 開発フロー確認用のテストコメント（動作には影響しません）
+
 # =========================
 #  Flask / 設定
 # =========================
-app = Flask(__name__)
+app = kankouai_app.create_app()
 
-ensure_dirs()
-_bootstrap_sentinel = Path(BASE_DIR / ".bootstrap.done")
-if not _bootstrap_sentinel.exists():
-    migrate_from_legacy_paths()
-    seed_from_repo_if_empty()
-    try:
-        _bootstrap_sentinel.write_text("ok", encoding="utf-8")
-    except OSError:
-        app.logger.warning("Failed to write bootstrap sentinel", exc_info=True)
-
-@app.template_global()
-def safe_url_for(endpoint, **values):
-    try:
-        return url_for(endpoint, **values)
-    except BuildError:
-        return ""  # 存在しないエンドポイントは空文字
-        
-from config import get_config
-app.config.from_object(get_config())
-
-MEDIA_ROOT = os.getenv("MEDIA_ROOT") or app.config.get("MEDIA_ROOT") or MEDIA_ROOT
-IMAGES_DIR = os.getenv("IMAGES_DIR") or app.config.get("IMAGES_DIR") or MEDIA_ROOT
-MEDIA_ROOT = IMAGES_DIR
-app.config["MEDIA_ROOT"] = MEDIA_ROOT
-app.config["IMAGES_DIR"] = IMAGES_DIR
-app.config["MEDIA_DIR"] = os.getenv("MEDIA_DIR") or app.config.get("MEDIA_DIR") or MEDIA_ROOT
-MEDIA_DIR = Path(app.config["MEDIA_DIR"]).expanduser()
-MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-
+MEDIA_ROOT = kankouai_app.MEDIA_ROOT
+IMAGES_DIR = kankouai_app.IMAGES_DIR
+MEDIA_DIR = kankouai_app.MEDIA_DIR
 
 # 以降のメッセージ等で使うため、上限MBを設定から参照
-MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 64)
+MAX_UPLOAD_MB = kankouai_app.MAX_UPLOAD_MB
+
+BASE_DIR = kankouai_app.BASE_DIR
+ENTRIES_FILE = kankouai_app.ENTRIES_FILE
+DATA_DIR = kankouai_app.DATA_DIR
+LOG_DIR = kankouai_app.LOG_DIR
+LOG_FILE = kankouai_app.LOG_FILE
+SYNONYM_FILE = kankouai_app.SYNONYM_FILE
+USERS_FILE = kankouai_app.USERS_FILE
+NOTICES_FILE = kankouai_app.NOTICES_FILE
+SHOP_INFO_FILE = kankouai_app.SHOP_INFO_FILE
+PAUSED_NOTICE_FILE = kankouai_app.PAUSED_NOTICE_FILE
+SEND_LOG_FILE = kankouai_app.SEND_LOG_FILE
 
 # === Core responder singletons ============================================
 PRIORITY_INTENT = get_intent_detector()
@@ -180,52 +174,17 @@ _ENTRIES_RESPONDER: EntriesResponder | None = None
 _ENTRIES_RESPONDER_LOCK = threading.Lock()
 _ENTRIES_LAST_QUICK_REPLIES: list[dict[str, str]] | None = None
 
+RENTACAR_REPLY = """交通機関のエリアをお選びください（リンクをタップ）：
+- 五島市 交通機関一覧：https://www.fullygoto.com/kotsuu/
+- 新上五島町 交通機関一覧：https://www.fullygoto.com/kamigotokotuu/
+- 小値賀町 交通機関一覧：https://www.fullygoto.com/odikakotuu/
+- 宇久町 交通機関一覧：https://www.fullygoto.com/ukukotsuu/
+
+例：「五島市 レンタカー」「上五島 タクシー」「小値賀 バス」「宇久 レンタサイクル」などでもOK。
+"""
+
 _PAMPHLET_SUMMARY_RESPONDER: PamphletResponder | None = None
 _PAMPHLET_SUMMARY_LOCK = threading.Lock()
-
-@app.template_filter("b64encode")
-def jinja_b64encode(s):
-    if s is None:
-        return ""
-    if not isinstance(s, (bytes, bytearray)):
-        s = str(s).encode("utf-8")
-    return base64.b64encode(s).decode("ascii")
-
-def _ensure_csrf_token():
-    """
-    テンプレから呼ぶ csrf_token()。なければ作ってセッションに入れる。
-    既存の独自CSRF（Referer/Originガード）と共存可。
-    """
-    tok = session.get("_csrf_token")
-    if not tok:
-        tok = secrets.token_urlsafe(32)
-        session["_csrf_token"] = tok
-    return tok
-
-@app.context_processor
-def _inject_csrf_token():
-    # テンプレートで csrf_token() が常に呼べるようになる
-    return dict(csrf_token=_ensure_csrf_token)
-
-# === Admin no-cache & static cache-busting =========================
-# デプロイ毎に変わるビルドID（環境変数 BUILD_ID があればそれを使う）
-BUILD_ID = os.getenv("BUILD_ID") or datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")
-
-# Jinja から {{ BUILD_ID }} を使えるように注入
-@app.context_processor
-def _inject_build_id():
-    return dict(BUILD_ID=BUILD_ID)
-
-# 管理系や運用系ページは常に最新を返す（ブラウザキャッシュ無効化）
-@app.after_request
-def _no_cache_admin(resp):
-    p = (request.path or "")
-    if p.startswith(("/admin", "/notices")):
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        resp.headers["Pragma"]        = "no-cache"
-        resp.headers["Expires"]       = "0"
-    return resp
-# ==================================================================
 
 # === サーバ内スナップショット（ZIP）: 生成 / 一覧 / 復元 / DL ===================
 
@@ -1964,202 +1923,6 @@ def api_nearby():
     return jsonify({"ok": True, "count": len(rows), "items": rows})
 
 
-# =========================
-#  正規化ヘルパー
-# =========================
-def _split_lines_commas(val: str) -> List[str]:
-    """改行・カンマ両対応で分割 → 余白除去 → 空要素除去"""
-    if not val:
-        return []
-    parts = re.split(r'[\n,]+', str(val))
-    return [p.strip() for p in parts if p and p.strip()]
-
-# 置き換え版（1本に統一・limit省略OK・絵文字安全）
-def _split_for_line(text: str,
-                    limit: int | None = None,
-                    max_len: int | None = None,
-                    **_ignored) -> List[str]:
-    """
-    LINEの1通上限を超える長文を“安全に”分割するユーティリティ。
-    - limit 未指定なら env/グローバルの LINE_SAFE_CHARS（既定4800）を採用
-    - 段落→文の順に自然に切る。超過時はハードスプリット
-    - どんな入力でも最低1要素返す（空配列にしない）
-    - len()ではなくUTF-16コードユニット数でカウント（絵文字混在に強い）
-    """
-    import os, re
-
-    def u16len(s: str) -> int:
-        # UTF-16 LE のコードユニット数（LINEの仕様に近い）
-        return len(s.encode("utf-16-le")) // 2
-
-    # 実効上限を決定
-    if limit is None:
-        limit = max_len
-    if limit is None:
-        # env > グローバル > 既定 の順で採用
-        try:
-            limit = int(os.getenv("LINE_SAFE_CHARS", str(globals().get("LINE_SAFE_CHARS", 4800))))
-        except Exception:
-            limit = 4800
-    if limit <= 0:
-        return ["" if text is None else str(text)]
-
-    s = "" if text is None else str(text)
-    if u16len(s) <= limit:
-        return [s]
-
-    # 段落単位（空行で分割）
-    paragraphs = [p for p in re.split(r"\n\s*\n", s) if p != ""]
-    chunks: List[str] = []
-
-    def flush_buf(buf: str) -> None:
-        if buf:
-            chunks.append(buf)
-
-    def hard_split(token: str) -> None:
-        """1トークン自体が長過ぎる場合、UTF-16長を見ながら強制分割"""
-        buf = ""
-        for ch in token:
-            if u16len(buf + ch) > limit:
-                flush_buf(buf)
-                buf = ch
-            else:
-                buf += ch
-        flush_buf(buf)
-
-    # 1) 段落→2) 文→3) ハードスプリット の順で収める
-    buf = ""
-    SENT_SPLIT = re.compile(r"(?<=[。．！？!?])")  # 句点等の直後で区切る
-    for para in paragraphs:
-        para = para.strip("\n")
-        # 段落丸ごと入るなら入れる
-        if u16len(para) <= limit:
-            if u16len(buf + (("\n\n" + para) if buf else para)) <= limit:
-                buf = (buf + ("\n\n" if buf else "") + para)
-            else:
-                flush_buf(buf); buf = para
-            continue
-
-        # 文単位で詰める
-        sentences = [x for x in SENT_SPLIT.split(para) if x]
-        for sent in sentences:
-            if u16len(sent) > limit:
-                # 文がそもそも長い → いったん今のbufを吐き出してハード分割
-                flush_buf(buf); buf = ""
-                hard_split(sent)
-                continue
-            # 既存bufに足せるなら足す
-            sep = ("\n" if (buf and not buf.endswith("\n")) else "")
-            candidate = buf + (sep + sent if buf else sent)
-            if u16len(candidate) <= limit:
-                buf = candidate
-            else:
-                flush_buf(buf); buf = sent
-
-        # 段落の終わりで改行を入れたい場合はここで調整してもOK
-    flush_buf(buf)
-
-    # 念のため空にならない保証
-    if not chunks:
-        chunks = [s[:limit]]
-
-    return chunks
-
-# === 緯度経度：コピペ用のパーサ ===
-import re as _re2
-
-def _parse_dms_block(s: str):
-    """
-    DMS（度分秒）1ブロックを小数に変換（例: 35°41'6.6"N / 北緯35度41分6.6秒 / 139°41'30"E）
-    戻り値: (value, axis)  axis は 'lat' / 'lng' / None
-    """
-    s = s.strip()
-    hemi = None
-    if _re2.search(r'[N北]', s, _re2.I): hemi = 'N'
-    if _re2.search(r'[S南]', s, _re2.I): hemi = 'S'
-    if _re2.search(r'[E東]', s, _re2.I): hemi = 'E'
-    if _re2.search(r'[W西]', s, _re2.I): hemi = 'W'
-
-    m = _re2.search(
-        r'(\d+(?:\.\d+)?)\s*[°度]\s*(\d+(?:\.\d+)?)?\s*[\'’′分]?\s*(\d+(?:\.\d+)?)?\s*["”″秒]?',
-        s
-    )
-    if not m:
-        return None, None
-
-    deg = float(m.group(1))
-    minutes = float(m.group(2) or 0.0)
-    seconds = float(m.group(3) or 0.0)
-    val = deg + minutes/60.0 + seconds/3600.0
-    if hemi in ('S','W'):
-        val = -val
-
-    axis = None
-    if hemi in ('N','S'):
-        axis = 'lat'
-    elif hemi in ('E','W'):
-        axis = 'lng'
-    return val, axis
-
-
-def parse_latlng_any(text: str):
-    """
-    Googleマップのコピペ（URL/小数/DMS/日本語表記）を (lat, lng) へ正規化。
-    例:
-      35.681236, 139.767125
-      https://www.google.com/maps?q=35.681236,139.767125
-      https://www.google.com/maps/@35.681236,139.767125,17z
-      35°41'6.6"N 139°41'30"E
-      北緯35度41分6.6秒 東経139度41分30秒
-    """
-    if not text:
-        return None
-    s = text.strip().replace('，', ',').replace('、', ',')
-    s = _re2.sub(r'\s+', ' ', s)
-
-    # URL ?q=lat,lng / ?query=lat,lng
-    m = _re2.search(r'[?&](?:q|query)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-
-    # URL /@lat,lng,...
-    m = _re2.search(r'/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)(?:[,/?]|$)', s)
-    if m:
-        return float(m.group(1)), float(m.group(2))
-
-    # 純粋な「lat,lng」
-    m = _re2.search(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)', s)
-    if m:
-        a, b = float(m.group(1)), float(m.group(2))
-        if abs(a) > 90 and abs(b) <= 90:
-            a, b = b, a
-        return a, b
-
-    # DMS ブロック2つ拾う
-    dms_blocks = _re2.findall(
-        r'(\d+(?:\.\d+)?\s*[°度]\s*\d*(?:\.\d+)?\s*[\'’′分]?\s*\d*(?:\.\d+)?\s*["”″秒]?\s*[NSEW北南東西]?)',
-        s, flags=_re2.I
-    )
-    if len(dms_blocks) >= 2:
-        v1, a1 = _parse_dms_block(dms_blocks[0])
-        v2, a2 = _parse_dms_block(dms_blocks[1])
-        if v1 is not None and v2 is not None:
-            if not a1 and not a2:
-                cand = sorted([v1, v2], key=lambda x: abs(x))
-                return cand[0], cand[1]
-            lat = v1 if (a1 == 'lat' or (a1 is None and abs(v1) <= 90)) else v2
-            lng = v2 if lat == v1 else v1
-            return lat, lng
-
-    # 「緯度: xx / 経度: yy」
-    mlat = _re2.search(r'緯度[:：]\s*(-?\d+(?:\.\d+)?)', s)
-    mlng = _re2.search(r'経度[:：]\s*(-?\d+(?:\.\d+)?)', s)
-    if mlat and mlng:
-        return float(mlat.group(1)), float(mlng.group(1))
-
-    return None
-
-
 def normalize_latlng(raw_coords: str, lat_str: str, lng_str: str):
     """
     3入力（rawコピペ / lat / lng）から最終 (lat, lng) を決める。小数6桁へ丸め。
@@ -3333,6 +3096,10 @@ def handle_message(event):
 
     text = input_normalizer.normalize_user_query(raw_text)
 
+    if is_rentacar_query(raw_text):
+        _safe_reply_or_push(event, TextSendMessage(text=RENTACAR_REPLY))
+        return
+
     try:
         line_user_id = _line_target_id(event)
     except Exception:
@@ -4183,53 +3950,6 @@ def _reply_or_push(event, text: str, *, force_push: bool = False):
 
     messages = [TextSendMessage(text=m) for m in parts]
     emit_response(event, messages, force_push=force_push)
-
-
-# データ格納先
-BASE_DIR: str = ""
-ENTRIES_FILE: str = ""
-DATA_DIR: str = ""
-LOG_DIR: str = ""
-LOG_FILE: str = ""
-SYNONYM_FILE: str = ""
-USERS_FILE: str = ""
-NOTICES_FILE: str = ""
-SHOP_INFO_FILE: str = ""
-PAUSED_NOTICE_FILE: str = ""
-SEND_LOG_FILE: str = ""
-_DATA_PATHS_INITIALIZED = False
-_APP_BOOTSTRAPPED = False
-
-
-def _configure_data_paths(flask_app: Flask) -> None:
-    global _DATA_PATHS_INITIALIZED
-    if _DATA_PATHS_INITIALIZED:
-        return
-    global BASE_DIR, ENTRIES_FILE, DATA_DIR, LOG_DIR, LOG_FILE
-    global SYNONYM_FILE, USERS_FILE, NOTICES_FILE, SHOP_INFO_FILE
-    global PAUSED_NOTICE_FILE, SEND_LOG_FILE
-
-    base_path = get_data_base_dir(flask_app.config)
-    BASE_DIR = str(base_path)
-    flask_app.config["DATA_BASE_DIR"] = BASE_DIR
-    ENTRIES_FILE = os.path.join(BASE_DIR, "entries.json")
-    DATA_DIR = os.path.join(BASE_DIR, "data")
-    LOG_DIR = os.path.join(BASE_DIR, "logs")
-    LOG_FILE = os.path.join(LOG_DIR, "questions_log.jsonl")
-    SYNONYM_FILE = os.path.join(BASE_DIR, "synonyms.json")
-    USERS_FILE = os.path.join(BASE_DIR, "users.json")
-    NOTICES_FILE = os.path.join(BASE_DIR, "notices.json")
-    SHOP_INFO_FILE = os.path.join(BASE_DIR, "shop_infos.json")
-    PAUSED_NOTICE_FILE = os.path.join(BASE_DIR, "paused_notice.json")
-    SEND_LOG_FILE = os.path.join(LOG_DIR, "send_log.jsonl")
-    global IMAGES_DIR
-    IMAGES_DIR = os.path.join(DATA_DIR, "images")
-
-    ensure_data_directories(
-        Path(BASE_DIR),
-        pamphlet_dir=flask_app.config.get("PAMPHLET_BASE_DIR"),
-    )
-    _DATA_PATHS_INITIALIZED = True
 
 
 # ★ 一度だけ案内フラグの保存先 & TTL（秒）
@@ -5618,75 +5338,6 @@ def _is_viewpoints_cmd(text: str) -> bool:
     t = re.sub(r"[ \t\u3000／/、。,．。!！?？\-ー〜~]+", "", t)
     return bool(_CMD_RE_VIEWPOINTS.search(t))
 
-
-# 初回ブートストラップ
-ADMIN_INIT_USER = os.environ.get("ADMIN_INIT_USER", "admin")
-ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")  # 初回のみ使用推奨
-
-def _ensure_json(path, default_obj):
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default_obj, f, ensure_ascii=False, indent=2)
-
-def _bootstrap_files_and_admin():
-    app.logger.info(f"[boot] BASE_DIR={BASE_DIR}")
-    app.logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
-
-    _ensure_json(ENTRIES_FILE, [])
-    _ensure_json(SYNONYM_FILE, {})
-    _ensure_json(NOTICES_FILE, [])
-    _ensure_json(SHOP_INFO_FILE, {})
-
-    users = []
-    users_exists = os.path.exists(USERS_FILE)
-    if users_exists:
-        try:
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                users = json.load(f)
-        except Exception:
-            users = []
-
-    if not users_exists or not users:
-        if ADMIN_INIT_PASSWORD:
-            users = [{
-                "user_id": ADMIN_INIT_USER,
-                "name": "管理者",
-                "password_hash": generate_password_hash(ADMIN_INIT_PASSWORD),  # 既定=pbkdf2:sha256
-                "role": "admin",
-            }]
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(users, f, ensure_ascii=False, indent=2)
-            app.logger.warning(
-                "users.json を新規作成し、管理者ユーザー '%s' を作成しました。初回ログイン後 ADMIN_INIT_PASSWORD を環境変数から削除してください。",
-                ADMIN_INIT_USER,
-            )
-        else:
-            factory_password = secrets.token_urlsafe(16)
-            factory_user = ADMIN_INIT_USER or "admin"
-            users = [{
-                "user_id": factory_user,
-                "name": "工場出荷管理者",
-                "password_hash": generate_password_hash(factory_password),
-                "role": "admin",
-            }]
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(users, f, ensure_ascii=False, indent=2)
-            init_path = Path(USERS_FILE).with_suffix(Path(USERS_FILE).suffix + ".init")
-            init_payload = {
-                "user_id": factory_user,
-                "password": factory_password,
-                "note": "初回ログイン後にこのファイルを削除し、パスワードを変更してください。",
-            }
-            try:
-                init_path.write_text(json.dumps(init_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            except OSError:
-                app.logger.warning("failed to write factory credential hint to %s", init_path, exc_info=True)
-            app.logger.warning(
-                "users.json を新規作成し、工場出荷ユーザー '%s' を発行しました。初回ログイン用パスワードは %s です (credential: %s)",
-                factory_user,
-                factory_password,
-                init_path,
-            )
 
 # 必須キーが未設定なら警告（起動は継続）
 if not OPENAI_API_KEY:
@@ -7698,6 +7349,35 @@ def admin_entries_edit():
         getl = request.form.getlist
         allow_empty = (request.form.get("allow_empty") == "1")
 
+        allowed_keys = {
+            "row_id[]",
+            "category[]",
+            "title[]",
+            "desc[]",
+            "address[]",
+            "map[]",
+            "tags[]",
+            "areas[]",
+            "tel[]",
+            "holiday[]",
+            "open_hours[]",
+            "parking[]",
+            "parking_num[]",
+            "payment[]",
+            "remark[]",
+            "links[]",
+            "allow_empty",
+            "deleted_row_ids[]",
+        }
+        unexpected_keys = sorted({k for k in request.form.keys() if k not in allowed_keys})
+        if unexpected_keys:
+            flash("未対応のフィールドが含まれています: " + ", ".join(unexpected_keys))
+            return _render_page(422)
+
+        if not request.form:
+            flash("保存対象データが送信されませんでした")
+            return _render_page(422)
+
         row_ids       = getl("row_id[]")            # ★ hidden（未導入なら空配列）
         cats          = getl("category[]")
         titles        = getl("title[]")
@@ -7714,64 +7394,173 @@ def admin_entries_edit():
         payments      = getl("payment[]")
         remarks       = getl("remark[]")
         links_list    = getl("links[]")            # テンプレに無ければ空で来るのでOK
+        deleted_raw   = getl("deleted_row_ids[]")
+
+        has_stable_row_ids = any((rid or "").strip() for rid in row_ids)
 
         def _safe(lst, i):  # インデックス安全取得
             return lst[i] if i < len(lst) else ""
 
-        # いずれかの最大長で回す（テンプレ列ズレの保険）
-        n = max(len(titles), len(descs), len(cats), len(addresses), len(areas_list))
+        delete_indices: set[int] = set()
+        invalid_delete: list[str] = []
+        for raw in deleted_raw:
+            rid = (raw or "").strip()
+            if not rid:
+                continue
+            if not rid.isdigit():
+                invalid_delete.append(rid)
+                continue
+            idx = int(rid)
+            if not (0 <= idx < len(old_entries)):
+                invalid_delete.append(rid)
+                continue
+            delete_indices.add(idx)
+        if invalid_delete:
+            flash("削除対象IDが不正です: " + ", ".join(sorted(set(invalid_delete))))
+            return _render_page(422)
 
-        new_entries = []
+        lengths = [
+            len(row_ids), len(cats), len(titles), len(descs), len(addresses), len(maps),
+            len(tags_list), len(areas_list), len(tels), len(holidays), len(opens),
+            len(parkings), len(parking_nums), len(payments), len(remarks), len(links_list),
+        ]
+        n = max(lengths) if lengths else 0
+
+        updates: dict[int, dict] = {}
+        touched_indices: set[int] = set()
+        created_entries: list[dict] = []
+        row_errors: list[str] = []
+
         for i in range(n):
+            rid_raw = (_safe(row_ids, i) or "").strip()
+            existing_idx: int | None = None
+            base: dict[str, Any] = {}
+
+            if rid_raw:
+                if rid_raw.isdigit():
+                    j = int(rid_raw)
+                    if 0 <= j < len(old_entries):
+                        existing_idx = j
+                        base = dict(old_entries[j])  # 未表示フィールド保持
+                    else:
+                        row_errors.append(f"row_id {rid_raw} が既存データの範囲外です")
+                        continue
+                else:
+                    row_errors.append(f"row_id '{rid_raw}' が数値ではありません")
+                    continue
+            elif (not has_stable_row_ids) and i < len(old_entries):
+                existing_idx = i
+                base = dict(old_entries[i])
+
+            if existing_idx is not None:
+                if existing_idx in delete_indices:
+                    row_errors.append(f"row_id {existing_idx} は削除指定と衝突しています")
+                    continue
+                if existing_idx in touched_indices:
+                    row_errors.append(f"row_id {existing_idx} が重複しています")
+                    continue
+                touched_indices.add(existing_idx)
+            else:
+                base = {}
+
             title = (_safe(titles, i) or "").strip()
             desc  = (_safe(descs,  i) or "").strip()
+            address_raw = _safe(addresses, i)
+            map_raw = _safe(maps, i)
+            tags = _split_lines_commas(_safe(tags_list,  i))
+            areas = _split_lines_commas(_safe(areas_list, i))
+            links = _split_lines_commas(_safe(links_list,  i))
+            payments_row = _split_lines_commas(_safe(payments,   i))
+            tel_raw = _safe(tels, i)
+            holiday_raw = _safe(holidays, i)
+            open_raw = _safe(opens, i)
+            parking_raw = _safe(parkings, i)
+            parking_num_raw = _safe(parking_nums, i)
+            remark_raw = _safe(remarks, i)
 
-            # 完全空行はスキップ（従来互換）
-            if not title and not desc:
+            def _has_text(value: str | None) -> bool:
+                return bool((value or "").strip())
+
+            has_any_value = any([
+                title,
+                desc,
+                _has_text(address_raw),
+                _has_text(map_raw),
+                bool(tags),
+                bool(areas),
+                _has_text(tel_raw),
+                _has_text(holiday_raw),
+                _has_text(open_raw),
+                _has_text(parking_raw),
+                _has_text(parking_num_raw),
+                bool(payments_row),
+                _has_text(remark_raw),
+                bool(links),
+            ])
+
+            if not has_any_value:
+                if existing_idx is not None:
+                    row_errors.append(
+                        f"row_id {existing_idx} の行が空です。削除する場合は削除ボタンを使用してください。"
+                    )
                 continue
-
-            # 既存行にマッピング：row_id が数字ならそれを優先
-            base = {}
-            rid = (_safe(row_ids, i) or "").strip()
-            if rid.isdigit():
-                j = int(rid)
-                if 0 <= j < len(old_entries):
-                    base = dict(old_entries[j])   # ← 未表示フィールドを保持
-            elif i < len(old_entries):
-                # row_id 未導入テンプレ互換：同じインデックスをベースに（後方互換）
-                base = dict(old_entries[i])
 
             # フォーム値で上書き（空文字は“クリア”として反映）
             base["category"]     = (_safe(cats, i) or "観光").strip() or "観光"
             base["title"]        = title
             base["desc"]         = desc
-            base["address"]      = _safe(addresses, i)
-            base["map"]          = _safe(maps, i)
+            base["address"]      = address_raw
+            base["map"]          = map_raw
 
             # 配列系はユーティリティで正規化
-            base["tags"]         = _split_lines_commas(_safe(tags_list,  i))
-            base["areas"]        = _split_lines_commas(_safe(areas_list, i))
-            base["links"]        = _split_lines_commas(_safe(links_list,  i))
-            base["payment"]      = _split_lines_commas(_safe(payments,   i))
+            base["tags"]         = tags
+            base["areas"]        = areas
+            base["links"]        = links
+            base["payment"]      = payments_row
 
-            base["tel"]          = _safe(tels, i)
-            base["holiday"]      = _safe(holidays, i)
-            base["open_hours"]   = _safe(opens, i)
-            base["parking"]      = _safe(parkings, i)
-            base["parking_num"]  = _safe(parking_nums, i)
-            base["remark"]       = _safe(remarks, i)
-
-            # ★ 触らない＝保持：images/image/thumb/wm_external_choice/lat/lng/place_id/gmaps_share_url/extras 等
+            base["tel"]          = tel_raw
+            base["holiday"]      = holiday_raw
+            base["open_hours"]   = open_raw
+            base["parking"]      = parking_raw
+            base["parking_num"]  = parking_num_raw
+            base["remark"]       = remark_raw
 
             e = _norm_entry(base)
 
-            new_entries.append(e)
+            if existing_idx is not None:
+                updates[existing_idx] = e
+            else:
+                created_entries.append(e)
+
+        if row_errors:
+            flash("/".join(row_errors))
+            return _render_page(422)
+
+        final_entries: list[dict] = []
+        for idx, existing in enumerate(old_entries):
+            if idx in delete_indices:
+                continue
+            if idx in updates:
+                final_entries.append(updates[idx])
+            else:
+                final_entries.append(existing)
+        final_entries.extend(created_entries)
 
         try:
-            new_entries = _validate_entries_payload(new_entries, allow_empty=allow_empty)
+            validated_entries = _validate_entries_payload(final_entries, allow_empty=allow_empty)
         except ValueError as exc:
             flash(str(exc))
             return _render_page(422)
+
+        requested_rows = n
+        app.logger.info(
+            "[admin_entries_edit] ui bulk edit: requested_rows=%s updates=%s creates=%s deletes=%s final_total=%s",
+            requested_rows,
+            len(updates),
+            len(created_entries),
+            len(delete_indices),
+            len(validated_entries),
+        )
 
         # 保存前に自動バックアップ（復元用）
         try:
@@ -7793,8 +7582,10 @@ def admin_entries_edit():
             except Exception as ex:
                 app.logger.warning(f"[admin_entries_edit] snapshot(on save) failed: {ex}")
 
-        save_entries(new_entries)
-        flash(f"{len(new_entries)} 件保存しました（未表示フィールドは保持）")
+        save_entries(validated_entries)
+        flash(
+            f"{len(validated_entries)} 件保存しました（更新 {len(updates)} 件 / 新規 {len(created_entries)} 件 / 削除 {len(delete_indices)} 件）"
+        )
         return redirect(url_for("admin_entries_edit"))
 
     # GET（またはPOSTエラー後の再表示）
@@ -9501,10 +9292,7 @@ def _answer_from_entries_min(question: str, *, wm_mode: str | None = None, user_
 
 #  即返し（天気 / 運行状況） - 保証版
 # =========================
-import unicodedata as _unic
-
-def _norm_text_jp(s: str) -> str:
-    return _unic.normalize("NFKC", (s or "")).strip().lower()
+#  即返し（天気 / 運行状況） - 保証版
 
 # === mobility（レンタカー/バス/レンタサイクル）トリガ判定 ===
 MOBILITY_TRIGGERS = (
@@ -10351,11 +10139,6 @@ def _flow_clear(uid):
 def _is_flow_reset_cmd(text: str) -> bool:
     t = (text or "").strip()
     return t in {"リセット", "やり直し", "キャンセル", "reset", "clear"}
-
-def _first_int_in_text(text: str) -> int | None:
-    import re, unicodedata
-    m = re.search(r'([0-9０-９]+)', text or "")
-    return int(unicodedata.normalize("NFKC", m.group(1))) if m else None
 
 def _uniq_preserve(seq):
     out, seen = [], set()
@@ -11435,30 +11218,6 @@ from linebot.models import TextSendMessage
 
 LINE_MAX_PER_REQUEST = 5  # 1リクエスト最大5メッセージ（※ LINE_SAFE_CHARS は上位の正規版を使用）
 
-def _split_for_messaging(text: str, chunk_size: int = None) -> List[str]:
-    """長文を自然な区切り（段落→句点）で2〜複数通に分割。最低1通は返す。"""
-    # 上位で定義済みの安全値を使う
-    lim = int(chunk_size) if chunk_size else int(globals().get("LINE_SAFE_CHARS", 3000))
-    if not text:
-        return [""]
-    text = text.strip()
-    if len(text) <= lim:
-        return [text]
-
-    parts: List[str] = []
-    rest = text
-    while len(rest) > lim:
-        cut = rest.rfind("\n\n", 0, lim)
-        if cut < int(lim * 0.5):
-            cut = rest.rfind("。", 0, lim)
-        if cut < int(lim * 0.5):
-            cut = lim
-        parts.append(rest[:cut].rstrip())
-        rest = rest[cut:].lstrip()
-    if rest:
-        parts.append(rest)
-    return parts
-
 
 # === LINE 返信ユーティリティ（安全送信 + エラー計測）
 # ※ 正規版 _reply_or_push（force_push 対応／出典フッター対応）は既に上で定義済みなのでここでは定義しません。
@@ -11772,27 +11531,6 @@ def admin_unhit_save_text():
     # 返却（フロントでトースト表示などに利用）
     return jsonify({"ok": True, "filename": fname})
 # ===== ここまで ==============================================================
-
-
-def create_app() -> Flask:
-    global _APP_BOOTSTRAPPED
-    if not _APP_BOOTSTRAPPED:
-        _configure_data_paths(app)
-        if "admin_pamphlets" not in app.blueprints:
-            app.register_blueprint(admin_pamphlets_bp)
-        if "admin_rollback" not in app.blueprints:
-            app.register_blueprint(admin_rollback_bp)
-        pamphlet_search.configure(app.config)
-        try:
-            pamphlet_search.load_all()
-        except Exception:
-            app.logger.exception("[pamphlet] initial load failed")
-        _bootstrap_files_and_admin()
-        _APP_BOOTSTRAPPED = True
-    return app
-
-
-create_app()
 
 
 # メイン起動（重複禁止：これ1つだけ残す）
