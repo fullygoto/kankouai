@@ -31,15 +31,18 @@ jobs:
           set -euo pipefail
           BRANCH="ops/prod-pin"
           PREV_SHA=""
+
           if git ls-remote --exit-code origin "$BRANCH" >/dev/null 2>&1; then
             git fetch origin "$BRANCH:$BRANCH" --depth=1
             PREV_SHA=$(git show "$BRANCH:ops/PROD_COMMIT" 2>/dev/null | tr -d '\n' || true)
           else
-            echo "No existing ops/prod-pin branch found; using current HEAD as fallback"
+            echo "No existing ops/prod-pin branch found; using HEAD~1 as fallback (or HEAD if unavailable)"
           fi
+
           if [ -z "$PREV_SHA" ]; then
-            PREV_SHA=$(git rev-parse HEAD^0)
+            PREV_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD^0)
           fi
+
           echo "Previous production SHA: $PREV_SHA"
           echo "prev_sha=$PREV_SHA" >> "$GITHUB_OUTPUT"
 
@@ -51,14 +54,16 @@ jobs:
   tests:
     needs: prepare
     runs-on: ubuntu-latest
-    env:
-      DATA_BASE_DIR: /tmp/data
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Set DATA_BASE_DIR
+        run: |
+          echo "DATA_BASE_DIR=${RUNNER_TEMP}/data" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
@@ -90,6 +95,7 @@ jobs:
             echo "RENDER_SERVICE_ID and RENDER_API_KEY must be set" >&2
             exit 1
           fi
+
           retry() {
             local attempts=$1
             shift
@@ -104,26 +110,32 @@ jobs:
               sleep $((delay ** count))
             done
           }
+
           body=$(jq -n --arg commit "$NEW_SHA" '{commitId: $commit, clearCache: false}')
           response=$(retry 5 curl --fail-with-body -sS \
             -X POST "$RENDER_API_BASE/services/$RENDER_SERVICE_ID/deploys" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Content-Type: application/json" \
             -d "$body")
+
           deploy_id=$(echo "$response" | jq -r '.id')
           if [ -z "$deploy_id" ] || [ "$deploy_id" = "null" ]; then
             echo "Failed to obtain deploy ID" >&2
             echo "$response"
             exit 1
           fi
+
           echo "Triggered deploy $deploy_id for $NEW_SHA"
           echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
 
       - name: Wait for deploy to complete
         env:
           DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
           set -euo pipefail
+
           retry() {
             local attempts=$1
             shift
@@ -138,12 +150,15 @@ jobs:
               sleep $((delay ** count))
             done
           }
+
           while true; do
             response=$(retry 5 curl --fail-with-body -sS \
               "$RENDER_API_BASE/services/$RENDER_SERVICE_ID/deploys/$DEPLOY_ID" \
               -H "Authorization: Bearer $RENDER_API_KEY")
+
             status=$(echo "$response" | jq -r '.status')
             echo "Deploy status: $status"
+
             case "$status" in
               live|succeeded)
                 break
@@ -171,6 +186,7 @@ jobs:
             echo "PROD_BASE_URL is required" >&2
             exit 1
           fi
+
           retry() {
             local attempts=$1
             shift
@@ -185,6 +201,7 @@ jobs:
               sleep $((delay ** count))
             done
           }
+
           success=0
           for attempt in $(seq 1 300); do
             if retry 3 curl -fsS "$PROD_BASE_URL/readyz" >/dev/null; then
@@ -194,6 +211,7 @@ jobs:
             fi
             sleep 2
           done
+
           if [ "$success" -ne 1 ]; then
             echo "Timed out waiting for /readyz" >&2
             exit 1
@@ -234,13 +252,17 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions"
           git config user.email "actions@github.com"
+
           git checkout -B ops/prod-pin
+          mkdir -p ops
           echo "$NEW_SHA" > ops/PROD_COMMIT
-          git add ops/PROD_COMMIT
-          if git diff --cached --quiet; then
+
+          if git diff --quiet; then
             echo "PROD_COMMIT already up to date"
             exit 0
           fi
+
+          git add ops/PROD_COMMIT
           git commit -m "chore: pin production to $NEW_SHA"
           git push origin ops/prod-pin
 
@@ -262,6 +284,7 @@ jobs:
             echo "Previous SHA is not set" >&2
             exit 1
           fi
+
           retry() {
             local attempts=$1
             shift
@@ -276,18 +299,21 @@ jobs:
               sleep $((delay ** count))
             done
           }
+
           body=$(jq -n --arg commit "$PREV_SHA" '{commitId: $commit, clearCache: false}')
           response=$(retry 5 curl --fail-with-body -sS \
             -X POST "$RENDER_API_BASE/services/$RENDER_SERVICE_ID/deploys" \
             -H "Authorization: Bearer $RENDER_API_KEY" \
             -H "Content-Type: application/json" \
             -d "$body")
+
           deploy_id=$(echo "$response" | jq -r '.id')
           if [ -z "$deploy_id" ] || [ "$deploy_id" = "null" ]; then
             echo "Failed to obtain rollback deploy ID" >&2
             echo "$response"
             exit 1
           fi
+
           echo "Triggered rollback deploy $deploy_id for $PREV_SHA"
           echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
 
@@ -296,6 +322,7 @@ jobs:
           DEPLOY_ID: ${{ steps.rollback.outputs.deploy_id }}
         run: |
           set -euo pipefail
+
           retry() {
             local attempts=$1
             shift
@@ -310,12 +337,15 @@ jobs:
               sleep $((delay ** count))
             done
           }
+
           while true; do
             response=$(retry 5 curl --fail-with-body -sS \
               "$RENDER_API_BASE/services/$RENDER_SERVICE_ID/deploys/$DEPLOY_ID" \
               -H "Authorization: Bearer $RENDER_API_KEY")
+
             status=$(echo "$response" | jq -r '.status')
             echo "Rollback deploy status: $status"
+
             case "$status" in
               live|succeeded)
                 break
@@ -333,6 +363,7 @@ jobs:
       - name: Wait for readiness after rollback
         run: |
           set -euo pipefail
+
           retry() {
             local attempts=$1
             shift
@@ -347,6 +378,7 @@ jobs:
               sleep $((delay ** count))
             done
           }
+
           success=0
           for attempt in $(seq 1 300); do
             if retry 3 curl -fsS "$PROD_BASE_URL/readyz" >/dev/null; then
@@ -356,10 +388,12 @@ jobs:
             fi
             sleep 2
           done
+
           if [ "$success" -ne 1 ]; then
             echo "Rollback readiness check failed" >&2
             exit 1
           fi
+
           retry 5 curl -fsS "$PROD_BASE_URL/healthz" >/dev/null
 
       - name: Mark workflow as failed after rollback
