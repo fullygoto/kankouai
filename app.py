@@ -2187,13 +2187,14 @@ def _resolve_rate_storage_url() -> str:
     available.
     """
 
-    if "RATE_STORAGE_URL" in os.environ:
-        return os.environ.get("RATE_STORAGE_URL", "")
+    primary = os.environ.get("RATE_STORAGE_URL")
+    if primary:
+        return primary
     legacy = os.environ.get("RATE_STORAGE_URI")
     if legacy:
         return legacy
     if _APP_ENV_EARLY in {"prod", "production"}:
-        for key in ("REDIS_URL", "REDIS_TLS_URL", "UPSTASH_REDIS_URL", "RATE_STORAGE_FALLBACK"):
+        for key in ("RATE_STORAGE_FALLBACK", "REDIS_URL", "REDIS_TLS_URL", "UPSTASH_REDIS_URL"):
             candidate = os.environ.get(key)
             if candidate:
                 return candidate
@@ -9943,15 +9944,15 @@ def readyz():
     details["pamphlet_count_by_city"] = count_pamphlets_by_city()
     details["fs_mount"] = _describe_mount(base_dir)
 
-    uri = app.config.get("RATE_STORAGE_URL") or app.config.get("RATE_STORAGE_URI")
-    if uri and uri not in ("memory://",):
-        try:
+    try:
+        uri = app.config.get("RATE_STORAGE_URL") or app.config.get("RATE_STORAGE_URI")
+        if uri and uri not in ("memory://",):
             import redis  # pip install redis
 
             r = redis.from_url(uri)
             r.ping()
-        except Exception as ex:
-            warnings.append(f"redis:{ex}")
+    except Exception as ex:
+        errors.append(f"redis:{ex}")
 
     try:
         db = globals().get("db")

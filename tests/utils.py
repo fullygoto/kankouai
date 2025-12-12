@@ -129,7 +129,6 @@ def load_test_app(monkeypatch, tmp_path, extra_env=None):
         sys.modules["linebot.models"] = models_module
         sys.modules["linebot.exceptions"] = exceptions_module
 
-    sys.modules.pop("kankouai_app", None)
     sys.modules.pop("config", None)
 
     module_name = f"app_for_test_{uuid.uuid4().hex}"
