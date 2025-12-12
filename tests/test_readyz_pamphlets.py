@@ -31,7 +31,7 @@ def test_readyz_warns_when_pamphlets_empty(monkeypatch, tmp_path):
         response = client.get("/readyz")
         payload = response.get_json()
 
-        assert response.status_code in (200, 503)
+        assert response.status_code == 200
         assert "warnings" in payload
         warnings = payload["warnings"]
         assert "pamphlet_base_dir:empty" in warnings or payload["details"].get("pamphlet_count", 0) == 0

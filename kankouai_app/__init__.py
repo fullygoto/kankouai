@@ -154,6 +154,39 @@ def _bootstrap_files_and_admin(app: Flask) -> None:
             )
 
 
+def _log_environment_config(app: Flask) -> None:
+    important_env_keys = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "COHERE_API_KEY",
+        "GOOGLE_API_KEY",
+        "RATE_STORAGE_URI",
+        "RATE_STORAGE_URL",
+        "UPSTASH_REDIS_REST_URL",
+        "UPSTASH_REDIS_REST_TOKEN",
+        "DATABASE_URL",
+        "POSTGRES_URL",
+        "PORT",
+    ]
+
+    present_keys = [key for key in important_env_keys if os.getenv(key)]
+    app.logger.info(
+        "startup.env_keys_present=%s",
+        ",".join(sorted(present_keys)) if present_keys else "none",
+    )
+
+    app.logger.info(
+        "startup.config PORT=%s DATA_BASE_DIR=%s PAMPHLET_BASE_DIR=%s RATE_STORAGE_URI_set=%s RATE_STORAGE_URL_set=%s UPSTASH_REDIS_REST_URL_set=%s",
+        os.getenv("PORT") or app.config.get("PORT") or "5000",
+        app.config.get("DATA_BASE_DIR"),
+        app.config.get("PAMPHLET_BASE_DIR"),
+        bool(os.getenv("RATE_STORAGE_URI") or app.config.get("RATE_STORAGE_URI")),
+        bool(os.getenv("RATE_STORAGE_URL") or app.config.get("RATE_STORAGE_URL")),
+        bool(os.getenv("UPSTASH_REDIS_REST_URL")),
+    )
+
+
 def create_app() -> Flask:
     global MEDIA_ROOT, IMAGES_DIR, MEDIA_DIR, MAX_UPLOAD_MB, _APP_BOOTSTRAPPED
 
@@ -253,5 +286,7 @@ def create_app() -> Flask:
             app.logger.exception("[pamphlet] initial load failed")
         _bootstrap_files_and_admin(app)
         _APP_BOOTSTRAPPED = True
+
+    _log_environment_config(app)
 
     return app
