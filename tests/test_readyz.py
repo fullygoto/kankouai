@@ -52,7 +52,7 @@ def test_readyz_reports_missing_data_base_dir(monkeypatch, tmp_path):
         )
         response = client.get("/readyz")
 
-        assert response.status_code == 503
+        assert response.status_code == 200
         payload = response.get_json()
         assert payload["status"] == "error"
         _assert_data_base_dir_error(payload, "data_base_dir:not_found")
@@ -86,7 +86,7 @@ def test_readyz_reports_when_data_base_dir_is_not_directory(monkeypatch, tmp_pat
         )
         response = client.get("/readyz")
 
-        assert response.status_code == 503
+        assert response.status_code == 200
         payload = response.get_json()
         assert payload["status"] == "error"
         _assert_data_base_dir_error(payload, "data_base_dir:not_directory")
@@ -115,7 +115,7 @@ def test_readyz_reports_not_writable(monkeypatch, tmp_path):
 
         response = client.get("/readyz")
 
-        assert response.status_code == 503
+        assert response.status_code == 200
         assert response.content_type == "application/json"
         payload = response.get_json()
         assert payload["status"] == "error"

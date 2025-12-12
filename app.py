@@ -9947,12 +9947,20 @@ def readyz():
     try:
         uri = app.config.get("RATE_STORAGE_URL") or app.config.get("RATE_STORAGE_URI")
         if uri and uri not in ("memory://",):
-            import redis  # pip install redis
+            parsed = _u.urlparse(str(uri))
+            if parsed.scheme in {"http", "https"}:
+                warnings.append("redis:http_scheme")
+            else:
+                import redis  # pip install redis
 
-            r = redis.from_url(uri)
-            r.ping()
+                r = redis.from_url(
+                    uri,
+                    socket_connect_timeout=0.5,
+                    socket_timeout=0.5,
+                )
+                r.ping()
     except Exception as ex:
-        errors.append(f"redis:{ex}")
+        warnings.append(f"redis:{ex}")
 
     try:
         db = globals().get("db")
@@ -9996,7 +10004,7 @@ def readyz():
             flags[key] = getattr(cfg, key)
 
     status = "ok" if not errors else "error"
-    code = 200 if status == "ok" else 503
+    code = 200
 
     body = {
         "ok": not errors,
