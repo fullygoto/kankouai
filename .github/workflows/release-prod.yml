@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Determine previous production commit
         id: pin
         run: |
@@ -41,6 +42,7 @@ jobs:
           fi
           echo "Previous production SHA: $PREV_SHA"
           echo "prev_sha=$PREV_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Capture new commit
         id: sha
         run: |
@@ -50,19 +52,23 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     env:
-      DATA_BASE_DIR: ${{ runner.temp }}/data
+      DATA_BASE_DIR: /tmp/data
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install dependencies
         run: |
           python -m pip install -U pip
           python -m pip install -r requirements.txt
+
       - name: Prepare writable data dirs
         run: |
           mkdir -p "$DATA_BASE_DIR/pamphlets" "$DATA_BASE_DIR/system"
+
       - name: Run pytest
         run: pytest -q
 
@@ -112,6 +118,7 @@ jobs:
           fi
           echo "Triggered deploy $deploy_id for $NEW_SHA"
           echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+
       - name: Wait for deploy to complete
         env:
           DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
@@ -191,6 +198,7 @@ jobs:
             echo "Timed out waiting for /readyz" >&2
             exit 1
           fi
+
       - name: Smoke test /healthz
         run: |
           set -euo pipefail
@@ -220,6 +228,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Update production pin
         run: |
           set -euo pipefail
@@ -227,11 +236,12 @@ jobs:
           git config user.email "actions@github.com"
           git checkout -B ops/prod-pin
           echo "$NEW_SHA" > ops/PROD_COMMIT
-          if git diff --quiet; then
+          git add ops/PROD_COMMIT
+          if git diff --cached --quiet; then
             echo "PROD_COMMIT already up to date"
             exit 0
           fi
-          git commit -am "chore: pin production to $NEW_SHA"
+          git commit -m "chore: pin production to $NEW_SHA"
           git push origin ops/prod-pin
 
   rollback:
@@ -280,6 +290,7 @@ jobs:
           fi
           echo "Triggered rollback deploy $deploy_id for $PREV_SHA"
           echo "deploy_id=$deploy_id" >> "$GITHUB_OUTPUT"
+
       - name: Wait for rollback deploy to complete
         env:
           DEPLOY_ID: ${{ steps.rollback.outputs.deploy_id }}
@@ -318,6 +329,7 @@ jobs:
                 ;;
             esac
           done
+
       - name: Wait for readiness after rollback
         run: |
           set -euo pipefail
@@ -349,6 +361,7 @@ jobs:
             exit 1
           fi
           retry 5 curl -fsS "$PROD_BASE_URL/healthz" >/dev/null
+
       - name: Mark workflow as failed after rollback
         run: |
           echo "Health gate failed; rolled back to $PREV_SHA" >&2
