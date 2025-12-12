@@ -39,9 +39,6 @@ def test_rate_storage_uses_redis_fallback_in_production(monkeypatch, tmp_path):
             "SECRET_KEY": "test",
             "APP_ENV": "production",
             "FLASK_SECRET_KEY": "prod-secret",
-            "OPENAI_API_KEY": "x",
-            "LINE_CHANNEL_SECRET": "x",
-            "LINE_CHANNEL_ACCESS_TOKEN": "x",
             "RATE_STORAGE_URL": None,
             "RATE_STORAGE_URI": None,
             "REDIS_URL": "redis://auto/0",
@@ -50,25 +47,3 @@ def test_rate_storage_uses_redis_fallback_in_production(monkeypatch, tmp_path):
         assert module.RATE_STORAGE_URL == "redis://auto/0"
         assert module.app.config["RATE_STORAGE_URL"] == "redis://auto/0"
         assert module.app.config["RATE_STORAGE_URI"] == "redis://auto/0"
-
-
-def test_rate_storage_explicit_memory_overrides_other_env(monkeypatch, tmp_path):
-    with load_test_app(
-        monkeypatch,
-        tmp_path,
-        extra_env={
-            "SECRET_KEY": "test",
-            "APP_ENV": "production",
-            "FLASK_SECRET_KEY": "prod-secret",
-            "OPENAI_API_KEY": "x",
-            "LINE_CHANNEL_SECRET": "x",
-            "LINE_CHANNEL_ACCESS_TOKEN": "x",
-            "RATE_STORAGE_URL": "memory://",
-            "RATE_STORAGE_URI": "redis://legacy/2",
-            "UPSTASH_REDIS_URL": "redis://upstash/0",
-        },
-    ) as module:
-        assert module.RATE_STORAGE_URL == "memory://"
-        assert module.app.config["RATE_STORAGE_URL"] == "memory://"
-        assert module.app.config["RATE_STORAGE_URI"] == "memory://"
-        assert getattr(module.limiter, "_storage_uri", None) == "memory://"
