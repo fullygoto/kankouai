@@ -17,6 +17,7 @@ from config import get_config
 from services import pamphlet_search
 from services.paths import ensure_data_directories, get_data_base_dir
 
+# .env があるローカル向け（本番では通常 .env は存在しない想定）
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -46,8 +47,30 @@ ADMIN_INIT_USER = "admin"
 ADMIN_INIT_PASSWORD: str | None = None
 
 
+def _truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "on", "yes"}
+
+
 def _is_pytest() -> bool:
     return bool(os.getenv("PYTEST_CURRENT_TEST"))
+
+
+def _infer_service_role() -> str:
+    """
+    SERVICE_ROLE が未指定の場合、Renderのサービス名から推測して事故を減らす。
+    - 例: kankouai-backup / backup / worker / cron など
+    """
+    explicit = (os.getenv("SERVICE_ROLE") or "").strip().lower()
+    if explicit:
+        return explicit
+
+    svc = (os.getenv("RENDER_SERVICE_NAME") or "").strip().lower()
+    if any(token in svc for token in ("backup", "worker", "cron")):
+        return "backup"
+
+    return "api"
 
 
 def _refresh_admin_init_globals() -> None:
@@ -202,6 +225,8 @@ def _log_environment_config(app: Flask) -> None:
         "DATABASE_URL",
         "POSTGRES_URL",
         "PORT",
+        "RENDER_SERVICE_NAME",
+        "SERVICE_ROLE",
     ]
 
     present_keys = [key for key in important_env_keys if os.getenv(key)]
@@ -211,7 +236,9 @@ def _log_environment_config(app: Flask) -> None:
     )
 
     app.logger.info(
-        "startup.config PORT=%s DATA_BASE_DIR=%s PAMPHLET_BASE_DIR=%s RATE_STORAGE_URI_set=%s RATE_STORAGE_URL_set=%s UPSTASH_REDIS_REST_URL_set=%s",
+        "startup.config APP_ENV=%s SERVICE_ROLE=%s PORT=%s DATA_BASE_DIR=%s PAMPHLET_BASE_DIR=%s RATE_STORAGE_URI_set=%s RATE_STORAGE_URL_set=%s UPSTASH_REDIS_REST_URL_set=%s",
+        app.config.get("APP_ENV"),
+        app.config.get("SERVICE_ROLE"),
         os.getenv("PORT") or app.config.get("PORT") or "5000",
         app.config.get("DATA_BASE_DIR"),
         app.config.get("PAMPHLET_BASE_DIR"),
@@ -226,14 +253,12 @@ def _bootstrap_storage_once(app: Flask) -> None:
     pamphlets/backups などの初回seed/legacy移行。
     pytest中は seed/migrate をしない（テストが「空」を期待するため）。
     """
-    # storage は env を見て定数化されがちなので、env 同期後に import/reload する
     import importlib
     import coreapp.storage as storage  # noqa
 
     try:
         importlib.reload(storage)
     except Exception:
-        # reload できなくても起動を止めない
         app.logger.warning("failed to reload coreapp.storage (continuing)", exc_info=True)
 
     base_dir = Path(app.config.get("DATA_BASE_DIR") or os.getenv("DATA_BASE_DIR") or DATA_BASE_DIR or "")
@@ -289,11 +314,33 @@ def create_app() -> Flask:
     # 先に config を入れる（PAMPHLET_BASE_DIR などを確定）
     app.config.from_object(get_config())
 
+    # SERVICE_ROLE（config 側が入れてくる想定だが、念のためここでも補完）
+    app.config["SERVICE_ROLE"] = (
+        (app.config.get("SERVICE_ROLE") or os.getenv("SERVICE_ROLE") or _infer_service_role()).strip().lower()
+    )
+
+    role = app.config["SERVICE_ROLE"]
+
+    # 役割ごとの安全なデフォルト（必要なら env で上書き可能）
+    enable_admin_blueprints = _truthy(
+        os.getenv("ENABLE_ADMIN_BLUEPRINTS", "1" if role in {"api", "web"} else "0")
+    )
+    enable_pamphlet_load = _truthy(
+        os.getenv("ENABLE_PAMPHLET_LOAD", "1" if role in {"api", "web"} else "0")
+    )
+    enable_files_bootstrap = _truthy(
+        os.getenv("ENABLE_FILES_BOOTSTRAP", "1" if role in {"api", "web"} else "0")
+    )
+    enable_storage_bootstrap = _truthy(
+        os.getenv("ENABLE_STORAGE_BOOTSTRAP", "1" if role in {"api", "web"} else "0")
+    )
+
     # ★ テストごとに必ず data paths を再計算
     _configure_data_paths(app)
 
-    # ★ seed/legacy（pytest中はスキップ）
-    _bootstrap_storage_once(app)
+    # ★ seed/legacy（pytest中はスキップ） ※backup系はデフォルトでオフ
+    if enable_storage_bootstrap:
+        _bootstrap_storage_once(app)
 
     @app.template_global()
     def safe_url_for(endpoint: str, **values: Any) -> str:
@@ -371,19 +418,29 @@ def create_app() -> Flask:
 
     MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 64)
 
-    # ★ 毎回 blueprint を確実に登録（グローバルフラグでスキップしない）
-    if admin_pamphlets_bp.name not in app.blueprints:
-        app.register_blueprint(admin_pamphlets_bp)
-    if admin_rollback_bp.name not in app.blueprints:
-        app.register_blueprint(admin_rollback_bp)
+    # ★ blueprint（admin系は role によりデフォルト無効。必要なら ENABLE_ADMIN_BLUEPRINTS=1 で強制）
+    if enable_admin_blueprints:
+        if admin_pamphlets_bp.name not in app.blueprints:
+            app.register_blueprint(admin_pamphlets_bp)
+        if admin_rollback_bp.name not in app.blueprints:
+            app.register_blueprint(admin_rollback_bp)
 
-    pamphlet_search.configure(app.config)
-    try:
-        pamphlet_search.load_all()
-    except Exception:
-        app.logger.exception("[pamphlet] initial load failed")
+    # Pamphlet search（backup系はデフォルトでロードしない。必要なら ENABLE_PAMPHLET_LOAD=1）
+    if enable_pamphlet_load:
+        pamphlet_search.configure(app.config)
+        try:
+            pamphlet_search.load_all()
+        except Exception:
+            app.logger.exception("[pamphlet] initial load failed")
+    else:
+        app.logger.info("[pamphlet] skipped (ENABLE_PAMPHLET_LOAD=0, role=%s)", role)
 
-    _bootstrap_files_and_admin(app)
+    # users.json など（backup系はデフォルトで作らない。必要なら ENABLE_FILES_BOOTSTRAP=1）
+    if enable_files_bootstrap:
+        _bootstrap_files_and_admin(app)
+    else:
+        app.logger.info("[boot] file/admin bootstrap skipped (ENABLE_FILES_BOOTSTRAP=0, role=%s)", role)
+
     _log_environment_config(app)
     return app
 
