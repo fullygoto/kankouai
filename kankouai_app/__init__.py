@@ -14,12 +14,7 @@ from werkzeug.security import generate_password_hash
 from admin_pamphlets import bp as admin_pamphlets_bp
 from admin_rollback import bp as admin_rollback_bp
 from config import get_config
-from coreapp.storage import (
-    BASE_DIR as STORAGE_BASE_DIR,
-    ensure_dirs,
-    migrate_from_legacy_paths,
-    seed_from_repo_if_empty,
-)
+import coreapp.storage as storage
 from services import pamphlet_search
 from services.paths import ensure_data_directories, get_data_base_dir
 
@@ -145,9 +140,16 @@ def _bootstrap_files_and_admin(app: Flask) -> None:
                 "note": "初回ログイン後にこのファイルを削除し、パスワードを変更してください。",
             }
             try:
-                init_path.write_text(json.dumps(init_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                init_path.write_text(
+                    json.dumps(init_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
             except OSError:
-                app.logger.warning("failed to write factory credential hint to %s", init_path, exc_info=True)
+                app.logger.warning(
+                    "failed to write factory credential hint to %s",
+                    init_path,
+                    exc_info=True,
+                )
             app.logger.warning(
                 "users.json が見つかりませんでした。工場出荷管理者を作成し、初期認証情報を %s に出力しました。",
                 init_path,
@@ -187,6 +189,39 @@ def _log_environment_config(app: Flask) -> None:
     )
 
 
+def _bootstrap_storage_once(app: Flask) -> None:
+    """
+    storageの初回ブートストラップ（legacy移行/seed）を一度だけ実行する。
+    .bootstrap.done の書き込み前に、親ディレクトリが存在することを保証する。
+    """
+    storage.ensure_dirs()
+
+    # storage.BASE_DIR は ensure_dirs() 呼び出しで最新に同期される想定
+    base_dir = Path(storage.BASE_DIR)
+    sentinel = base_dir / ".bootstrap.done"
+
+    if sentinel.exists():
+        return
+
+    storage.migrate_from_legacy_paths()
+    storage.seed_from_repo_if_empty()
+
+    try:
+        # base_dir が「ファイル」の場合などは sentinel を書けないのでスキップ（CI/stagingでは落とさない）
+        if base_dir.exists() and not base_dir.is_dir():
+            app.logger.warning(
+                "DATA_BASE_DIR exists but is not a directory; skipping bootstrap sentinel: %s",
+                base_dir,
+            )
+            return
+
+        base_dir.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text("ok", encoding="utf-8")
+
+    except OSError:
+        app.logger.warning("Failed to write bootstrap sentinel", exc_info=True)
+
+
 def create_app() -> Flask:
     global MEDIA_ROOT, IMAGES_DIR, MEDIA_DIR, MAX_UPLOAD_MB, _APP_BOOTSTRAPPED
 
@@ -196,15 +231,8 @@ def create_app() -> Flask:
         static_folder=str(STATIC_DIR),
     )
 
-    ensure_dirs()
-    _bootstrap_sentinel = Path(STORAGE_BASE_DIR / ".bootstrap.done")
-    if not _bootstrap_sentinel.exists():
-        migrate_from_legacy_paths()
-        seed_from_repo_if_empty()
-        try:
-            _bootstrap_sentinel.write_text("ok", encoding="utf-8")
-        except OSError:
-            app.logger.warning("Failed to write bootstrap sentinel", exc_info=True)
+    # ★ ここが今回の修正ポイント：親ディレクトリが無い状態でも落ちないようにする
+    _bootstrap_storage_once(app)
 
     @app.template_global()
     def safe_url_for(endpoint: str, **values: Any) -> str:
