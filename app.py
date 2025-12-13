@@ -30,6 +30,9 @@ from difflib import get_close_matches  # Used for fuzzy matching
 import secrets          # Used for token generation
 
 
+ADMIN_INIT_USER = os.getenv("ADMIN_INIT_USER", "admin")
+ADMIN_INIT_PASSWORD = os.getenv("ADMIN_INIT_PASSWORD")
+
 # === Third-Party ===
 from flask import (
     Flask, render_template, request, redirect, url_for, flash, session,
@@ -146,6 +149,12 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 #  Flask / 設定
 # =========================
 app = kankouai_app.create_app()
+
+# tests expect image save to work
+try:
+    IMAGES_DIR = app.config.get("IMAGES_DIR") or IMAGES_DIR
+except Exception:
+    pass
 
 MEDIA_ROOT = kankouai_app.MEDIA_ROOT
 IMAGES_DIR = kankouai_app.IMAGES_DIR
@@ -2206,21 +2215,51 @@ app.config["RATE_STORAGE_URL"] = RATE_STORAGE_URL
 # Backward compatibility for modules that still read RATE_STORAGE_URI.
 app.config["RATE_STORAGE_URI"] = RATE_STORAGE_URL
 
-if _APP_ENV_EARLY in {"prod", "production"} and RATE_STORAGE_URL.startswith("memory://"):
+if _APP_ENV_EARLY in {"prod", "production"} and str(RATE_STORAGE_URL).startswith("memory://"):
     app.logger.warning(
         "RATE_STORAGE_URL is using memory:// in production. Configure redis:// for shared limits."
     )
 
+# デフォルト（Limiterが無い/無効化時も壊れない）
+limiter = None
+
+def limit_deco(*a, **k):
+    def _wrap(f):
+        return f
+    return _wrap
+
 if Limiter:
-    # ★一度だけ初期化し、必要なら後からデコレータで利用
-    limiter = Limiter(key_func=_limiter_remote or _remote_ip, storage_uri=RATE_STORAGE_URL)
-    limiter.init_app(app)
-    limit_deco = limiter.limit
-else:
-    limiter = None
-    def limit_deco(*a, **k):
-        def _wrap(f): return f
-        return _wrap
+    # ★ まず指定URLで初期化 → 失敗したら memory:// にフォールバック（起動は継続）
+    try:
+        limiter = Limiter(
+            key_func=_limiter_remote or _remote_ip,
+            storage_uri=RATE_STORAGE_URL,
+        )
+        limiter.init_app(app)
+        limit_deco = limiter.limit
+
+    except Exception as e:
+        app.logger.warning(
+            "Failed to init Limiter with RATE_STORAGE_URL=%s; falling back to memory:// (%r)",
+            RATE_STORAGE_URL,
+            e,
+            exc_info=True,
+        )
+        try:
+            limiter = Limiter(
+                key_func=_limiter_remote or _remote_ip,
+                storage_uri="memory://",
+            )
+            limiter.init_app(app)
+            limit_deco = limiter.limit
+        except Exception:
+            app.logger.warning(
+                "Failed to init Limiter even with memory://; disabling rate limits",
+                exc_info=True,
+            )
+            limiter = None
+            # limit_deco は no-op のまま
+
 
 LOGIN_LIMITS = os.getenv("LOGIN_LIMITS", "10/minute;100/day")
 
