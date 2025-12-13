@@ -42,21 +42,36 @@ from flask import (
 from flask import current_app
 
 
-# --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
-try:
-    # 既に flask_login を使っている環境なら公式の login_required を使う
-    from flask_login import login_required  # type: ignore
-except Exception:
-    # フォールバック（セッションに role が無ければ 403）
-    def login_required(view_func):
-        from functools import wraps  # すでに上で import しているが二重でもOK
-        @wraps(view_func)
-        def _wrapped(*args, **kwargs):
-            if not session.get("role"):
-                return abort(403)
-            return view_func(*args, **kwargs)
-        return _wrapped
-# ---------------------------------------------------------------------------
+diff --git a/app.py b/app.py
+index 0000000..3333333 100644
+--- a/app.py
++++ b/app.py
+@@
+-# --- login_required 互換デコレータ（flask_login が無い場合のフォールバック） ---
+-try:
+-    # 既に flask_login を使っている環境なら公式の login_required を使う
+-    from flask_login import login_required  # type: ignore
+-except Exception:
+-    # フォールバック（セッションに role が無ければ 403）
+-    def login_required(view_func):
+-        from functools import wraps  # すでに上で import しているが二重でもOK
+-        @wraps(view_func)
+-        def _wrapped(*args, **kwargs):
+-            if not session.get("role"):
+-                return abort(403)
+-            return view_func(*args, **kwargs)
+-        return _wrapped
+-# ---------------------------------------------------------------------------
++# --- session ベース login_required（未ログインは /login へリダイレクト） ---
++def login_required(view_func):
++    @wraps(view_func)
++    def _wrapped(*args, **kwargs):
++        if not session.get("role"):
++            return redirect(url_for("login"))
++        return view_func(*args, **kwargs)
++    return _wrapped
++# ---------------------------------------------------------------------------
+
 
 from werkzeug.exceptions import RequestEntityTooLarge, NotFound
 from werkzeug.utils import secure_filename, safe_join
