@@ -14,6 +14,7 @@ from werkzeug.security import generate_password_hash
 from admin_pamphlets import bp as admin_pamphlets_bp
 from admin_rollback import bp as admin_rollback_bp
 from config import get_config
+
 import coreapp.storage as storage
 from services import pamphlet_search
 from services.paths import ensure_data_directories, get_data_base_dir
@@ -28,6 +29,8 @@ MEDIA_ROOT: str | None = None
 IMAGES_DIR: str | None = None
 MEDIA_DIR: Path | None = None
 MAX_UPLOAD_MB: int = 64
+
+# 互換用（他モジュールが参照していても壊れないよう残す）
 DATA_BASE_DIR: str = ""
 ENTRIES_FILE: str = ""
 DATA_DIR: str = ""
@@ -39,21 +42,28 @@ NOTICES_FILE: str = ""
 SHOP_INFO_FILE: str = ""
 PAUSED_NOTICE_FILE: str = ""
 SEND_LOG_FILE: str = ""
-_DATA_PATHS_INITIALIZED = False
-_APP_BOOTSTRAPPED = False
+
+ADMIN_INIT_USER = os.environ.get("ADMIN_INIT_USER", "admin")
+ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")
 
 
 def _configure_data_paths(flask_app: Flask) -> None:
-    global _DATA_PATHS_INITIALIZED
-    if _DATA_PATHS_INITIALIZED:
-        return
+    """
+    テストで monkeypatch される前提なので、create_app() 毎に必ず計算して同期する。
+    """
     global DATA_BASE_DIR, ENTRIES_FILE, DATA_DIR, LOG_DIR, LOG_FILE
     global SYNONYM_FILE, USERS_FILE, NOTICES_FILE, SHOP_INFO_FILE
-    global PAUSED_NOTICE_FILE, SEND_LOG_FILE
+    global PAUSED_NOTICE_FILE, SEND_LOG_FILE, IMAGES_DIR
 
     base_path = get_data_base_dir(flask_app.config)
     DATA_BASE_DIR = str(base_path)
     flask_app.config["DATA_BASE_DIR"] = DATA_BASE_DIR
+
+    # storage 側も env を優先して読むようにしてあるので、ここで env にも同期して“ズレ”を防ぐ
+    os.environ["DATA_BASE_DIR"] = DATA_BASE_DIR
+    if flask_app.config.get("PAMPHLET_BASE_DIR"):
+        os.environ["PAMPHLET_BASE_DIR"] = str(flask_app.config["PAMPHLET_BASE_DIR"])
+
     ENTRIES_FILE = os.path.join(DATA_BASE_DIR, "entries.json")
     DATA_DIR = os.path.join(DATA_BASE_DIR, "data")
     LOG_DIR = os.path.join(DATA_BASE_DIR, "logs")
@@ -64,7 +74,7 @@ def _configure_data_paths(flask_app: Flask) -> None:
     SHOP_INFO_FILE = os.path.join(DATA_BASE_DIR, "shop_infos.json")
     PAUSED_NOTICE_FILE = os.path.join(DATA_BASE_DIR, "paused_notice.json")
     SEND_LOG_FILE = os.path.join(LOG_DIR, "send_log.jsonl")
-    global IMAGES_DIR
+
     IMAGES_DIR = os.path.join(DATA_DIR, "images")
     flask_app.config["IMAGES_DIR"] = IMAGES_DIR
 
@@ -73,22 +83,17 @@ def _configure_data_paths(flask_app: Flask) -> None:
         pamphlet_dir=flask_app.config.get("PAMPHLET_BASE_DIR"),
     )
 
-    _DATA_PATHS_INITIALIZED = True
-
 
 def _ensure_json(path: str, default_obj: Any) -> None:
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default_obj, f, ensure_ascii=False, indent=2)
-
-
-ADMIN_INIT_USER = os.environ.get("ADMIN_INIT_USER", "admin")
-ADMIN_INIT_PASSWORD = os.environ.get("ADMIN_INIT_PASSWORD")
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        p.write_text(json.dumps(default_obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _bootstrap_files_and_admin(app: Flask) -> None:
-    app.logger.info(f"[boot] DATA_BASE_DIR={DATA_BASE_DIR}")
-    app.logger.info(f"[boot] USERS_FILE path: {USERS_FILE}")
+    app.logger.info("[boot] DATA_BASE_DIR=%s", DATA_BASE_DIR)
+    app.logger.info("[boot] USERS_FILE=%s", USERS_FILE)
 
     _ensure_json(ENTRIES_FILE, [])
     _ensure_json(SYNONYM_FILE, {})
@@ -96,15 +101,14 @@ def _bootstrap_files_and_admin(app: Flask) -> None:
     _ensure_json(SHOP_INFO_FILE, {})
 
     users: list[dict[str, str]] = []
-    users_exists = os.path.exists(USERS_FILE)
+    users_exists = Path(USERS_FILE).exists()
     if users_exists:
         try:
-            with open(USERS_FILE, "r", encoding="utf-8") as f:
-                users = json.load(f)
+            users = json.loads(Path(USERS_FILE).read_text(encoding="utf-8"))
         except Exception:
             users = []
 
-    if not users_exists or not users:
+    if (not users_exists) or (not users):
         if ADMIN_INIT_PASSWORD:
             users = [
                 {
@@ -114,8 +118,7 @@ def _bootstrap_files_and_admin(app: Flask) -> None:
                     "role": "admin",
                 }
             ]
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(users, f, ensure_ascii=False, indent=2)
+            Path(USERS_FILE).write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
             app.logger.warning(
                 "users.json を新規作成し、管理者ユーザー '%s' を作成しました。初回ログイン後 ADMIN_INIT_PASSWORD を環境変数から削除してください。",
                 ADMIN_INIT_USER,
@@ -131,8 +134,8 @@ def _bootstrap_files_and_admin(app: Flask) -> None:
                     "role": "admin",
                 }
             ]
-            with open(USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(users, f, ensure_ascii=False, indent=2)
+            Path(USERS_FILE).write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
+
             init_path = Path(USERS_FILE).with_suffix(Path(USERS_FILE).suffix + ".init")
             init_payload = {
                 "user_id": factory_user,
@@ -140,16 +143,10 @@ def _bootstrap_files_and_admin(app: Flask) -> None:
                 "note": "初回ログイン後にこのファイルを削除し、パスワードを変更してください。",
             }
             try:
-                init_path.write_text(
-                    json.dumps(init_payload, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                init_path.write_text(json.dumps(init_payload, ensure_ascii=False, indent=2), encoding="utf-8")
             except OSError:
-                app.logger.warning(
-                    "failed to write factory credential hint to %s",
-                    init_path,
-                    exc_info=True,
-                )
+                app.logger.warning("failed to write factory credential hint to %s", init_path, exc_info=True)
+
             app.logger.warning(
                 "users.json が見つかりませんでした。工場出荷管理者を作成し、初期認証情報を %s に出力しました。",
                 init_path,
@@ -191,12 +188,11 @@ def _log_environment_config(app: Flask) -> None:
 
 def _bootstrap_storage_once(app: Flask) -> None:
     """
-    storageの初回ブートストラップ（legacy移行/seed）を一度だけ実行する。
-    .bootstrap.done の書き込み前に、親ディレクトリが存在することを保証する。
+    pamphlets/backups などの初回seed/legacy移行。
+    sentinel書き込み前に親ディレクトリを必ず作る。
     """
     storage.ensure_dirs()
 
-    # storage.BASE_DIR は ensure_dirs() 呼び出しで最新に同期される想定
     base_dir = Path(storage.BASE_DIR)
     sentinel = base_dir / ".bootstrap.done"
 
@@ -207,23 +203,17 @@ def _bootstrap_storage_once(app: Flask) -> None:
     storage.seed_from_repo_if_empty()
 
     try:
-        # base_dir が「ファイル」の場合などは sentinel を書けないのでスキップ（CI/stagingでは落とさない）
         if base_dir.exists() and not base_dir.is_dir():
-            app.logger.warning(
-                "DATA_BASE_DIR exists but is not a directory; skipping bootstrap sentinel: %s",
-                base_dir,
-            )
+            app.logger.warning("DATA_BASE_DIR exists but is not a directory; skipping bootstrap sentinel: %s", base_dir)
             return
-
         base_dir.mkdir(parents=True, exist_ok=True)
         sentinel.write_text("ok", encoding="utf-8")
-
     except OSError:
         app.logger.warning("Failed to write bootstrap sentinel", exc_info=True)
 
 
 def create_app() -> Flask:
-    global MEDIA_ROOT, IMAGES_DIR, MEDIA_DIR, MAX_UPLOAD_MB, _APP_BOOTSTRAPPED
+    global MEDIA_ROOT, IMAGES_DIR, MEDIA_DIR, MAX_UPLOAD_MB
 
     app = Flask(
         __name__,
@@ -231,7 +221,13 @@ def create_app() -> Flask:
         static_folder=str(STATIC_DIR),
     )
 
-    # ★ ここが今回の修正ポイント：親ディレクトリが無い状態でも落ちないようにする
+    # 先に config を入れる（PAMPHLET_BASE_DIR などの値を確定させる）
+    app.config.from_object(get_config())
+
+    # ★ テストごとに必ず data paths を再計算（ここが超重要）
+    _configure_data_paths(app)
+
+    # storage の seed/legacy（DATA_BASE_DIR を env 同期済みなのでズレない）
     _bootstrap_storage_once(app)
 
     @app.template_global()
@@ -240,8 +236,6 @@ def create_app() -> Flask:
             return url_for(endpoint, **values)
         except BuildError:
             return ""
-
-    app.config.from_object(get_config())
 
     MEDIA_ROOT = os.getenv("MEDIA_ROOT") or app.config.get("MEDIA_ROOT") or MEDIA_ROOT
     IMAGES_DIR = os.getenv("IMAGES_DIR") or app.config.get("IMAGES_DIR") or MEDIA_ROOT
@@ -301,20 +295,20 @@ def create_app() -> Flask:
 
     MAX_UPLOAD_MB = app.config.get("MAX_UPLOAD_MB", 64)
 
-    if not _APP_BOOTSTRAPPED:
-        _configure_data_paths(app)
-        if "admin_pamphlets" not in app.blueprints:
-            app.register_blueprint(admin_pamphlets_bp)
-        if "admin_rollback" not in app.blueprints:
-            app.register_blueprint(admin_rollback_bp)
-        pamphlet_search.configure(app.config)
-        try:
-            pamphlet_search.load_all()
-        except Exception:
-            app.logger.exception("[pamphlet] initial load failed")
-        _bootstrap_files_and_admin(app)
-        _APP_BOOTSTRAPPED = True
+    # ★ 毎回 create_app で blueprint を確実に登録（モジュールグローバルでスキップしない）
+    if admin_pamphlets_bp.name not in app.blueprints:
+        app.register_blueprint(admin_pamphlets_bp)
+    if admin_rollback_bp.name not in app.blueprints:
+        app.register_blueprint(admin_rollback_bp)
+
+    pamphlet_search.configure(app.config)
+    try:
+        pamphlet_search.load_all()
+    except Exception:
+        app.logger.exception("[pamphlet] initial load failed")
+
+    # users/entriesなどの初期ファイル
+    _bootstrap_files_and_admin(app)
 
     _log_environment_config(app)
-
     return app
