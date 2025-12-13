@@ -161,16 +161,41 @@ def _app_config(key: str, default: object = None) -> object:
 
 
 def _data_base_dir() -> str:
-    base = _app_config("DATA_BASE_DIR") or kankouai_app.DATA_BASE_DIR
-    return str(base or "")
+    base = _app_config("DATA_BASE_DIR") or os.getenv("DATA_BASE_DIR") or kankouai_app.DATA_BASE_DIR
+    if base:
+        return str(Path(str(base)).expanduser())
+    # 安全なデフォルト（リポジトリ直下 ./data）
+    return str((Path(kankouai_app.BASE_DIR) / "data").resolve())
 
 
 def _images_dir() -> str:
-    images = _app_config("IMAGES_DIR") or kankouai_app.IMAGES_DIR
-    if images:
-        return str(images)
-    fallback = os.path.join(_data_base_dir(), "data", "images")
-    return fallback
+    # 優先順位: Flask config -> env -> kankouai_app グローバル
+    raw = _app_config("IMAGES_DIR") or os.getenv("IMAGES_DIR") or kankouai_app.IMAGES_DIR
+    base_dir = Path(_data_base_dir())
+    path = None
+
+    if raw:
+        try:
+            path = Path(str(raw)).expanduser()
+        except Exception:
+            path = None
+
+    if not path:
+        path = base_dir / "data" / "images"
+
+    try:
+        path = path.resolve()
+    except Exception:
+        # resolve に失敗しても mkdir できる形で返す
+        path = path.absolute()
+
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        # どうしても作れない場合でも空文字は返さない
+        pass
+
+    return str(path)
 
 
 MEDIA_ROOT = _app_config("MEDIA_ROOT") or kankouai_app.MEDIA_ROOT or _images_dir()
@@ -9974,7 +9999,8 @@ def readyz():
     warnings: list[str] = []
     details: dict[str, object] = {}
 
-    base_dir = Path(app.config.get("DATA_BASE_DIR", "/var/data"))
+    base_dir = Path(app.config.get("DATA_BASE_DIR", _data_base_dir() or "/var/data"))
+    base_dir = base_dir.expanduser()
     os.environ["DATA_BASE_DIR"] = str(base_dir)
     details["data_base_dir"] = str(base_dir)
 
@@ -9985,24 +10011,29 @@ def readyz():
     elif not _probe_writable(base_dir):
         errors.append("data_base_dir:not_writable")
 
-    pamphlet_dir = Path(
-        app.config.get("PAMPHLET_BASE_DIR", str(base_dir / "pamphlets"))
+    pamphlet_dir_value = (
+        app.config.get("PAMPHLET_BASE_DIR")
+        or os.getenv("PAMPHLET_BASE_DIR")
+        or str(base_dir / "pamphlets")
     )
-    if app.config.get("PAMPHLET_BASE_DIR"):
-        os.environ["PAMPHLET_BASE_DIR"] = str(pamphlet_dir)
+    pamphlet_dir = Path(str(pamphlet_dir_value)).expanduser()
+    os.environ["PAMPHLET_BASE_DIR"] = str(pamphlet_dir)
     details["pamphlet_base_dir"] = str(pamphlet_dir)
     pamphlet_count = 0
     if not pamphlet_dir.exists():
         warnings.append("pamphlet_base_dir:missing")
     else:
         try:
-            pamphlet_count = count_pamphlet_files()
+            pamphlet_count = sum(1 for _ in pamphlet_dir.rglob("*.txt"))
         except Exception as ex:  # pragma: no cover - defensive guard
             warnings.append(f"pamphlet_scan:{ex}")
         if pamphlet_count == 0:
             warnings.append("pamphlet_base_dir:empty")
     details["pamphlet_count"] = pamphlet_count
-    details["pamphlet_count_by_city"] = count_pamphlets_by_city()
+    try:
+        details["pamphlet_count_by_city"] = count_pamphlets_by_city()
+    except Exception as ex:
+        warnings.append(f"pamphlet_city_scan:{ex}")
     details["fs_mount"] = _describe_mount(base_dir)
 
     try:
