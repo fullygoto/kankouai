@@ -9,18 +9,16 @@ on:
 
 env:
   APP_ENV: staging
-  # Secretsが使えない状況（fork PRなど）でも落ちないようにダミーへフォールバック
+  # fork PR などで secrets が空でも落ちないようにダミーへフォールバック
   SECRET_KEY: ${{ secrets.SECRET_KEY || 'ci_dummy_secret_key' }}
   OPENAI_API_KEY: test-token
   LINE_CHANNEL_SECRET: test-secret
   LINE_CHANNEL_ACCESS_TOKEN: test-token
+  PYTHONUNBUFFERED: "1"
 
 jobs:
   tests:
     runs-on: ubuntu-latest
-    env:
-      # runner.temp は job env で使えないので /tmp を使う
-      DATA_BASE_DIR: /tmp/kankouai-ci-data
     steps:
       - uses: actions/checkout@v4
 
@@ -42,9 +40,12 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install ruff
 
-      - name: Prepare writable data dirs
+      - name: Sanity check (DATA_BASE_DIR is not forced by CI)
         run: |
-          mkdir -p "$DATA_BASE_DIR/pamphlets" "$DATA_BASE_DIR/system"
+          python - <<'PY'
+          import os
+          print("DATA_BASE_DIR set in env:", "DATA_BASE_DIR" in os.environ)
+          PY
 
       - name: Run pytest
         run: pytest -q
@@ -54,9 +55,6 @@ jobs:
 
   restore-verify:
     runs-on: ubuntu-latest
-    env:
-      # runner.temp は job env で使えないので /tmp を使う
-      DATA_BASE_DIR: /tmp/kankouai-ci-data
     steps:
       - uses: actions/checkout@v4
 
@@ -69,10 +67,11 @@ jobs:
           python -m pip install -U pip
           python -m pip install -r requirements.txt
 
-      - name: Prepare data directories
+      - name: Set DATA_BASE_DIR for restore scripts only
         run: |
-          mkdir -p "$DATA_BASE_DIR/system" "$DATA_BASE_DIR/pamphlets"
-          echo "ci-restore-check" > "$DATA_BASE_DIR/system/restore-check.txt"
+          echo "DATA_BASE_DIR=$RUNNER_TEMP/kankouai-restore-${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/kankouai-restore-${GITHUB_RUN_ID}/system" "$RUNNER_TEMP/kankouai-restore-${GITHUB_RUN_ID}/pamphlets"
+          echo "ci-restore-check" > "$RUNNER_TEMP/kankouai-restore-${GITHUB_RUN_ID}/system/restore-check.txt"
 
       - name: Validate latest backup restore path
         run: bash scripts/verify_restore.sh --notes "ci-restore-verify"
