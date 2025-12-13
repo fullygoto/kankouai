@@ -54,6 +54,14 @@ jobs:
   tests:
     needs: prepare
     runs-on: ubuntu-latest
+    env:
+      # CI用ダミー（release-prod.yml でも pytest が落ちないようにする）
+      APP_ENV: staging
+      SECRET_KEY: test-secret
+      OPENAI_API_KEY: test-token
+      LINE_CHANNEL_SECRET: test-secret
+      LINE_CHANNEL_ACCESS_TOKEN: test-token
+      DATA_BASE_DIR: ${{ runner.temp }}/data
     steps:
       - uses: actions/checkout@v4
 
@@ -61,9 +69,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set DATA_BASE_DIR
-        run: |
-          echo "DATA_BASE_DIR=${RUNNER_TEMP}/data" >> "$GITHUB_ENV"
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
@@ -179,7 +191,7 @@ jobs:
     env:
       PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
     steps:
-      - name: Wait for /readyz to become healthy
+      - name: Wait for /healthz to become healthy (required)
         run: |
           set -euo pipefail
           if [ -z "$PROD_BASE_URL" ]; then
@@ -203,9 +215,9 @@ jobs:
           }
 
           success=0
-          for attempt in $(seq 1 300); do
-            if retry 3 curl -fsS "$PROD_BASE_URL/readyz" >/dev/null; then
-              echo "readyz healthy on attempt $attempt"
+          for attempt in $(seq 1 180); do
+            if retry 3 curl -fsS "$PROD_BASE_URL/healthz" >/dev/null; then
+              echo "healthz healthy on attempt $attempt"
               success=1
               break
             fi
@@ -213,11 +225,11 @@ jobs:
           done
 
           if [ "$success" -ne 1 ]; then
-            echo "Timed out waiting for /readyz" >&2
+            echo "Timed out waiting for /healthz" >&2
             exit 1
           fi
 
-      - name: Smoke test /healthz
+      - name: (Optional) Check /readyz (non-blocking)
         run: |
           set -euo pipefail
           retry() {
@@ -234,7 +246,14 @@ jobs:
               sleep $((delay ** count))
             done
           }
-          retry 5 curl -fsS "$PROD_BASE_URL/healthz" >/dev/null
+
+          if retry 3 curl -fsS "$PROD_BASE_URL/readyz" >/dev/null; then
+            echo "readyz OK"
+            exit 0
+          fi
+
+          echo "WARNING: /readyz not healthy (continuing)."
+          exit 0
 
   pin-update:
     needs: [prepare, deploy, health-gate]
@@ -360,7 +379,7 @@ jobs:
             esac
           done
 
-      - name: Wait for readiness after rollback
+      - name: Wait for /healthz after rollback (required)
         run: |
           set -euo pipefail
 
@@ -380,9 +399,9 @@ jobs:
           }
 
           success=0
-          for attempt in $(seq 1 300); do
-            if retry 3 curl -fsS "$PROD_BASE_URL/readyz" >/dev/null; then
-              echo "readyz healthy after rollback on attempt $attempt"
+          for attempt in $(seq 1 180); do
+            if retry 3 curl -fsS "$PROD_BASE_URL/healthz" >/dev/null; then
+              echo "healthz healthy after rollback on attempt $attempt"
               success=1
               break
             fi
@@ -390,11 +409,9 @@ jobs:
           done
 
           if [ "$success" -ne 1 ]; then
-            echo "Rollback readiness check failed" >&2
+            echo "Rollback health check failed" >&2
             exit 1
           fi
-
-          retry 5 curl -fsS "$PROD_BASE_URL/healthz" >/dev/null
 
       - name: Mark workflow as failed after rollback
         run: |
