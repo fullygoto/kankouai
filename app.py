@@ -150,30 +150,48 @@ from linebot.exceptions import LineBotApiError, InvalidSignatureError
 # =========================
 app = kankouai_app.create_app()
 
-# tests expect image save to work
-try:
-    IMAGES_DIR = app.config.get("IMAGES_DIR") or IMAGES_DIR
-except Exception:
-    pass
 
-MEDIA_ROOT = kankouai_app.MEDIA_ROOT
-IMAGES_DIR = kankouai_app.IMAGES_DIR
-MEDIA_DIR = kankouai_app.MEDIA_DIR
+def _app_config(key: str, default: object = None) -> object:
+    """Prefer ``current_app`` then fall back to the global ``app`` config."""
+
+    try:
+        return current_app.config.get(key, default)
+    except Exception:
+        return app.config.get(key, default)
+
+
+def _data_base_dir() -> str:
+    base = _app_config("DATA_BASE_DIR") or kankouai_app.DATA_BASE_DIR
+    return str(base or "")
+
+
+def _images_dir() -> str:
+    images = _app_config("IMAGES_DIR") or kankouai_app.IMAGES_DIR
+    if images:
+        return str(images)
+    fallback = os.path.join(_data_base_dir(), "data", "images")
+    return fallback
+
+
+MEDIA_ROOT = _app_config("MEDIA_ROOT") or kankouai_app.MEDIA_ROOT or _images_dir()
+IMAGES_DIR = _images_dir()
+MEDIA_DIR = _app_config("MEDIA_DIR") or kankouai_app.MEDIA_DIR or MEDIA_ROOT
 
 # 以降のメッセージ等で使うため、上限MBを設定から参照
-MAX_UPLOAD_MB = kankouai_app.MAX_UPLOAD_MB
+MAX_UPLOAD_MB = _app_config("MAX_UPLOAD_MB", kankouai_app.MAX_UPLOAD_MB)
 
 BASE_DIR = kankouai_app.BASE_DIR
-ENTRIES_FILE = kankouai_app.ENTRIES_FILE
-DATA_DIR = kankouai_app.DATA_DIR
-LOG_DIR = kankouai_app.LOG_DIR
-LOG_FILE = kankouai_app.LOG_FILE
-SYNONYM_FILE = kankouai_app.SYNONYM_FILE
-USERS_FILE = kankouai_app.USERS_FILE
-NOTICES_FILE = kankouai_app.NOTICES_FILE
-SHOP_INFO_FILE = kankouai_app.SHOP_INFO_FILE
-PAUSED_NOTICE_FILE = kankouai_app.PAUSED_NOTICE_FILE
-SEND_LOG_FILE = kankouai_app.SEND_LOG_FILE
+DATA_BASE_DIR = _data_base_dir()
+ENTRIES_FILE = _app_config("ENTRIES_FILE", kankouai_app.ENTRIES_FILE)
+DATA_DIR = _app_config("DATA_DIR", kankouai_app.DATA_DIR)
+LOG_DIR = _app_config("LOG_DIR", kankouai_app.LOG_DIR)
+LOG_FILE = _app_config("LOG_FILE", kankouai_app.LOG_FILE)
+SYNONYM_FILE = _app_config("SYNONYM_FILE", kankouai_app.SYNONYM_FILE)
+USERS_FILE = _app_config("USERS_FILE", kankouai_app.USERS_FILE)
+NOTICES_FILE = _app_config("NOTICES_FILE", kankouai_app.NOTICES_FILE)
+SHOP_INFO_FILE = _app_config("SHOP_INFO_FILE", kankouai_app.SHOP_INFO_FILE)
+PAUSED_NOTICE_FILE = _app_config("PAUSED_NOTICE_FILE", kankouai_app.PAUSED_NOTICE_FILE)
+SEND_LOG_FILE = _app_config("SEND_LOG_FILE", kankouai_app.SEND_LOG_FILE)
 
 # === Core responder singletons ============================================
 PRIORITY_INTENT = get_intent_detector()
@@ -584,7 +602,7 @@ def _resolve_wm_kind(arg: str | None):
 # 依存: Pillow, safe_join, send_file, load_entries(), app など
 # 既存の設定が無い場合のデフォルト
 _APP_ENV_MEDIA = (os.getenv("APP_ENV") or "staging").lower()
-_MEDIA_FALLBACK = (
+_MEDIA_FALLBACK = _images_dir() or (
     os.getenv("MEDIA_ROOT")
     or os.getenv("MEDIA_DIR")
     or os.getenv("IMAGES_DIR")
@@ -597,7 +615,7 @@ IMAGE_PROTECT = os.getenv("IMAGE_PROTECT", _IMAGE_PROTECT_DEFAULT).lower() in {"
 
 # ==== 画像保存/配信のディレクトリ統一（互換アライメント） ====
 MEDIA_URL_PREFIX = os.getenv("MEDIA_URL_PREFIX", "/media/img")
-IMAGES_DIR = os.getenv("IMAGES_DIR") or os.getenv("MEDIA_DIR") or MEDIA_ROOT
+IMAGES_DIR = _images_dir() or os.getenv("MEDIA_DIR") or MEDIA_ROOT
 MEDIA_ROOT = IMAGES_DIR  # ← 配信・保存とも同じ実体を指すように統一
 try:
     app.logger.info("[media] MEDIA_ROOT=%s  IMAGES_DIR=%s  URL_PREFIX=%s",
@@ -698,7 +716,11 @@ def _render_watermark_bytes(src_path: Path, mode: str) -> tuple[bytes, str]:
         return buf.read(), out_ext
 
 # --- Watermark assets (static/watermarks 以下) ---
-WATERMARK_DIR = os.getenv("WATERMARK_DIR") or os.path.join(app.static_folder, "watermarks")
+WATERMARK_DIR = (
+    _app_config("WATERMARK_DIR")
+    or os.getenv("WATERMARK_DIR")
+    or os.path.join(app.static_folder, "watermarks")
+)
 app.config.setdefault("WATERMARK_DIR", WATERMARK_DIR)
 WATERMARK_FILES = {
     "fullygoto": "wm_fullygoto.png",
@@ -4479,7 +4501,8 @@ def _ensure_wm_variants(basename: str) -> dict:
     from PIL import Image
 
     root, ext = os.path.splitext(basename)
-    src = os.path.join(IMAGES_DIR, basename)
+    images_dir = _images_dir()
+    src = os.path.join(images_dir, basename)
     out = {}
 
     if not os.path.isfile(src):
@@ -4488,7 +4511,7 @@ def _ensure_wm_variants(basename: str) -> dict:
     im = Image.open(src).convert("RGB")
     for key, spec in WM_VARIANTS.items():
         fn  = root + spec["suffix"] + ext
-        dst = os.path.join(IMAGES_DIR, fn)
+        dst = os.path.join(images_dir, fn)
         try:
             if spec["text"]:
                 im2 = _apply_text_watermark(im, spec["text"])
@@ -4523,11 +4546,7 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
         TARGET_BYTES = int(globals().get("TARGET_JPEG_MAX_BYTES", 350 * 1024))
     except Exception:
         TARGET_BYTES = 350 * 1024
-    try:
-        IMAGES_DIR = globals()["IMAGES_DIR"]
-    except KeyError:
-        # 通常はグローバルにありますが、保険
-        IMAGES_DIR = os.path.join(os.getcwd(), "data", "images")
+    images_dir = _images_dir()
     # Pillow のランチョス補間（無ければ BICUBIC）
     try:
         RESAMPLE = globals().get("RESAMPLE_LANCZOS", Image.LANCZOS)
@@ -4546,7 +4565,7 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
     if delete:
         if previous:
             try:
-                os.remove(os.path.join(IMAGES_DIR, previous))
+                os.remove(os.path.join(images_dir, previous))
             except Exception:
                 # 失敗しても致命ではない
                 pass
@@ -4658,16 +4677,16 @@ def _save_jpeg_1080_350kb(file_storage, *, previous: str|None=None, delete: bool
                 best = encode(75, cur)
 
         # 保存（.jpg 固定）
-        os.makedirs(IMAGES_DIR, exist_ok=True)
+        os.makedirs(images_dir, exist_ok=True)
         new_name = f"{uuid.uuid4().hex}.jpg"
-        save_path = os.path.join(IMAGES_DIR, new_name)
+        save_path = os.path.join(images_dir, new_name)
         with open(save_path, "wb") as wf:
             wf.write(best)
 
         # 旧ファイル削除（置換）
         if previous and previous != new_name:
             try:
-                os.remove(os.path.join(IMAGES_DIR, previous))
+                os.remove(os.path.join(images_dir, previous))
             except Exception:
                 pass
 
@@ -4836,7 +4855,7 @@ def _get_image_meta(filename: str):
     if not filename:
         return None
     try:
-        path = os.path.join(IMAGES_DIR, filename)
+        path = os.path.join(_images_dir(), filename)
         size_b = os.path.getsize(path)
     except Exception:
         return None
@@ -6463,7 +6482,7 @@ def _image_meta(img_name: str | None):
         except Exception:
             url = ""
 
-        path = os.path.join(IMAGES_DIR, img_name)
+        path = os.path.join(_images_dir(), img_name)
         if not os.path.isfile(path):
             # 存在しない場合も、UIが扱いやすい形で返す
             return {
@@ -8368,7 +8387,7 @@ def admin_restore():
         flash("アップロードファイルがありません")
         return redirect(url_for("admin_entry"))
     with zipfile.ZipFile(file, "r") as zf:
-        _safe_extractall(zf, BASE_DIR)
+        _safe_extractall(zf, _data_base_dir())
     flash("復元が完了しました。データを確認してください。")
     return redirect(url_for("admin_entry"))
 
@@ -8412,7 +8431,7 @@ def admin_restore_from_url():
     except Exception:
         MAX_BYTES = 200 * 1024 * 1024
 
-    tmpdir = os.path.join(BASE_DIR, "tmp")
+    tmpdir = os.path.join(_data_base_dir(), "tmp")
     os.makedirs(tmpdir, exist_ok=True)
     tmpzip = os.path.join(tmpdir, "restore_download.zip")
 
@@ -8439,7 +8458,7 @@ def admin_restore_from_url():
 
         # 既存の安全展開関数で復元
         with zipfile.ZipFile(tmpzip, "r") as zf:
-            _safe_extractall(zf, BASE_DIR)
+            _safe_extractall(zf, _data_base_dir())
 
         flash("URLからの復元が完了しました。データをご確認ください。")
     except Exception as e:
@@ -9675,9 +9694,10 @@ def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, m
 
     stem, _ext = os.path.splitext(os.path.basename(src_path))
     out_ext = ".jpg"  # ここを固定しないと PNG 等で quality 指定が例外になる
-    out_none = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_NONE}{out_ext}")
-    out_goto = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_GOTO}{out_ext}")
-    out_full = os.path.join(IMAGES_DIR, f"{stem}{WM_SUFFIX_FULLY}{out_ext}")
+    images_dir = _images_dir()
+    out_none = os.path.join(images_dir, f"{stem}{WM_SUFFIX_NONE}{out_ext}")
+    out_goto = os.path.join(images_dir, f"{stem}{WM_SUFFIX_GOTO}{out_ext}")
+    out_full = os.path.join(images_dir, f"{stem}{WM_SUFFIX_FULLY}{out_ext}")
 
     if force or not os.path.exists(out_none):
         _wm_save_jpeg(im, out_none, quality=quality)
@@ -9695,10 +9715,11 @@ def _wm_variants_for_path(src_path: str, force=False, scale=0.05, opacity=180, m
 def _list_source_images():
     """IMAGES_DIR から『元画像っぽいもの（__none/__goto/__fullygotoが付いてない）』だけ列挙"""
     files = []
-    if not os.path.isdir(IMAGES_DIR):
+    images_dir = _images_dir()
+    if not os.path.isdir(images_dir):
         return files
-    for fn in os.listdir(IMAGES_DIR):
-        if fn.startswith("."): 
+    for fn in os.listdir(images_dir):
+        if fn.startswith("."):
             continue
         root, ext = os.path.splitext(fn)
         if ext.lower() not in (".jpg",".jpeg",".png",".webp",".bmp",".tif",".tiff"):
@@ -9747,7 +9768,7 @@ def admin_watermark():
         targets = []
         for name in selected:
             name = os.path.basename(name)
-            targets.append((name, os.path.join(IMAGES_DIR, name)))
+            targets.append((name, os.path.join(_images_dir(), name)))
 
         for f in uploads:
             if not f or not f.filename:
@@ -9757,7 +9778,7 @@ def admin_watermark():
                 if not saved:
                     errors.append(f"{f.filename}: 保存に失敗")
                     continue
-                targets.append((saved, os.path.join(IMAGES_DIR, saved)))
+                targets.append((saved, os.path.join(_images_dir(), saved)))
             except Exception as e:
                 errors.append(f"{f.filename}: {e}")
 
@@ -9954,6 +9975,7 @@ def readyz():
     details: dict[str, object] = {}
 
     base_dir = Path(app.config.get("DATA_BASE_DIR", "/var/data"))
+    os.environ["DATA_BASE_DIR"] = str(base_dir)
     details["data_base_dir"] = str(base_dir)
 
     if not base_dir.exists():
@@ -9966,6 +9988,8 @@ def readyz():
     pamphlet_dir = Path(
         app.config.get("PAMPHLET_BASE_DIR", str(base_dir / "pamphlets"))
     )
+    if app.config.get("PAMPHLET_BASE_DIR"):
+        os.environ["PAMPHLET_BASE_DIR"] = str(pamphlet_dir)
     details["pamphlet_base_dir"] = str(pamphlet_dir)
     pamphlet_count = 0
     if not pamphlet_dir.exists():
