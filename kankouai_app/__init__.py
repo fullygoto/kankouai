@@ -237,7 +237,7 @@ def _bootstrap_storage_once(app: Flask) -> None:
         app.logger.warning("failed to reload coreapp.storage (continuing)", exc_info=True)
 
     base_dir = Path(app.config.get("DATA_BASE_DIR") or os.getenv("DATA_BASE_DIR") or DATA_BASE_DIR or "")
-    if not base_dir:
+    if not str(base_dir):
         return
 
     sentinel = base_dir / ".bootstrap.done"
@@ -303,11 +303,10 @@ def create_app() -> Flask:
             return ""
 
     # MEDIA / IMAGES は空にならないように DATA_DIR をフォールバックに使う
-    # （app.py 側で IMAGES_DIR が空だと画像保存が落ちるため）
     MEDIA_ROOT = os.getenv("MEDIA_ROOT") or app.config.get("MEDIA_ROOT") or app.config.get("IMAGES_DIR") or MEDIA_ROOT
     IMAGES_DIR = os.getenv("IMAGES_DIR") or app.config.get("IMAGES_DIR") or MEDIA_ROOT
     if not IMAGES_DIR:
-        IMAGES_DIR = os.path.join(DATA_DIR or DATA_BASE_DIR, "data", "images") if (DATA_DIR or DATA_BASE_DIR) else ""
+        IMAGES_DIR = os.path.join(DATA_DIR or DATA_BASE_DIR, "images") if (DATA_DIR or DATA_BASE_DIR) else ""
 
     app.config["MEDIA_ROOT"] = MEDIA_ROOT or IMAGES_DIR
     app.config["IMAGES_DIR"] = IMAGES_DIR
