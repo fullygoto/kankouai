@@ -69,6 +69,11 @@ class RollbackManager:
         self.manifest = BackupManifest(self.settings.manifest_path)
         self._ensure_logger()
 
+    def _db_url(self) -> str:
+        """Return configured database URL or empty string when absent."""
+
+        return os.getenv("DATABASE_URL", os.getenv("DB_URL", "")).strip()
+
     def _ensure_logger(self) -> None:
         if LOGGER.handlers:
             return
@@ -87,7 +92,14 @@ class RollbackManager:
         snapshot_id = BackupManifest.build_snapshot_id("snapshot")
         LOGGER.info("backup start id=%s", snapshot_id)
         data_path = self._create_data_snapshot(snapshot_id)
-        db_path = self._create_db_snapshot(snapshot_id)
+        db_url = self._db_url()
+        if not db_url:
+            LOGGER.warning("DATABASE_URL not set; creating empty DB snapshot")
+            db_path = self._create_empty_db_snapshot(snapshot_id)
+            alembic_revision = "none"
+        else:
+            db_path = self._create_db_snapshot(snapshot_id, db_url)
+            alembic_revision = self._current_alembic_revision()
         entry = SnapshotEntry(
             snapshot_id=snapshot_id,
             created_at=time.strftime(ISO_FORMAT, time.gmtime()),
@@ -98,7 +110,7 @@ class RollbackManager:
             db_sha256=self._sha256_file(db_path),
             db_bytes=db_path.stat().st_size,
             app_revision=self._current_git_revision(),
-            alembic_revision=self._current_alembic_revision(),
+            alembic_revision=alembic_revision,
             notes=notes,
         )
         self.manifest.append(entry)
@@ -137,8 +149,13 @@ class RollbackManager:
         os.chmod(archive_path, 0o600)
         return archive_path
 
-    def _create_db_snapshot(self, snapshot_id: str) -> Path:
-        db_url = os.getenv("DATABASE_URL", os.getenv("DB_URL", ""))
+    def _create_empty_db_snapshot(self, snapshot_id: str) -> Path:
+        archive_path = self.settings.backup_dir / f"db-{snapshot_id}.dump"
+        archive_path.write_bytes(b"")
+        os.chmod(archive_path, 0o600)
+        return archive_path
+
+    def _create_db_snapshot(self, snapshot_id: str, db_url: str) -> Path:
         archive_path = self.settings.backup_dir / f"db-{snapshot_id}.dump"
         if db_url.startswith("sqlite"):
             db_path = self._resolve_sqlite_path(db_url)
@@ -227,8 +244,14 @@ class RollbackManager:
         shutil.move(temp_dir, base)
 
     def _restore_db(self, entry: SnapshotEntry, txn_id: str) -> None:
-        db_url = os.getenv("DATABASE_URL", os.getenv("DB_URL", ""))
+        db_url = self._db_url()
+        if not db_url:
+            LOGGER.warning("DATABASE_URL not set; skipping DB restore")
+            return
         archive = Path(entry.db_path)
+        if not archive.exists():
+            LOGGER.warning("DB archive %s missing; skipping DB restore", archive)
+            return
         if db_url.startswith("sqlite"):
             db_path = self._resolve_sqlite_path(db_url)
             db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -322,7 +345,10 @@ class RollbackManager:
         raise RollbackError(f"Invalid sqlite URL: {url}")
 
     def _validate_db_archive(self, archive: Path, temp_dir: Path) -> None:
-        db_url = os.getenv("DATABASE_URL", os.getenv("DB_URL", ""))
+        db_url = self._db_url()
+        if not db_url:
+            LOGGER.warning("DATABASE_URL not set; skipping DB archive validation")
+            return
         if db_url.startswith("sqlite"):
             target_path = temp_dir / "validate.db"
             shutil.copy2(archive, target_path)
