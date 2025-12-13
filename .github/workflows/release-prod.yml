@@ -57,7 +57,7 @@ jobs:
     env:
       # CI用ダミー（release-prod.yml でも pytest が落ちないようにする）
       APP_ENV: staging
-      SECRET_KEY: test-secret
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
       OPENAI_API_KEY: test-token
       LINE_CHANNEL_SECRET: test-secret
       LINE_CHANNEL_ACCESS_TOKEN: test-token
