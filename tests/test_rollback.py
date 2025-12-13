@@ -51,6 +51,39 @@ def _read_db(path: Path) -> list[tuple[int, str]]:
     return rows
 
 
+def test_backup_without_database(tmp_path, monkeypatch):
+    data_dir = tmp_path / "var" / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "users.json").write_text(json.dumps({"alice": 1}), encoding="utf-8")
+
+    backup_dir = tmp_path / "backups"
+    monkeypatch.setenv("DATA_BASE_DIR", str(data_dir))
+    monkeypatch.setenv("BACKUP_DIR", str(backup_dir))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("ROLLBACK_CODE_CHECKOUT_ENABLED", "0")
+
+    settings = RollbackSettings(
+        data_base_dir=data_dir,
+        backup_dir=backup_dir,
+        retention=1,
+        ready_timeout=1,
+        canary_enabled=False,
+    )
+    manager = RollbackManager(settings=settings)
+
+    entry = manager.create_backup(notes="no-db")
+    assert Path(entry.db_path).exists()
+    assert entry.db_bytes == 0
+    assert entry.alembic_revision == "none"
+
+    # restore should skip DB but still restore data archive
+    (data_dir / "users.json").write_text(json.dumps({"alice": 2}), encoding="utf-8")
+    restored = manager.restore_latest_backup(reason="test", auto=False)
+    assert restored.snapshot_id == entry.snapshot_id
+    restored_data = json.loads((data_dir / "users.json").read_text(encoding="utf-8"))
+    assert restored_data == {"alice": 1}
+
+
 def test_backup_and_restore_roundtrip(rollback_env, monkeypatch):
     manager, data_dir, db_path, backup_dir = rollback_env
     entry = manager.create_backup(notes="initial")
