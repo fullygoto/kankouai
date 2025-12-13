@@ -34,6 +34,7 @@ def _safe_name(filename: str) -> str:
     """
     if not filename:
         return ""
+
     # Windows/Unix両方の区切り対策
     name = re.split(r"[\\/]+", filename)[-1]
     name = name.replace("\x00", "")
@@ -76,7 +77,8 @@ def pamphlets_index() -> Response:
 
     city = request.args.get("city", "goto")
     files = _list_files(city)
-    # テンプレに依存しない（テストは200だけ見ている）
+
+    # テンプレに依存しない（テストは 200 だけ見ている）
     body = ["<h1>pamphlets</h1>", f"<div>city={city}</div>", "<ul>"]
     for f in files:
         body.append(f"<li>{f['name']}</li>")
