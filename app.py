@@ -9785,13 +9785,11 @@ def _debug_test_weather():
     return jsonify({"ok": ok, "answer": m})
 
 
-@app.route("/healthz", methods=["GET", "HEAD"])
+@app.get("/healthz")
 def healthz():
-    """Lightweight liveness probe used by staging/production."""
+    """Lightweight liveness probe that avoids expensive checks."""
 
-    response = jsonify({"ok": True})
-    response.headers["Cache-Control"] = "no-store"
-    return response
+    return {"ok": True}, 200
 
 def _git_metadata_for_readyz() -> dict:
     info: dict[str, object] = {}
