@@ -55,13 +55,20 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     env:
-      # CI用ダミー（release-prod.yml でも pytest が落ちないようにする）
+      # ここはCI用。import時のConfigValidationで落ちないようにする
       APP_ENV: staging
-      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+
+      # Secretが未設定でもCIが止まらないようにダミーへフォールバック
+      HAS_SECRET_KEY: ${{ secrets.SECRET_KEY != '' }}
+      SECRET_KEY: ${{ secrets.SECRET_KEY || 'ci_dummy_secret_key' }}
+
+      # テスト用ダミー（実通信しない前提）
       OPENAI_API_KEY: test-token
       LINE_CHANNEL_SECRET: test-secret
       LINE_CHANNEL_ACCESS_TOKEN: test-token
+
       DATA_BASE_DIR: ${{ runner.temp }}/data
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -85,6 +92,14 @@ jobs:
       - name: Prepare writable data dirs
         run: |
           mkdir -p "$DATA_BASE_DIR/pamphlets" "$DATA_BASE_DIR/system"
+
+      - name: Verify SECRET_KEY is set (no value printed)
+        run: |
+          python - <<'PY'
+          import os
+          print("HAS_SECRET_KEY(secret exists in GitHub):", os.getenv("HAS_SECRET_KEY"))
+          print("SECRET_KEY set in env:", bool(os.getenv("SECRET_KEY")))
+          PY
 
       - name: Run pytest
         run: pytest -q
